@@ -1,12 +1,19 @@
 """Provisioner: runs in the PROVISION job (CPU, allowlisted egress, no secrets).
 
 Reads the manifest injected at /etc/p2p/provision.json (written by deterministic orchestrator
-code), then: locks the extra packages with hashes (wheels only, never sdists), installs them into
-an overlay, shallow-clones the official repository without running anything from it, downloads
-datasets as archives, builds the smoke subset, and writes everything to /mnt/run/staging/.
+code), then:
+- locks the extra packages with hashes against the runner image's constraints (wheels only,
+  never sdists), checks every transitive dependency against the denylist and typosquat list,
+  and installs only what the runner image doesn't already have into an overlay;
+- shallow-clones the official repository (no hooks, no submodules, no LFS) and records its
+  commit; nothing from the repository is executed;
+- downloads datasets as parquet archives after checking their size, builds the smoke subset
+  from the downloaded files (no dataset loading scripts, ever);
+- writes everything to /mnt/run/staging/ (and verified overlays to the shared cache).
 
-Every external command is an argv list built here (never a shell string) with a minimal
-environment. Standard library only; huggingface libraries are imported lazily for datasets.
+Every external command is an argv list built here (never a shell string), with a minimal
+environment and a timeout bounded by the job's deadline. Standard library only, except
+huggingface_hub and pyarrow imported lazily for datasets.
 Usage: python provision.py [--manifest PATH] [--staging DIR] [--cache DIR] [--work DIR]
 """
 
@@ -20,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,27 +35,38 @@ from typing import Any, Protocol
 
 SCHEMA = "p2p.provision/v1"
 RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")
+_OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
+_VER = r"[A-Za-z0-9.*+!_-]{1,40}"
 PACKAGE = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?"
-    r"(?:(?:===|==|~=|!=|<=|>=|<|>)[A-Za-z0-9.*+!_-]{1,40}"
-    r"(?:,(?:===|==|~=|!=|<=|>=|<|>)[A-Za-z0-9.*+!_-]{1,40})*)?$"
+    rf"^[A-Za-z0-9](?:[A-Za-z0-9._-]{{0,98}}[A-Za-z0-9])?(?:{_OP}{_VER}(?:,{_OP}{_VER})*)?$"
 )
 REPO_URL = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 GIT_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 HF_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?$")
-SPLIT = re.compile(r"^[A-Za-z0-9_.\[\]:%-]{1,64}$")
+SPLIT = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+SALT = re.compile(r"^[A-Za-z0-9_.:+-]{1,200}$")
+LOCK_NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", re.MULTILINE)
 MAX_PACKAGES = 30
+MAX_DATASETS = 3
+MAX_DATASET_BYTES = 20 * 2**30
 MAX_SMOKE_ROWS = 100_000
-MAX_SMOKE_BYTES = 50 * 1024 * 1024
+MAX_SMOKE_BYTES = 50 * 2**20
+MAX_REPO_BYTES = 2**30
 MAX_REQUIREMENT_FILE = 64 * 1024
+MAX_REQUIREMENT_FILES = 10
+COMMAND_TIMEOUT_S = 900
+DEFAULT_DEADLINE_S = 1080  # 18 of the 20 watchdog minutes: leave time to write the error file
+PYTHON_VERSION = "3.12"
+PYTHON_PLATFORM = "x86_64-manylinux_2_28"
+PYPI_INDEX = "https://pypi.org/simple"
 REQUIREMENT_FILES = re.compile(
     r"^(requirements[\w.-]*\.txt|pyproject\.toml|setup\.cfg|environment\.ya?ml)$"
 )
 ALLOWED_ENV = frozenset(
-    {"PATH", "HOME", "LANG", "GIT_TERMINAL_PROMPT", "UV_CACHE_DIR", "HF_HOME",
-     "HF_HUB_DISABLE_TELEMETRY", "PYTHONDONTWRITEBYTECODE", "SSL_CERT_FILE"}
+    {"PATH", "HOME", "LANG", "GIT_TERMINAL_PROMPT", "GIT_LFS_SKIP_SMUDGE", "GIT_CONFIG_NOSYSTEM",
+     "UV_CACHE_DIR", "UV_PYTHON_DOWNLOADS", "UV_NO_CONFIG", "HF_HOME", "HF_HUB_DISABLE_TELEMETRY",
+     "PYTHONDONTWRITEBYTECODE"}
 )  # fmt: skip
-COMMAND_TIMEOUT_S = 900
 
 
 class ProvisionError(Exception):
@@ -70,6 +89,9 @@ class Manifest:
     datasets: list[Dataset] = field(default_factory=list)
     smoke_dataset: str | None = None
     smoke_rows: int = 0
+    cache_salt: str = ""
+    denylist: frozenset[str] = frozenset()
+    popular: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -77,15 +99,33 @@ class Paths:
     staging: Path
     cache: Path
     work: Path
+    constraints: Path = Path("/opt/p2p/runner-constraints.txt")  # baked into the image (A-06)
 
 
 class Runner(Protocol):
     def __call__(
-        self, argv: Sequence[str], *, env: dict[str, str], cwd: Path | None = None
-    ) -> None: ...
+        self, argv: Sequence[str], *, env: dict[str, str], timeout: float, cwd: Path | None = None
+    ) -> str: ...
 
 
-DatasetFetcher = Callable[[str, "str | None", Path, "int | None"], None]
+Fetcher = Callable[[str, "str | None", Path, int], None]  # download a split's parquet files
+SmokeBuilder = Callable[[Path, Path, int], None]  # first N rows of downloaded parquet files
+
+
+def normalize(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def levenshtein(a: str, b: str, cap: int = 3) -> int:
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
+        previous = current
+    return previous[-1]
 
 
 def _fail(message: str) -> ProvisionError:
@@ -94,6 +134,15 @@ def _fail(message: str) -> ProvisionError:
 
 def validate_manifest(data: Any) -> Manifest:
     """Defence in depth: the orchestrator validated these already (package policy)."""
+    try:
+        return _validate(data)
+    except ProvisionError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as err:
+        raise _fail(f"malformed manifest ({type(err).__name__})") from None
+
+
+def _validate(data: Any) -> Manifest:
     if not isinstance(data, dict) or data.get("schema") != SCHEMA:
         raise _fail("unsupported manifest schema")
     run_id = str(data.get("run_id", ""))
@@ -105,6 +154,8 @@ def validate_manifest(data: Any) -> Manifest:
     repo = data.get("repo")
     repo_url = repo_ref = None
     if repo is not None:
+        if not isinstance(repo, dict):
+            raise _fail("invalid repo")
         repo_url = str(repo.get("url", ""))
         raw_ref = repo.get("ref")
         repo_ref = None if raw_ref is None else str(raw_ref)
@@ -112,14 +163,24 @@ def validate_manifest(data: Any) -> Manifest:
             raise _fail("repository must be a plain https://github.com/<owner>/<repo> URL")
         if repo_ref is not None and (not GIT_REF.fullmatch(repo_ref) or ".." in repo_ref):
             raise _fail("invalid git ref")
+    raw_datasets = data.get("datasets") or []
+    if len(raw_datasets) > MAX_DATASETS:
+        raise _fail(f"at most {MAX_DATASETS} datasets")
     datasets = []
-    for entry in data.get("datasets") or []:
-        if entry.get("kind") != "hf" or not HF_ID.fullmatch(str(entry.get("id", ""))):
-            raise _fail("only Hugging Face datasets with a plain id are supported")
+    for entry in raw_datasets:
+        if not isinstance(entry, dict) or entry.get("kind") != "hf":
+            raise _fail("only Hugging Face datasets are supported")
+        if not HF_ID.fullmatch(str(entry.get("id", ""))):
+            raise _fail("invalid dataset id")
         split = entry.get("split")
         if split is not None and not SPLIT.fullmatch(str(split)):
-            raise _fail("invalid dataset split")
-        datasets.append(Dataset(id=entry["id"], split=split, max_bytes=int(entry["max_bytes"])))
+            raise _fail("invalid dataset split (a plain split name, no slicing)")
+        max_bytes = int(entry["max_bytes"])
+        if not 0 < max_bytes <= MAX_DATASET_BYTES:
+            raise _fail("invalid dataset size cap")
+        datasets.append(Dataset(id=entry["id"], split=split, max_bytes=max_bytes))
+    if sum(d.max_bytes for d in datasets) > MAX_DATASET_BYTES:
+        raise _fail("datasets over the total size cap")
     smoke = data.get("smoke_subset")
     smoke_dataset, smoke_rows = None, 0
     if smoke is not None:
@@ -128,6 +189,10 @@ def validate_manifest(data: Any) -> Manifest:
             raise _fail("invalid smoke subset")
     if data.get("hf_token_secret") is not None:
         raise _fail("gated datasets are not supported: jobs never receive tokens")
+    salt = str(data.get("cache_salt", ""))
+    if salt and not SALT.fullmatch(salt):
+        raise _fail("invalid cache salt")
+    policy = data.get("policy") or {}
     return Manifest(
         run_id=run_id,
         packages=packages,
@@ -136,38 +201,51 @@ def validate_manifest(data: Any) -> Manifest:
         datasets=datasets,
         smoke_dataset=smoke_dataset,
         smoke_rows=smoke_rows,
+        cache_salt=salt,
+        denylist=frozenset(normalize(str(n)) for n in policy.get("denylist", [])),
+        popular=frozenset(normalize(str(n)) for n in policy.get("popular", [])),
     )
 
 
 def build_env(paths: Paths) -> dict[str, str]:
-    """Minimal environment for every subprocess: nothing inherited except PATH."""
+    """Minimal environment: nothing inherited except PATH; caches on local disk, never on the
+    shared mount (uv and huggingface trust their own cache metadata)."""
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(paths.work / "home"),
         "LANG": "C.UTF-8",
         "GIT_TERMINAL_PROMPT": "0",
-        "UV_CACHE_DIR": str(paths.cache / "uv"),
-        "HF_HOME": str(paths.cache / "hf"),
+        "GIT_LFS_SKIP_SMUDGE": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "UV_CACHE_DIR": str(paths.work / "uv-cache"),
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_NO_CONFIG": "1",
+        "HF_HOME": str(paths.work / "hf"),
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 
 
-def subprocess_runner(argv: Sequence[str], *, env: dict[str, str], cwd: Path | None = None) -> None:
-    subprocess.run(
-        list(argv),
-        env=env,
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=COMMAND_TIMEOUT_S,
+def subprocess_runner(  # pragma: no cover - exercised in the image
+    argv: Sequence[str], *, env: dict[str, str], timeout: float, cwd: Path | None = None
+) -> str:
+    result = subprocess.run(
+        list(argv), env=env, cwd=cwd, check=True, capture_output=True, text=True, timeout=timeout
     )
+    return result.stdout
 
 
-def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str]) -> None:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    runner(["tar", "--zstd", "-cf", str(out), "-C", str(source), "."], env=env)
+class Clock:
+    """Each command gets min(COMMAND_TIMEOUT_S, time left before the deadline)."""
+
+    def __init__(self, deadline_s: float) -> None:
+        self._end = time.monotonic() + deadline_s
+
+    def timeout(self) -> float:
+        left = self._end - time.monotonic()
+        if left <= 1:
+            raise _fail("provisioning deadline reached")
+        return min(COMMAND_TIMEOUT_S, left)
 
 
 def _sha256(path: Path) -> str:
@@ -180,6 +258,7 @@ def _sha256(path: Path) -> str:
 
 def _explain(err: subprocess.CalledProcessError, what: str) -> ProvisionError:
     stderr = (err.stderr or "").lower()
+    print(f"{what} stderr (tail):\n{(err.stderr or '')[-4000:]}", file=sys.stderr)  # no secrets
     if any(s in stderr for s in ("no wheel", "only-binary", "sdist", "no matching distribution")):
         return _fail(
             f"{what}: a requested package has no wheel for this platform (sdists are never built)"
@@ -189,9 +268,64 @@ def _explain(err: subprocess.CalledProcessError, what: str) -> ProvisionError:
     return _fail(f"{what} failed (exit {err.returncode})")
 
 
+def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: Clock) -> None:
+    """Pack on local disk first, then copy once to the destination (FUSE mounts are slow)."""
+    local = source.parent / f".{out.name}.local"
+    runner(
+        ["tar", "-I", "zstd -T0", "--exclude=.cache", "-cf", str(local), "-C", str(source), "."],
+        env=env,
+        timeout=clock.timeout(),
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(local, out)
+    local.unlink(missing_ok=True)
+
+
+def _lock_names(lock: str) -> list[str]:
+    return [normalize(m.group(1)) for m in LOCK_NAME.finditer(lock)]
+
+
+def _check_transitive(manifest: Manifest, lock: str) -> None:
+    """Every resolved dependency, not only the requested names, passes denylist + typosquat."""
+    requested = {normalize(re.split(_OP, p)[0]) for p in manifest.packages}
+    for name in _lock_names(lock):
+        if name in manifest.denylist:
+            raise _fail(f"dependency {name} is not allowed")
+        if name in requested or name in manifest.popular:
+            continue
+        close = [p for p in manifest.popular if levenshtein(name, p) <= 2]
+        if close:
+            raise _fail(f"dependency {name} looks like a typosquat of {sorted(close)[0]}")
+
+
+def _filter_lock(lock: str, constraints: Path) -> str:
+    """Drop lock entries the runner image already provides (pinned in its constraints)."""
+    provided = set()
+    if constraints.is_file():
+        provided = set(_lock_names(constraints.read_text(encoding="utf-8")))
+    blocks = re.split(r"\n(?=[A-Za-z0-9])", lock.strip())
+    keep = [
+        b for b in blocks
+        if b and (m := LOCK_NAME.match(b)) and normalize(m.group(1)) not in provided
+    ]  # fmt: skip
+    return "\n".join(keep) + ("\n" if keep else "")
+
+
+def _publish_to_cache(overlay: Path, cached: Path, digest: str, run_id: str) -> None:
+    """Atomic publish (temp names, rename once complete): survives kills and concurrent runs."""
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    key = cached.name.removesuffix(".tar.zst")
+    tmp = cached.with_name(f".tmp-{run_id}-{key}.tar.zst")
+    tmp_sidecar = cached.with_name(f".tmp-{run_id}-{key}.sha256")
+    shutil.copyfile(overlay, tmp)
+    tmp_sidecar.write_text(digest, encoding="utf-8")
+    tmp.replace(cached)
+    tmp_sidecar.replace(cached.with_name(f"{key}.sha256"))
+
+
 def lock_and_overlay(
-    manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str]
-) -> tuple[str, bool]:
+    manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
+) -> tuple[str, bool, str]:
     work = paths.work / "overlay"
     work.mkdir(parents=True, exist_ok=True)
     requirements_in = paths.work / "requirements.in"
@@ -200,42 +334,61 @@ def lock_and_overlay(
     if manifest.packages:
         try:
             runner(
-                ["uv", "pip", "compile", "--only-binary=:all:", "--generate-hashes", "--no-header",
-                 "-o", str(lock), str(requirements_in)],
+                ["uv", "pip", "compile", "--no-config", "--index-url", PYPI_INDEX,
+                 "--only-binary=:all:", "--generate-hashes", "--no-header",
+                 "--python-version", PYTHON_VERSION, "--python-platform", PYTHON_PLATFORM,
+                 "-c", str(paths.constraints), "-o", str(lock), str(requirements_in)],
                 env=env,
+                timeout=clock.timeout(),
             )  # fmt: skip
         except subprocess.CalledProcessError as err:
             raise _explain(err, "locking packages") from None
     else:
         lock.write_text("", encoding="utf-8")
-    lock_sha = _sha256(lock)
-    cached = paths.cache / "overlays" / f"{lock_sha}.tar.zst"
+    full_lock = lock.read_text(encoding="utf-8")
+    _check_transitive(manifest, full_lock)
+    install_lock = paths.work / "lock.install.txt"
+    install_lock.write_text(_filter_lock(full_lock, paths.constraints), encoding="utf-8")
+
+    salted = install_lock.read_text(encoding="utf-8") + "\n" + manifest.cache_salt
+    key = hashlib.sha256(salted.encode()).hexdigest()
+    cached = paths.cache / "overlays" / f"{key}.tar.zst"
+    sidecar = cached.with_name(f"{key}.sha256")
     overlay = paths.staging / "overlay.tar.zst"
-    if cached.is_file():
-        shutil.copyfile(cached, overlay)
-        return lock_sha, True
-    if manifest.packages:
+    if cached.is_file() and sidecar.is_file():
+        local = paths.work / "overlay-cached.tar.zst"
+        shutil.copyfile(cached, local)
+        if _sha256(local) == sidecar.read_text(encoding="utf-8").strip():  # never serve a
+            shutil.copyfile(local, overlay)  # truncated or replaced entry
+            return key, True, _sha256(overlay)
+    if install_lock.read_text(encoding="utf-8").strip():
         try:
             runner(
-                ["uv", "pip", "install", "--only-binary=:all:", "--require-hashes", "--no-deps",
-                 "-r", str(lock), "--target", str(work)],
+                ["uv", "pip", "install", "--no-config", "--index-url", PYPI_INDEX,
+                 "--only-binary=:all:", "--require-hashes", "--no-deps",
+                 "-r", str(install_lock), "--target", str(work)],
                 env=env,
+                timeout=clock.timeout(),
             )  # fmt: skip
         except subprocess.CalledProcessError as err:
             raise _explain(err, "installing packages") from None
-    _pack(work, overlay, runner, env)
-    cached.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(overlay, cached)
-    return lock_sha, False
+    _pack(work, overlay, runner, env, clock)
+    digest = _sha256(overlay)
+    _publish_to_cache(overlay, cached, digest, manifest.run_id)
+    return key, False, digest
+
+
+def _size(path: Path) -> int:
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
 
 
 def clone_repo(
-    manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str]
-) -> dict[str, str]:
-    """Shallow clone at a ref; nothing from the repository is executed. Returns the text of its
-    requirement files (the control plane parses them for the package policy)."""
+    manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
+) -> tuple[dict[str, str], str | None]:
+    """Shallow clone; nothing from the repository is executed. Returns the text of its
+    requirement files (parsed by the control plane) and the resolved commit."""
     if manifest.repo_url is None:
-        return {}
+        return {}, None
     dest = paths.work / "repo"
     branch = ["--branch", manifest.repo_ref] if manifest.repo_ref else []  # None: default branch
     try:
@@ -244,76 +397,143 @@ def clone_repo(
              "-c", "advice.detachedHead=false", "clone", "--depth", "1", "--single-branch",
              "--no-tags", *branch, "--", manifest.repo_url, str(dest)],
             env=env,
+            timeout=clock.timeout(),
         )  # fmt: skip
+        commit = runner(
+            ["git", "-C", str(dest), "rev-parse", "HEAD"], env=env, timeout=clock.timeout()
+        )
     except subprocess.CalledProcessError as err:
         raise _fail(f"cloning the repository failed (exit {err.returncode})") from None
-    files = {}
+    if _size(dest) > MAX_REPO_BYTES:
+        raise _fail("the repository is larger than 1 GiB")
+    files: dict[str, str] = {}
     for path in sorted(dest.glob("*")):
+        if len(files) >= MAX_REQUIREMENT_FILES:
+            break
         if path.is_symlink() or not path.is_file() or not REQUIREMENT_FILES.match(path.name):
             continue
         if path.stat().st_size <= MAX_REQUIREMENT_FILE:
             files[path.name] = path.read_text(encoding="utf-8", errors="replace")
-    _pack(dest, paths.staging / "repo.tar.zst", runner, env)
-    return files
+    _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
+    resolved = commit.strip()
+    return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
 
 
-def hf_fetch(
-    dataset_id: str, split: str | None, dest: Path, rows: int | None
-) -> None:  # pragma: no cover
-    """Default dataset fetcher (runs only inside the provisioner image)."""
-    if rows is None:
-        from huggingface_hub import snapshot_download
+def hf_fetch(  # pragma: no cover - runs in the image
+    dataset_id: str, split: str | None, dest: Path, max_bytes: int
+) -> None:
+    """Download only the split's parquet files, after checking their total size."""
+    from huggingface_hub import HfApi, snapshot_download
 
-        snapshot_download(repo_id=dataset_id, repo_type="dataset", local_dir=dest)
-        return
-    from datasets import load_dataset
+    split_name = split or "train"
+    info = HfApi().dataset_info(dataset_id, files_metadata=True)
+    wanted = [
+        s for s in info.siblings or []
+        if s.rfilename.endswith(".parquet") and split_name in s.rfilename
+    ]  # fmt: skip
+    if not wanted:
+        raise _fail(f"dataset {dataset_id} has no parquet files for split {split_name}")
+    total = sum(s.size or 0 for s in wanted)
+    if total > max_bytes:
+        raise _fail(f"dataset {dataset_id} split {split_name} is {total} bytes, over its cap")
+    dest.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(dest).free < 3 * total:  # raw files + archive + headroom
+        raise _fail("not enough local disk for the dataset")
+    snapshot_download(
+        repo_id=dataset_id,
+        repo_type="dataset",
+        local_dir=dest,
+        allow_patterns=[s.rfilename for s in wanted],
+    )
+
+
+def parquet_smoke(source: Path, dest: Path, rows: int) -> None:  # pragma: no cover - in image
+    """First `rows` rows of the downloaded parquet files: no dataset code is ever executed."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
     dest.mkdir(parents=True, exist_ok=True)
-    subset = load_dataset(dataset_id, split=f"{split or 'train'}[:{rows}]")
-    subset.to_parquet(str(dest / "smoke.parquet"))
-
-
-def _size(path: Path) -> int:
-    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+    tables, taken = [], 0
+    for path in sorted(source.rglob("*.parquet")):
+        table = pq.read_table(path)
+        tables.append(table.slice(0, rows - taken))
+        taken += min(rows - taken, table.num_rows)
+        if taken >= rows:
+            break
+    if not tables:
+        raise _fail("no parquet rows for the smoke subset")
+    pq.write_table(pa.concat_tables(tables), dest / "smoke.parquet")
 
 
 def fetch_datasets(
-    manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], fetch: DatasetFetcher
+    manifest: Manifest,
+    paths: Paths,
+    runner: Runner,
+    env: dict[str, str],
+    clock: Clock,
+    fetch: Fetcher,
+    smoke: SmokeBuilder,
 ) -> list[str]:
     names = []
     for dataset in manifest.datasets:
+        clock.timeout()
         name = dataset.id.replace("/", "__")
         dest = paths.work / "data" / name
-        fetch(dataset.id, dataset.split, dest, None)
+        fetch(dataset.id, dataset.split, dest, dataset.max_bytes)
         if _size(dest) > dataset.max_bytes:
             raise _fail(f"dataset {dataset.id} is larger than its {dataset.max_bytes}-byte cap")
-        _pack(dest, paths.staging / "data" / f"{name}.tar.zst", runner, env)
+        _pack(dest, paths.staging / "data" / f"{name}.tar.zst", runner, env, clock)
         names.append(name)
     if manifest.smoke_dataset:
-        dest = paths.work / "data" / "smoke"
-        split = next((d.split for d in manifest.datasets if d.id == manifest.smoke_dataset), None)
-        fetch(manifest.smoke_dataset, split, dest, manifest.smoke_rows)
+        source = paths.work / "data" / manifest.smoke_dataset.replace("/", "__")
+        if not source.is_dir():
+            raise _fail("the smoke subset must come from one of the plan's datasets")
+        dest = paths.work / "smoke"
+        smoke(source, dest, manifest.smoke_rows)
         if _size(dest) > MAX_SMOKE_BYTES:
             raise _fail("smoke subset over 50 MB: lower smoke_subset.rows")
-        _pack(dest, paths.staging / "data" / "smoke.tar.zst", runner, env)
+        _pack(dest, paths.staging / "data" / "smoke.tar.zst", runner, env, clock)
     return names
 
 
+def _clean_staging(staging: Path) -> None:
+    """Outputs of an earlier attempt must never be mistaken for this one's."""
+    for name in (
+        "provision_error.json",
+        "provision_report.json",
+        "overlay.tar.zst",
+        "repo.tar.zst",
+    ):
+        (staging / name).unlink(missing_ok=True)
+    shutil.rmtree(staging / "data", ignore_errors=True)
+
+
 def provision(
-    manifest: Manifest, paths: Paths, runner: Runner, fetch: DatasetFetcher
+    manifest: Manifest,
+    paths: Paths,
+    runner: Runner,
+    fetch: Fetcher,
+    smoke: SmokeBuilder,
+    *,
+    deadline_s: float = DEFAULT_DEADLINE_S,
 ) -> dict[str, Any]:
+    clock = Clock(deadline_s)
     for directory in (paths.staging, paths.cache, paths.work, paths.work / "home"):
         directory.mkdir(parents=True, exist_ok=True)
+    _clean_staging(paths.staging)
     env = build_env(paths)
-    lock_sha, cache_hit = lock_and_overlay(manifest, paths, runner, env)
-    requirement_files = clone_repo(manifest, paths, runner, env)
-    datasets = fetch_datasets(manifest, paths, runner, env, fetch)
+    cache_key, cache_hit, overlay_sha = lock_and_overlay(manifest, paths, runner, env, clock)
+    requirement_files, commit = clone_repo(manifest, paths, runner, env, clock)
+    datasets = fetch_datasets(manifest, paths, runner, env, clock, fetch, smoke)
     report = {
         "schema": "p2p.provision-report/v1",
         "run_id": manifest.run_id,
-        "lock_sha256": lock_sha,
+        "lock_sha256": _sha256(paths.staging / "lock.txt"),
+        "overlay_cache_key": cache_key,
         "overlay_cache_hit": cache_hit,
+        "overlay_sha256": overlay_sha,
         "repo": manifest.repo_url is not None,
+        "repo_commit": commit,
         "requirement_files": requirement_files,
         "datasets": datasets,
         "smoke": manifest.smoke_dataset is not None,
@@ -324,7 +544,7 @@ def provision(
     return report
 
 
-def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - exercised in the image
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Paper2Proof provisioner")
     parser.add_argument("--manifest", default="/etc/p2p/provision.json")
     parser.add_argument("--staging", default="/mnt/run/staging")
@@ -334,14 +554,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - exerci
     paths = Paths(staging=Path(args.staging), cache=Path(args.cache), work=Path(args.work))
     try:
         manifest = validate_manifest(json.loads(Path(args.manifest).read_text(encoding="utf-8")))
-        provision(manifest, paths, subprocess_runner, hf_fetch)
-    except (ProvisionError, OSError, ValueError, subprocess.TimeoutExpired) as err:
-        paths.staging.mkdir(parents=True, exist_ok=True)
+        provision(manifest, paths, subprocess_runner, hf_fetch, parquet_smoke)
+    except Exception as err:  # any failure becomes a readable error file, never a bare crash
         message = (
             str(err)
             if isinstance(err, ProvisionError)
             else f"provisioning failed: {type(err).__name__}"
         )
+        paths.staging.mkdir(parents=True, exist_ok=True)
         (paths.staging / "provision_error.json").write_text(
             json.dumps({"error": message}), encoding="utf-8"
         )

@@ -1,6 +1,7 @@
 """Provisioner logic with a fake command runner (no network, no docker). The real-image test
 (`pytest -m docker`) lands with the provisioner image in A-06."""
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -28,6 +29,11 @@ def _load() -> ModuleType:
 
 provision = _load()
 RUN = "r_01jb7z00000000000000000000"
+LOCK = (
+    "tabulate==0.9.0 \\\n    --hash=sha256:aaa\n"
+    "torch==2.4.0 \\\n    --hash=sha256:bbb\n"
+    "nvidia-cublas-cu12==12.1.3.1 \\\n    --hash=sha256:ccc\n"
+)
 
 
 def manifest(**overrides: Any) -> dict[str, Any]:
@@ -39,6 +45,11 @@ def manifest(**overrides: Any) -> dict[str, Any]:
         "datasets": [{"kind": "hf", "id": "uoft-cs/cifar10", "split": "train", "max_bytes": 10**9}],
         "smoke_subset": {"dataset": "uoft-cs/cifar10", "rows": 512},
         "hf_token_secret": None,
+        "cache_salt": "py3.12-x86_64-manylinux_2_28-sha256:" + "d" * 64,
+        "policy": {
+            "denylist": ["pip", "uv", "setuptools", "wheel"],
+            "popular": ["requests", "numpy"],
+        },
     }
     data.update(overrides)
     return data
@@ -47,40 +58,69 @@ def manifest(**overrides: Any) -> dict[str, Any]:
 class FakeRunner:
     """Records argv and fakes the side effects of uv, git and tar."""
 
-    def __init__(self, fail_on: str | None = None, stderr: str = "") -> None:
-        self.calls: list[tuple[list[str], dict[str, str]]] = []
+    def __init__(self, fail_on: str | None = None, stderr: str = "", lock: str = LOCK) -> None:
+        self.calls: list[tuple[list[str], dict[str, str], float]] = []
         self.fail_on = fail_on
         self.stderr = stderr
+        self.lock = lock
 
     def __call__(
-        self, argv: Sequence[str], *, env: dict[str, str], cwd: Path | None = None
-    ) -> None:
+        self, argv: Sequence[str], *, env: dict[str, str], timeout: float, cwd: Path | None = None
+    ) -> str:
         argv = list(argv)
-        self.calls.append((argv, env))
+        self.calls.append((argv, env, timeout))
         if self.fail_on and self.fail_on in argv:
             raise subprocess.CalledProcessError(1, argv, output="", stderr=self.stderr)
         if argv[:3] == ["uv", "pip", "compile"]:
-            Path(argv[argv.index("-o") + 1]).write_text("tabulate==0.9.0 --hash=sha256:abc\n")
+            Path(argv[argv.index("-o") + 1]).write_text(self.lock)
         elif argv[:3] == ["uv", "pip", "install"]:
             target = Path(argv[argv.index("--target") + 1])
             (target / "tabulate").mkdir(parents=True)
         elif argv[0] == "tar":
-            Path(argv[argv.index("-cf") + 1]).write_bytes(b"zstd")
+            Path(argv[argv.index("-cf") + 1]).write_bytes(b"zstd:" + " ".join(argv).encode())
         elif "clone" in argv:
             dest = Path(argv[-1])
             dest.mkdir(parents=True)
             (dest / "requirements.txt").write_text("torch\neinops==0.8\n")
+        elif "rev-parse" in argv:
+            return "0123456789abcdef0123456789abcdef01234567\n"
+        return ""
 
 
-def fake_datasets(dataset_id: str, split: str | None, dest: Path, rows: int | None) -> None:
+def fake_fetch(dataset_id: str, split: str | None, dest: Path, max_bytes: int) -> None:
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / "part-0.parquet").write_bytes(b"PAR1")
+    (dest / "train-00000-of-00001.parquet").write_bytes(b"PAR1")
 
 
-def _paths(tmp_path: Path) -> Any:
+def fake_smoke(source: Path, dest: Path, rows: int) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "smoke.parquet").write_bytes(b"PAR1-smoke")
+
+
+def _paths(tmp_path: Path, name: str = "") -> Any:
+    constraints = tmp_path / "runner-constraints.txt"
+    constraints.write_text("torch==2.4.0\nnumpy==2.1.0\nnvidia-cublas-cu12==12.1.3.1\n")
     return provision.Paths(
-        staging=tmp_path / "staging", cache=tmp_path / "cache", work=tmp_path / "work"
+        staging=tmp_path / f"staging{name}",
+        cache=tmp_path / "cache",
+        work=tmp_path / f"work{name}",
+        constraints=constraints,
     )
+
+
+def _provision(
+    tmp_path: Path, runner: FakeRunner | None = None, name: str = "", **overrides: Any
+) -> Any:
+    paths = _paths(tmp_path, name)
+    report = provision.provision(
+        provision.validate_manifest(manifest(**overrides)),
+        paths,
+        runner or FakeRunner(),
+        fake_fetch,
+        fake_smoke,
+        deadline_s=1080,
+    )
+    return report, paths
 
 
 @pytest.mark.parametrize(
@@ -98,8 +138,18 @@ def _paths(tmp_path: Path) -> Any:
         {"repo": {"url": "https://github.com/org/repo", "ref": "../../x"}},
         {"datasets": [{"kind": "hf", "id": "../etc", "split": "train", "max_bytes": 1}]},
         {"datasets": [{"kind": "url", "id": "https://x", "split": None, "max_bytes": 1}]},
+        {"datasets": [{"kind": "hf", "id": "a/b", "split": "train[:10%]", "max_bytes": 1}]},
+        {"datasets": [{"kind": "hf", "id": "a/b", "split": "train", "max_bytes": -1}]},
+        {"datasets": [{"kind": "hf", "id": "a/b", "split": "train", "max_bytes": 30 * 2**30}]},
+        {
+            "datasets": [
+                {"kind": "hf", "id": f"a/b{i}", "split": "train", "max_bytes": 1} for i in range(4)
+            ]
+        },
         {"smoke_subset": {"dataset": "uoft-cs/cifar10", "rows": 10**7}},
         {"hf_token_secret": "hf_abcdefghijklmnop"},
+        {"repo": "not-a-dict"},
+        {"datasets": ["not-a-dict"]},
     ],
 )
 def test_manifest_validation_rejects_unsafe_inputs(overrides: dict[str, Any]) -> None:
@@ -107,26 +157,38 @@ def test_manifest_validation_rejects_unsafe_inputs(overrides: dict[str, Any]) ->
         provision.validate_manifest(manifest(**overrides))
 
 
-def test_wheels_only_with_hashes(tmp_path: Path) -> None:
+def test_wheels_only_with_hashes_constrained_to_the_runner(tmp_path: Path) -> None:
     runner = FakeRunner()
-    provision.provision(
-        provision.validate_manifest(manifest()), _paths(tmp_path), runner, fake_datasets
-    )
-    argvs = [a for a, _ in runner.calls]
+    _, paths = _provision(tmp_path, runner)
+    argvs = [a for a, _, _ in runner.calls]
     compile_cmd = next(a for a in argvs if a[:3] == ["uv", "pip", "compile"])
     install_cmd = next(a for a in argvs if a[:3] == ["uv", "pip", "install"])
-    assert "--only-binary=:all:" in compile_cmd and "--generate-hashes" in compile_cmd
-    assert "--only-binary=:all:" in install_cmd and "--require-hashes" in install_cmd
-    requirements_in = Path(compile_cmd[-1]).read_text().splitlines()
-    assert requirements_in == ["tabulate==0.9.0", "einops"]
+    for flag in ("--only-binary=:all:", "--generate-hashes", "--no-config", "--python-version"):
+        assert flag in compile_cmd
+    assert compile_cmd[compile_cmd.index("-c") + 1] == str(paths.constraints)
+    assert compile_cmd[compile_cmd.index("--index-url") + 1] == "https://pypi.org/simple"
+    for flag in ("--only-binary=:all:", "--require-hashes", "--no-deps", "--no-config"):
+        assert flag in install_cmd
+    # Packages already in the runner image are dropped from what gets installed.
+    install_lock = Path(install_cmd[install_cmd.index("-r") + 1]).read_text()
+    assert "tabulate==0.9.0" in install_lock
+    assert "torch" not in install_lock and "nvidia" not in install_lock
+    assert (paths.staging / "lock.txt").read_text() == LOCK  # full lock kept for the bundle
+
+
+def test_transitive_dependencies_are_checked(tmp_path: Path) -> None:
+    bad = "tabulate==0.9.0 \\\n    --hash=sha256:a\nreqeusts==1.0 \\\n    --hash=sha256:b\n"
+    with pytest.raises(provision.ProvisionError, match="reqeusts"):
+        _provision(tmp_path, FakeRunner(lock=bad))
+    denied = "tabulate==0.9.0 \\\n    --hash=sha256:a\nsetuptools==70.0 \\\n    --hash=sha256:b\n"
+    with pytest.raises(provision.ProvisionError, match="setuptools"):
+        _provision(tmp_path, FakeRunner(lock=denied), name="2")
 
 
 def test_repo_is_cloned_shallow_without_hooks_or_setup(tmp_path: Path) -> None:
     runner = FakeRunner()
-    provision.provision(
-        provision.validate_manifest(manifest()), _paths(tmp_path), runner, fake_datasets
-    )
-    clone, env = next((a, e) for a, e in runner.calls if "clone" in a)
+    report, _ = _provision(tmp_path, runner)
+    clone, env, _ = next(c for c in runner.calls if "clone" in c[0])
     assert clone[:1] == ["git"]
     for flag in (
         "--depth",
@@ -139,25 +201,34 @@ def test_repo_is_cloned_shallow_without_hooks_or_setup(tmp_path: Path) -> None:
     assert clone[clone.index("--") + 1] == "https://github.com/org/repo"
     assert "--recurse-submodules" not in clone
     assert env["GIT_TERMINAL_PROMPT"] == "0"
-    assert not any(a[:2] == ["pip", "install"] or "setup.py" in a for a, _ in runner.calls)
+    assert env["GIT_LFS_SKIP_SMUDGE"] == "1"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert report["repo_commit"] == "0123456789abcdef0123456789abcdef01234567"
+    assert not any("setup.py" in " ".join(a) for a, _, _ in runner.calls)
 
 
-def test_subprocess_env_carries_no_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_subprocess_env_is_minimal_and_caches_are_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("NEBIUS_API_KEY", "should-never-leak")
     runner = FakeRunner()
-    provision.provision(
-        provision.validate_manifest(manifest()), _paths(tmp_path), runner, fake_datasets
-    )
-    for _, env in runner.calls:
+    _, paths = _provision(tmp_path, runner)
+    for _, env, _ in runner.calls:
         assert "NEBIUS_API_KEY" not in env
         assert set(env) <= provision.ALLOWED_ENV
+        assert env["UV_PYTHON_DOWNLOADS"] == "never"
+        assert env["UV_CACHE_DIR"].startswith(str(paths.work))  # never on the shared mount
+        assert env["HF_HOME"].startswith(str(paths.work))
+
+
+def test_every_command_is_bounded_by_the_deadline(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    _provision(tmp_path, runner)
+    assert all(0 < timeout <= 900 for _, _, timeout in runner.calls)
 
 
 def test_outputs_and_report(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
-    report = provision.provision(
-        provision.validate_manifest(manifest()), paths, FakeRunner(), fake_datasets
-    )
+    report, paths = _provision(tmp_path)
     for name in (
         "lock.txt",
         "overlay.tar.zst",
@@ -169,22 +240,47 @@ def test_outputs_and_report(tmp_path: Path) -> None:
     stored = json.loads((paths.staging / "provision_report.json").read_text())
     assert stored == report
     assert stored["requirement_files"]["requirements.txt"].startswith("torch")
-    assert len(stored["lock_sha256"]) == 64
+    overlay = (paths.staging / "overlay.tar.zst").read_bytes()
+    assert stored["overlay_sha256"] == hashlib.sha256(overlay).hexdigest()
 
 
-def test_overlay_cache_hit_skips_install(tmp_path: Path) -> None:
+def test_stale_outputs_of_a_previous_attempt_are_removed(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    provision.provision(provision.validate_manifest(manifest()), paths, FakeRunner(), fake_datasets)
+    (paths.staging / "data").mkdir(parents=True)
+    (paths.staging / "provision_error.json").write_text('{"error": "old"}')
+    (paths.staging / "data" / "old-dataset.tar.zst").write_bytes(b"x")
+    provision.provision(
+        provision.validate_manifest(manifest()),
+        paths,
+        FakeRunner(),
+        fake_fetch,
+        fake_smoke,
+        deadline_s=1080,
+    )
+    assert not (paths.staging / "provision_error.json").exists()
+    assert not (paths.staging / "data" / "old-dataset.tar.zst").exists()
+
+
+def test_overlay_cache_hit_skips_install_and_is_verified(tmp_path: Path) -> None:
+    _provision(tmp_path)
     second = FakeRunner()
-    paths2 = provision.Paths(
-        staging=tmp_path / "staging2", cache=paths.cache, work=tmp_path / "work2"
-    )
-    report = provision.provision(
-        provision.validate_manifest(manifest()), paths2, second, fake_datasets
-    )
+    report, _ = _provision(tmp_path, second, name="2")
     assert report["overlay_cache_hit"] is True
-    assert not any(a[:3] == ["uv", "pip", "install"] for a, _ in second.calls)
-    assert (paths2.staging / "overlay.tar.zst").is_file()
+    assert not any(a[:3] == ["uv", "pip", "install"] for a, _, _ in second.calls)
+    # A corrupted cache entry is detected and rebuilt, never served.
+    entry = next((tmp_path / "cache" / "overlays").glob("*.tar.zst"))
+    entry.write_bytes(b"truncated")
+    third = FakeRunner()
+    report3, _ = _provision(tmp_path, third, name="3")
+    assert report3["overlay_cache_hit"] is False
+    assert any(a[:3] == ["uv", "pip", "install"] for a, _, _ in third.calls)
+    assert not list((tmp_path / "cache" / "overlays").glob(".tmp-*"))
+
+
+def test_cache_key_includes_the_salt(tmp_path: Path) -> None:
+    _provision(tmp_path)
+    report, _ = _provision(tmp_path, name="2", cache_salt="py3.12-other-image")
+    assert report["overlay_cache_hit"] is False
 
 
 def test_sdist_only_packages_fail_with_a_clear_error(tmp_path: Path) -> None:
@@ -192,20 +288,36 @@ def test_sdist_only_packages_fail_with_a_clear_error(tmp_path: Path) -> None:
         fail_on="compile", stderr="no wheels with a matching platform tag (sdist only)"
     )
     with pytest.raises(provision.ProvisionError, match="no wheel"):
-        provision.provision(
-            provision.validate_manifest(manifest()), _paths(tmp_path), runner, fake_datasets
-        )
+        _provision(tmp_path, runner)
 
 
 def test_no_packages_no_repo_still_works(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
-    report = provision.provision(
-        provision.validate_manifest(
-            manifest(packages=[], repo=None, datasets=[], smoke_subset=None)
-        ),
-        paths,
-        FakeRunner(),
-        fake_datasets,
-    )
+    report, paths = _provision(tmp_path, packages=[], repo=None, datasets=[], smoke_subset=None)
     assert report["repo"] is False
     assert (paths.staging / "overlay.tar.zst").is_file()  # empty overlay, same contract
+
+
+def test_oversized_repo_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision, "MAX_REPO_BYTES", 5)
+    with pytest.raises(provision.ProvisionError, match="repository"):
+        _provision(tmp_path)
+
+
+def test_main_writes_an_error_file_for_any_failure(tmp_path: Path) -> None:
+    bad = tmp_path / "manifest.json"
+    bad.write_text(json.dumps({"schema": "p2p.provision/v1", "run_id": RUN, "repo": 5}))
+    staging = tmp_path / "staging"
+    code = provision.main(
+        [
+            "--manifest",
+            str(bad),
+            "--staging",
+            str(staging),
+            "--cache",
+            str(tmp_path / "c"),
+            "--work",
+            str(tmp_path / "w"),
+        ]
+    )
+    assert code == 1
+    assert "error" in json.loads((staging / "provision_error.json").read_text())
