@@ -28,13 +28,18 @@ Before creating, call get-by-name. If the resource exists and is not terminal, r
 
 ```
 staging/
-  manifest.provision.json      # written by orchestrator before provisioning
-  lock.txt                     # uv pip compile output with hashes
-  overlay.tar.zst              # venv --system-site-packages, extra packages only
+  lock.txt                     # uv pip compile output with hashes (full lock, for the bundle)
+  overlay.tar.zst              # `uv pip install --target` dir: only packages the runner lacks
   repo.tar.zst                 # official repo, cloned, NOT installed
+  repo_files.json              # bounded text snapshot of the clone for the Coder's read_file
   data/<name>.tar.zst          # datasets as archives (never many small files)
   data/smoke.tar.zst           # ≤ 50 MB subset for smoke tests
-  workspace/                   # code written by the Coder (synced by orchestrator)
+  provision_report.json        # digests and metadata; validated and copied by the control plane
+  provision_error.json         # the provisioner's own error message on failure
+  workspace/                   # code written by the Coder (written by the orchestrator at finish)
+smoke/<iteration>/
+  workspace.tar                # the Coder's workspace, sha256 in the injected smoke manifest
+  result.json                  # exit code, output tails, metrics, the manifest's nonce
 results/<attempt>/
   results.json                 # see schemas/results.schema.json
   live.log                     # flushed every 10 s by the runner
@@ -43,7 +48,14 @@ results/<attempt>/
   seeds/<seed>/metrics.json    # produced by the experiment script
 ```
 
-Shared read-only cache bucket `p2p-cache`: `wheels/<sha256>.whl`, `datasets/<sha256>.tar.zst`.
+Shared cache bucket `p2p-cache` (read-write only for PROVISION, read-only for smoke and exec):
+`overlays/<key>.tar.zst` with key = sha256(install lock + cache salt + constraints sha256). A hit
+is served only when the control plane trusts the digest (`overlay_digests` table, first writer
+wins, sent in the manifest as `trusted_overlays`); the bucket itself is never the authority.
+
+Every file in this bucket can be written by an earlier smoke job (it mounts the bucket
+read-write until S-11 shows a read-only/prefix mount works), so the control plane reads it as
+untrusted input and the jobs check digests that travel in their injected manifests.
 
 ## 4. Package policy (`app/execution/package_policy.py`)
 
@@ -62,19 +74,35 @@ The provisioner installs with: `uv pip install --only-binary=:all: --require-has
 
 ## 5. Manifests
 
-`manifest.provision.json` (written by the orchestrator, read by the provisioner):
+The provision manifest is injected at `/etc/p2p/provision.json` (read-only, ≤ 64 KiB), not
+written to the bucket:
 
 ```json
 {
   "schema": "p2p.provision/v1",
   "run_id": "r_01jb7z...",
   "packages": ["timm==1.0.9", "einops"],
-  "repo": {"url": "https://github.com/org/repo", "ref": "v1.0"},
+  "repo": {"url": "https://github.com/org/repo", "ref": null},
   "datasets": [{"kind": "hf", "id": "uoft-cs/cifar10", "split": "train", "max_bytes": 2000000000}],
   "smoke_subset": {"dataset": "uoft-cs/cifar10", "rows": 512},
-  "hf_token_secret": null
+  "hf_token_secret": null,
+  "cache_salt": "sha256:<runner>+sha256:<provisioner>+py3.12+x86_64-manylinux_2_28",
+  "policy": {"denylist": ["pip", "..."], "popular": ["numpy", "..."]},
+  "trusted_overlays": {"<cache key>": "<sha256>"},
+  "deadline_unix": 1792000000.0
 }
 ```
+
+`deadline_unix` is 2 minutes before the 20-minute watchdog, counted from the job's submission
+(after the gateway is up); the provisioner exits with its error file at that time. `ref: null`
+means the default branch. Every resolved dependency (not only the requested names) passes the
+denylist and typosquat checks, except packages the runner image already provides.
+
+The smoke manifest (`/etc/p2p/smoke.json`, CPU smoke jobs): `{schema: "p2p.smoke/v1", run_id,
+iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce}`. `argv` is
+`python <script> --seed 0 --out out --smoke [args]`; args may never set or abbreviate
+`--seed`, `--out` or `--smoke` (also `-s`, `-o`, clusters and `@file`), here and in the exec
+manifest. A result counts only when the job SUCCEEDED and `result.json` echoes the nonce.
 
 The exec manifest is in `schemas/manifest.schema.json` (injected with `--inject-file`, ≤ 64 KiB).
 
@@ -116,7 +144,7 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 | Platform / preset | `cpu-d3` / `4vcpu-16gb` | `gpu-l40s-a` / `1gpu-8vcpu-32gb` (fallback `gpu-l40s-d` / `1gpu-16vcpu-96gb`) | `cpu-d3` / `4vcpu-16gb` |
 | Disk | 50Gi | 100Gi | 30Gi |
 | Timeout (platform) | 1h (minimum allowed) | 1h | 1h |
-| Our watchdog | 20 min | `budget_seconds + 300` | 5 min |
+| Our watchdog | 20 min (provisioner deadline 18 min) | `budget_seconds + 300` | `timeout_s + 180` s (setup margin, check with S-12) |
 | Subnet | `provision` | `exec` | `exec` |
 | Volumes | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:rw` | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:ro` | same as exec |
 | Preemptible | no | yes in dev/eval, **no** for demo recordings (`P2P_GPU_PREEMPTIBLE`) | no |

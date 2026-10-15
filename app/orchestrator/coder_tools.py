@@ -120,8 +120,8 @@ def check_user_args(args: list[str]) -> list[str]:
             name = arg[2:].split("=", 1)[0]
             if name and any(flag.startswith(name) for flag in RUNNER_FLAGS):
                 raise ToolError(f"{arg} is set by the runner (--seed, --out and --smoke)")
-        elif len(arg) >= 2 and arg[0] == "-" and arg[1] in "so":
-            raise ToolError(f"{arg} may abbreviate a flag the runner sets")
+        elif arg.startswith("@") or re.match(r"-[A-Za-z]*[so]", arg):  # -s, -vs0, @file
+            raise ToolError(f"{arg} may set a flag the runner owns")
     return list(args)
 
 

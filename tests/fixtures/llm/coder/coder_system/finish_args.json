@@ -52,5 +52,23 @@
     "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--epochs\", \"2\"], \"expected_outputs\": []}"
    }
   ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_7",
+    "name": "run_smoke",
+    "arguments": "{\"script\": \"train.py\", \"args\": [\"--epochs\", \"2\"]}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_8",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--epochs\", \"2\"], \"expected_outputs\": []}"
+   }
+  ]
  }
 ]

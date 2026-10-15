@@ -120,7 +120,18 @@ def test_patched_files_keep_the_write_limit() -> None:
 
 @pytest.mark.parametrize(
     "args",
-    [["--seed", "1"], ["--se"], ["--out=x"], ["--o", "x"], ["--smoke"], ["--sm"], ["-s"]],
+    [
+        ["--seed", "1"],
+        ["--se"],
+        ["--out=x"],
+        ["--o", "x"],
+        ["--smoke"],
+        ["--sm"],
+        ["-s"],
+        ["-vs0"],
+        ["-xo/tmp/x"],
+        ["@flags.txt"],
+    ],
 )
 def test_runner_owned_flags_are_rejected(args: list[str]) -> None:
     with pytest.raises(ToolError):
@@ -128,6 +139,5 @@ def test_runner_owned_flags_are_rejected(args: list[str]) -> None:
 
 
 def test_other_flags_pass() -> None:
-    assert check_user_args(["--epochs", "2", "--lr=0.1", "--outdir-name", "x"]) == [
-        "--epochs", "2", "--lr=0.1", "--outdir-name", "x",
-    ]  # fmt: skip
+    allowed = ["--epochs", "2", "--lr=0.1", "--outdir-name", "x", "-v", "-3", "-0.5"]
+    assert check_user_args(allowed) == allowed

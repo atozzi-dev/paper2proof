@@ -80,7 +80,9 @@ def _runner_flag(arg: str) -> bool:
     if arg.startswith("--"):
         name = arg[2:].split("=", 1)[0]
         return bool(name) and any(f.startswith(name) for f in ("seed", "out", "smoke"))
-    return len(arg) >= 2 and arg[0] == "-" and arg[1] in "so"
+    if arg.startswith("@"):  # argparse fromfile_prefix_chars
+        return True
+    return bool(re.match(r"-[A-Za-z]*[so]", arg))  # -s, -o and clusters like -vs0
 
 
 def _short_str(value: Any, limit: int) -> bool:

@@ -153,7 +153,9 @@ class JobSmokeExecutor:
         if outcome.run_cancelled:
             raise SmokeUnavailable("the run was cancelled")
         if outcome.timed_out:
-            raise SmokeUnavailable("the smoke job did not finish within 5 minutes")
+            raise SmokeUnavailable(
+                f"the smoke job did not finish within {timeout_s + SMOKE_SETUP_S} s"
+            )
         if outcome.state is not JobState.SUCCEEDED:
             raise SmokeUnavailable(f"the smoke job ended {outcome.state.value}")
         try:

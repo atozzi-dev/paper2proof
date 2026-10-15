@@ -159,8 +159,18 @@ class SmokeTestingStep:
                 ctx.run_id, "staging/repo_files.json", max_bytes=MAX_REPO_SNAPSHOT_BYTES
             )
         except ValueError:
-            return {}
-        return await ctx.run_cpu(parse_repo_snapshot, raw, expected) if raw else {}
+            raw = None
+        snapshot = await ctx.run_cpu(parse_repo_snapshot, raw, expected) if raw else {}
+        if not snapshot:
+            await ctx.emit(
+                EventType.WARNING,
+                {
+                    "code": "REPO_SNAPSHOT_UNAVAILABLE",
+                    "message": "repository files are missing or do not match the provision "
+                    "report: the Coder works without read access to them",
+                },
+            )
+        return snapshot
 
     async def _state(self, ctx: RunContext) -> _State:
         try:
@@ -451,6 +461,8 @@ class SmokeTestingStep:
         if last.get("workspace_sha256") != await ctx.run_cpu(_workspace_sha256, ws.files):
             raise ToolError("the workspace changed since the last passing smoke run: run it again")
         check_user_args(args.args)
+        if list(args.args) != last.get("args"):
+            raise ToolError("finish args must match the last passing smoke run's args")
         metrics = last.get("metrics") or {}
         needed = [claim.metric] + (
             [f"baseline/{claim.metric}"] if kind is ClaimType.RELATIVE else []

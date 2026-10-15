@@ -227,13 +227,15 @@ async def test_a_repository_snapshot_without_a_matching_digest_is_ignored(
 
 async def test_runner_flags_cannot_be_overridden(store: Store, tmp_path: Path) -> None:
     ctx, artifacts = await _setup(store, tmp_path)
-    smoke = FakeSmokeExecutor([PASS])
+    smoke = FakeSmokeExecutor([PASS, PASS])
     step, models = _step("finish_args", artifacts, smoke, FakeRunStorage())
     result = await step.run(ctx)
     assert result.next is StepName.EXECUTING
     errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
-    assert len(errors) == 3  # --seed, --sm (a prefix of --smoke), --out=...
-    assert len(smoke.runs) == 1
+    # --seed, --sm (a prefix of --smoke), --out=..., and finish args that never passed smoke
+    assert len(errors) == 4
+    assert any("must match the last passing smoke run" in e for e in errors)
+    assert len(smoke.runs) == 2
     assert result.output_ref is not None
     assert artifacts.get_json(result.output_ref)["args"] == ["--epochs", "2"]
 
@@ -253,3 +255,24 @@ async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_pa
     result = await step.run(ctx)
     assert result.next is StepName.PROVISIONING
     assert any(r.startswith("ERROR:") for r in _tool_results(models))
+
+
+async def test_a_missing_or_mismatched_snapshot_is_reported(store: Store, tmp_path: Path) -> None:
+    from app.domain.events import WarningPayload
+
+    ctx, artifacts = await _setup(store, tmp_path, report={"repo_files_sha256": "0" * 64})
+    step, _ = _step("escape_then_request", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    await step.run(ctx)
+    events = [e.payload for e in await store.events_after(RUN, 0)]
+    assert any(
+        isinstance(p, WarningPayload) and p.code == "REPO_SNAPSHOT_UNAVAILABLE" for p in events
+    )
+
+
+def test_snapshot_paths_are_revalidated() -> None:
+    from app.orchestrator.steps.smoke_testing import parse_repo_snapshot
+
+    raw, digest = _repo_snapshot(
+        {"ok.py": "x", "../x.py": "y", "/abs.py": "y", "a\\b.py": "y", "nul.py": "y", "n.py": 5}
+    )
+    assert parse_repo_snapshot(raw, digest) == {"ok.py": "x"}

@@ -523,3 +523,22 @@ def test_a_symlinked_staging_directory_is_replaced(tmp_path: Path) -> None:
     )  # fmt: skip
     assert not paths.staging.is_symlink()
     assert not list(elsewhere.iterdir())
+
+
+def test_the_snapshot_budget_counts_its_encoding_and_keeps_sources_first(tmp_path: Path) -> None:
+    class Notebooks(FakeRunner):
+        def __call__(self, argv: Sequence[str], **kwargs: Any) -> str:
+            out = super().__call__(argv, **kwargs)
+            if "clone" in argv:
+                dest = Path(list(argv)[-1])
+                (dest / "a_notebooks").mkdir()
+                for i in range(30):
+                    (dest / "a_notebooks" / f"n{i}.ipynb").write_text('"\\' * 90_000)
+                (dest / "src").mkdir()
+                (dest / "src" / "model.py").write_text("class Net: ...\n")
+            return out
+
+    _, paths = _provision(tmp_path, Notebooks())
+    raw = (paths.staging / "repo_files.json").read_bytes()
+    assert len(raw) <= int(3.5 * 1024 * 1024)
+    assert "src/model.py" in json.loads(raw)["files"]

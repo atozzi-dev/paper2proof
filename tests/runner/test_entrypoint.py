@@ -356,3 +356,16 @@ def test_termination_while_probing_the_gpu_writes_results(tmp_path: Path) -> Non
     manifest, results = _setup(tmp_path)
     assert _run(manifest, tmp_path, gpu_name=interrupted) == 20
     assert _results(results)["exit_reason"] == "budget_timeout"
+
+
+@pytest.mark.parametrize(
+    "args", [["-s", "1"], ["-o", "x"], ["-vs0"], ["-xo/tmp/x"], ["@flags.txt"]]
+)
+def test_short_and_file_forms_of_runner_flags_are_rejected(tmp_path: Path, args: list[str]) -> None:
+    manifest, _ = _setup(tmp_path, args=args)
+    assert _run(manifest, tmp_path) == 30
+
+
+def test_negative_numbers_are_ordinary_arguments(tmp_path: Path) -> None:
+    manifest, _ = _setup(tmp_path, args=["--mode", "ok", "--lr-exp", "-3"])
+    assert _run(manifest, tmp_path) != 30

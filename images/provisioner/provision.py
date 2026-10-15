@@ -64,7 +64,7 @@ SNAPSHOT_SUFFIXES = (".py", ".md", ".txt", ".rst", ".yaml", ".yml", ".json", ".c
 SNAPSHOT_PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")
 MAX_SNAPSHOT_FILE = 200 * 1024
 MAX_SNAPSHOT_FILES = 400
-MAX_SNAPSHOT_BYTES = 3 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = int(3.4 * 1024 * 1024)  # encoded; the control plane reads <= 4 MiB
 COMMAND_TIMEOUT_S = 900
 DEFAULT_DEADLINE_S = 1080  # 18 of the 20 watchdog minutes: leave time to write the error file
 PYTHON_VERSION = "3.12"
@@ -442,11 +442,11 @@ def _size(path: Path) -> int:
 
 def clone_repo(
     manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
-) -> tuple[dict[str, str], str | None]:
+) -> tuple[dict[str, str], str | None, str | None]:
     """Shallow clone; nothing from the repository is executed. Returns the text of its
     requirement files (parsed by the control plane) and the resolved commit."""
     if manifest.repo_url is None:
-        return {}, None
+        return {}, None, None
     dest = paths.work / "repo"
     branch = ["--branch", manifest.repo_ref] if manifest.repo_ref else []  # None: default branch
     try:
@@ -481,33 +481,54 @@ def clone_repo(
             files[path.name] = text
             budget -= cost
     _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
-    _write_snapshot(dest, paths.staging / "repo_files.json")
+    snapshot_sha = _write_snapshot(dest, paths.staging / "repo_files.json")
     resolved = commit.strip()
-    return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
+    return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None, snapshot_sha
 
 
-def _write_snapshot(repo: Path, out: Path) -> None:
+def _snapshot_order(rel: str) -> tuple[int, str]:
+    """Sources and top-level docs first: assets and notebooks never push out `src/`."""
+    name = rel.rsplit("/", 1)[-1]
+    if (rel.count("/") == 0 and REQUIREMENT_FILES.match(name)) or name.lower().startswith("readme"):
+        return 0, rel
+    return (1 if name.endswith(".py") else 2), rel
+
+
+def _write_snapshot(repo: Path, out: Path) -> str:
     """Readable text files of the clone for the Coder's read_file (the control plane never
-    unpacks repository archives). Regular files only, plain path segments, bounded sizes."""
-    files: dict[str, str] = {}
-    total = 0
-    for path in sorted(repo.rglob("*")):
+    unpacks repository archives). Regular files only, plain path segments, a budget on the
+    encoded size; written without following links. Returns the sha256 of the bytes written."""
+    candidates = []
+    for path in repo.rglob("*"):
         rel = path.relative_to(repo).as_posix()
         parts = rel.split("/")
-        if parts[0] == ".git" or path.is_symlink() or not path.is_file():
+        if parts[0] == ".git" or path.is_symlink() or not path.is_file() or len(parts) > 8:
             continue
-        if not path.name.endswith(SNAPSHOT_SUFFIXES) or len(parts) > 8:
+        if not path.name.endswith(SNAPSHOT_SUFFIXES):
             continue
         if not all(SNAPSHOT_PART.fullmatch(p) for p in parts):
             continue
-        size = path.stat().st_size
-        if size > MAX_SNAPSHOT_FILE or total + size > MAX_SNAPSHOT_BYTES:
+        if path.stat().st_size <= MAX_SNAPSHOT_FILE:
+            candidates.append(rel)
+    files: dict[str, str] = {}
+    budget = MAX_SNAPSHOT_BYTES
+    for rel in sorted(candidates, key=_snapshot_order):
+        text = (repo / rel).read_text(encoding="utf-8", errors="replace")
+        cost = (
+            len(json.dumps(rel).encode()) + len(json.dumps(text, ensure_ascii=False).encode()) + 4
+        )
+        if cost > budget:
             continue
-        files[rel] = path.read_text(encoding="utf-8", errors="replace")
-        total += size
+        files[rel] = text
+        budget -= cost
         if len(files) >= MAX_SNAPSHOT_FILES:
             break
-    out.write_text(json.dumps({"files": files}, ensure_ascii=False), encoding="utf-8")
+    data = json.dumps({"files": files}, ensure_ascii=False).encode("utf-8", "backslashreplace")
+    out.unlink(missing_ok=True)
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return hashlib.sha256(data).hexdigest()
 
 
 def split_files(names: Sequence[str], split: str) -> list[str]:
@@ -642,7 +663,7 @@ def provision(
     _clean_staging(paths.staging)
     env = build_env(paths)
     cache_key, cache_hit, overlay_sha = lock_and_overlay(manifest, paths, runner, env, clock)
-    requirement_files, commit = clone_repo(manifest, paths, runner, env, clock)
+    requirement_files, commit, snapshot_sha = clone_repo(manifest, paths, runner, env, clock)
     datasets = fetch_datasets(manifest, paths, runner, env, clock, fetch, smoke)
     report = {
         "schema": "p2p.provision-report/v1",
@@ -654,11 +675,7 @@ def provision(
         "repo": manifest.repo_url is not None,
         "repo_commit": commit,
         "requirement_files": requirement_files,
-        "repo_files_sha256": (
-            _sha256(paths.staging / "repo_files.json")
-            if (paths.staging / "repo_files.json").is_file()
-            else None
-        ),
+        "repo_files_sha256": snapshot_sha,  # of the bytes written, not read back
         "datasets": datasets,
         "smoke": manifest.smoke_dataset is not None,
     }
