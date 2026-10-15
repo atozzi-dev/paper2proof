@@ -23,6 +23,8 @@ from app.storage.tables import (
     ClaimRow,
     EventRow,
     JobRow,
+    LedgerDaily,
+    LedgerEntry,
     ModelCallRow,
     Run,
     StepRow,
@@ -376,3 +378,38 @@ class Store:
                 ci_high=row.ci_high,
                 tolerance=row.tolerance_json,
             )
+
+    # --- budget ledger (app.orchestrator.budget) -------------------------------------------
+
+    async def add_ledger_entry(
+        self, run_id: str | None, day: date, kind: str, amount: float
+    ) -> None:
+        async with self._session() as s, s.begin():
+            s.add(LedgerEntry(run_id=run_id, day=day, kind=kind, amount=amount))
+
+    async def ledger_total(
+        self, kind: str, *, run_id: str | None = None, day: date | None = None
+    ) -> float:
+        """Committed spend of one kind, filtered by run and/or UTC day."""
+        query = select(func.coalesce(func.sum(LedgerEntry.amount), 0.0)).where(
+            LedgerEntry.kind == kind
+        )
+        if run_id is not None:
+            query = query.where(LedgerEntry.run_id == run_id)
+        if day is not None:
+            query = query.where(LedgerEntry.day == day)
+        async with self._session() as s:
+            return float(await s.scalar(query) or 0.0)
+
+    async def kill_switch(self, day: date) -> bool:
+        async with self._session() as s:
+            row = await s.get(LedgerDaily, day)
+            return bool(row and row.kill_switch)
+
+    async def set_kill_switch(self, day: date, on: bool) -> None:
+        async with self._session() as s, s.begin():
+            row = await s.get(LedgerDaily, day)
+            if row is None:
+                row = LedgerDaily(day=day, inference_usd=0.0, cloud_usd=0.0, kill_switch=on)
+                s.add(row)
+            row.kill_switch = on

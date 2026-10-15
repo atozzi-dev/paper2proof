@@ -1,12 +1,10 @@
 import asyncio
 import itertools
-from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
 from app.domain.events import EventType, RunStatusPayload, StepStartedPayload
@@ -21,28 +19,12 @@ from app.domain.models import (
     Verdict,
     VerdictKind,
 )
-from app.storage.db import make_engine
 from app.storage.store import Store
+from tests.conftest import alembic_config as _alembic
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN = "r_01jb7z00000000000000000000"
 OTHER = "r_01jb7z00000000000000000001"
-
-
-def _alembic(db_path: Path) -> Config:
-    cfg = Config(str(ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(ROOT / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
-    return cfg
-
-
-@pytest.fixture
-async def store(tmp_path: Path) -> AsyncIterator[Store]:
-    db_path = tmp_path / "p2p.db"
-    command.upgrade(_alembic(db_path), "head")
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
-    yield Store(engine)
-    await engine.dispose()
 
 
 async def test_sqlite_pragmas(store: Store) -> None:

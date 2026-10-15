@@ -181,3 +181,19 @@ class LedgerDaily(Base):
     inference_usd: Mapped[float] = mapped_column(Float, default=0.0)
     cloud_usd: Mapped[float] = mapped_column(Float, default=0.0)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class LedgerEntry(Base):
+    """Append-only ledger of committed spend (app.orchestrator.budget). Sums give per-run and
+    per-UTC-day totals for every SpendKind; nothing is ever updated in place."""
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    day: Mapped[date] = mapped_column(index=True)  # UTC date of the reservation
+    kind: Mapped[str] = mapped_column(String(16))
+    amount: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
