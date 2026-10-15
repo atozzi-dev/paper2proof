@@ -1,20 +1,27 @@
-# Local dev stack (P2P_ENV=dev). S3-compatible storage stands in for Nebius Object Storage.
-# Upstream MinIO images are no longer publicly pullable; the Chainguard build is, pinned by digest.
-# Credentials come from .env (gitignored): MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
+# Local dev stack (P2P_ENV=dev). SeaweedFS (Apache-2.0) provides the S3 API that stands in for
+# Nebius Object Storage. S3 credentials come from .env (gitignored): RUNTIME_S3_KEY_ID /
+# RUNTIME_S3_SECRET, the same variables the app uses in prod.
 name: paper2proof-dev
 
+configs:
+  s3_identities:
+    content: |
+      {"identities": [{"name": "p2p-dev",
+        "credentials": [{"accessKey": "${RUNTIME_S3_KEY_ID:?set RUNTIME_S3_KEY_ID in .env}",
+                         "secretKey": "${RUNTIME_S3_SECRET:?set RUNTIME_S3_SECRET in .env}"}],
+        "actions": ["Admin", "Read", "Write", "List", "Tagging"]}]}
+
 services:
-  minio:
-    image: chainguard/minio@sha256:2136d593beacf4461187035eca949fe49abd589d5079735025c711ca58fee0c8
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+  s3:
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json"]
+    configs:
+      - source: s3_identities
+        target: /etc/seaweedfs/s3.json
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:8333:8333"
     volumes:
-      - minio-data:/data
+      - s3-data:/data
 
 volumes:
-  minio-data:
+  s3-data:
