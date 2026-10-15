@@ -1,0 +1,3 @@
+[
+  {"content": null, "tool_calls": [{"id": "p1", "name": "emit_result", "arguments": "{\"mode\": \"REPO_FIRST\", \"claim_ids\": [\"c1\"], \"claim_types\": {\"c1\": \"RELATIVE\"}, \"scale\": \"FULL\", \"seeds\": [0, 1, 2], \"packages\": [{\"name\": \"timm\", \"specifier\": \"==1.0.9\"}], \"datasets\": [], \"entrypoint_hint\": \"train.py\", \"gpu_minutes_est\": 30, \"notes\": []}"}]}
+]

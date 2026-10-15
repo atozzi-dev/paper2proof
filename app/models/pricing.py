@@ -1,6 +1,7 @@
 """Model prices from config/pricing.yaml (USD per 1M tokens). Never hardcoded (invariant 5)."""
 
 import math
+import re
 from pathlib import Path
 
 import yaml
@@ -49,3 +50,41 @@ class Pricing:
 def estimate_tokens(text: str) -> int:
     """Rough upper-ish estimate (4 characters per token) used only for budget reservations."""
     return math.ceil(len(text) / 4)
+
+
+# --- Nebius AI Cloud prices (USD per hour), `cloud:` section of config/pricing.yaml ----------
+
+
+class _Rates(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    gpu: float = Field(default=0.0, ge=0)
+    vcpu: float = Field(ge=0)
+    ram_gib: float = Field(ge=0)
+
+
+class PlatformPrice(_Rates):
+    preemptible: _Rates | None = None
+
+
+class CloudPrices(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    platforms: dict[str, PlatformPrice]
+
+    def hourly(self, platform: str, preset: str, *, preemptible: bool = False) -> float:
+        """USD/hour for a preset like '1gpu-8vcpu-32gb' or '4vcpu-16gb' on a platform."""
+        price = self.platforms[platform]
+        rates: _Rates = price.preemptible if preemptible and price.preemptible else price
+        counts = {unit: float(n) for n, unit in re.findall(r"(\d+)(gpu|vcpu|gb)", preset)}
+        return (
+            counts.get("gpu", 0.0) * rates.gpu
+            + counts.get("vcpu", 0.0) * rates.vcpu
+            + counts.get("gb", 0.0) * rates.ram_gib
+        )
+
+
+def load_cloud_prices(path: Path = DEFAULT_PATH) -> CloudPrices:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))["cloud"]
+    platforms = {k: PlatformPrice.model_validate(v) for k, v in raw.items() if isinstance(v, dict)}
+    return CloudPrices(platforms=platforms)
