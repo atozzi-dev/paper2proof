@@ -1,14 +1,19 @@
 """JobSmokeExecutor: smoke runs as CPU Serverless Jobs in the `exec` subnet (no internet), the
 fallback when Sandboxes is unavailable (execution-contracts §8/§10).
 
-The workspace goes to `smoke/<iteration>/workspace/` in the run bucket, the job runs
-`images/runner/smoke.py` (same runner-cpu image) and writes `smoke/<iteration>/result.json`,
-which is read back as untrusted input. Iterations are allocated after the highest smoke job the
-backend already has, so a restarted control plane never reuses a finished job's name.
+The workspace goes to the run bucket as one archive, `smoke/<iteration>/workspace.tar`,
+whose sha256 travels in the injected manifest with a fresh nonce; the job runs
+`images/runner/smoke.py` (same runner-cpu image), which checks the digest, and writes
+`smoke/<iteration>/result.json`. A result counts only when the job SUCCEEDED and the result
+echoes the nonce: earlier smoke jobs share the bucket and could have planted files.
+Iterations are allocated after the highest smoke job the backend already has (a restarted
+control plane never reuses a name), and a smoke job left running by a restart is cancelled.
 """
 
 import asyncio
+import hashlib
 import json
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -22,9 +27,11 @@ from app.execution.smoke import (
     SmokeContractError,
     SmokeResult,
     SmokeUnavailable,
+    pack_workspace,
     parse_smoke_result,
     run_variants,
     validate_argv,
+    validate_timeout,
     validate_workspace,
 )
 from app.models.pricing import CloudPrices
@@ -33,15 +40,16 @@ from app.orchestrator.steps.jobs import run_job, utcnow
 
 SMOKE_PLATFORM, SMOKE_PRESET = "cpu-d3", "4vcpu-16gb"
 SMOKE_WATCHDOG_S = 5 * 60  # execution-contracts §8
-MAX_TIMEOUT_S = 240  # the script's own limit inside the job (spec: smoke ≤ 120 s)
 MAX_RESULT_BYTES = 256 * 1024
 
 
-def _parse(raw: bytes) -> SmokeResult:
+def _parse(raw: bytes, nonce: str) -> SmokeResult:
     try:
         data: Any = json.loads(raw)
     except (ValueError, RecursionError):
         raise SmokeUnavailable("the smoke job left an unreadable result") from None
+    if not isinstance(data, dict) or data.get("nonce") != nonce:
+        raise SmokeUnavailable("the smoke result does not belong to this job")
     try:
         return parse_smoke_result(data)
     except SmokeContractError as err:
@@ -80,9 +88,15 @@ class JobSmokeExecutor:
     async def _next_iteration(self, run_id: str) -> int:
         prefix = f"p2p-smoke-{run_slug(run_id)}-"
         async with self._lock:
+            listed = await self._ctx.jobs.list_jobs(prefix)
+            for handle, state, _ in listed:
+                suffix = handle.name.removeprefix(prefix)
+                orphaned = suffix.isdigit() and int(suffix) > self._last  # not started here
+                if orphaned and not state.is_terminal:
+                    await self._ctx.jobs.cancel(handle)
             existing = [
                 int(handle.name.removeprefix(prefix))
-                for handle, _, _ in await self._ctx.jobs.list_jobs(prefix)
+                for handle, _, _ in listed
                 if handle.name.removeprefix(prefix).isdigit()
             ]
             self._last = max([self._last, *existing]) + 1
@@ -95,18 +109,20 @@ class JobSmokeExecutor:
     ) -> SmokeResult:
         argv = validate_argv(argv)
         workspace = validate_workspace({**self._base.get(env_id, {}), **validate_workspace(files)})
-        if not 1 <= timeout_s <= MAX_TIMEOUT_S:
-            raise SmokeContractError(f"smoke timeout must be 1..{MAX_TIMEOUT_S} s")
+        validate_timeout(timeout_s)
         ctx = self._ctx
+        archive = await ctx.run_cpu(pack_workspace, workspace)
         iteration = await self._next_iteration(env_id)
-        for path, data in workspace.items():
-            await self._storage.put_bytes(env_id, f"smoke/{iteration}/workspace/{path}", data)
+        nonce = secrets.token_hex(16)
+        await self._storage.put_bytes(env_id, f"smoke/{iteration}/workspace.tar", archive)
         manifest = {
             "schema": "p2p.smoke/v1",
             "run_id": env_id,
             "iteration": iteration,
             "argv": argv,
             "timeout_s": timeout_s,
+            "workspace_sha256": hashlib.sha256(archive).hexdigest(),
+            "nonce": nonce,
         }
         bucket = await ctx.jobs.ensure_run_bucket(env_id)
         spec = JobSpec(
@@ -139,6 +155,8 @@ class JobSmokeExecutor:
             raise SmokeUnavailable("the run was cancelled")
         if outcome.timed_out:
             raise SmokeUnavailable("the smoke job did not finish within 5 minutes")
+        if outcome.state is not JobState.SUCCEEDED:
+            raise SmokeUnavailable(f"the smoke job ended {outcome.state.value}")
         try:
             raw = await self._storage.get_bytes(
                 env_id, f"smoke/{iteration}/result.json", max_bytes=MAX_RESULT_BYTES
@@ -146,9 +164,8 @@ class JobSmokeExecutor:
         except ValueError:
             raw = None
         if not raw:
-            state = "succeeded" if outcome.state is JobState.SUCCEEDED else "failed"
-            raise SmokeUnavailable(f"the smoke job {state} without a result")
-        result = await ctx.run_cpu(_parse, raw)
+            raise SmokeUnavailable("the smoke job succeeded without a result")
+        result = await ctx.run_cpu(_parse, raw, nonce)
         if result.duration_s == 0.0:
             result = result.model_copy(update={"duration_s": time.monotonic() - started})
         return result

@@ -6,8 +6,10 @@ untrusted code produced the results.
 """
 
 import asyncio
+import io
 import math
 import re
+import tarfile
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -19,8 +21,10 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_WORKSPACE_BYTES = 8 * 1024 * 1024
 MAX_ARGS = 32
 MAX_OUTPUT_CHARS = 64 * 1024
+MAX_TIMEOUT_S = 240  # a smoke run's own limit (spec: smoke scripts take <= 120 s)
 SMOKE_METRICS = "out/metrics.json"  # the Coder's smoke argv uses `--out out`
 _PATH_PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")
+_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", re.IGNORECASE)
 _SCRIPT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}\.py$")
 _METRIC = re.compile(r"^[A-Za-z0-9_./-]{1,100}$")
 
@@ -57,7 +61,26 @@ def validate_path(path: str) -> str:
     parts = path.split("/")
     if not path or len(parts) > 8 or not all(_PATH_PART.fullmatch(p) for p in parts):
         raise SmokeContractError(f"invalid workspace path: {path!r}")
+    if any(p.endswith(".") or _RESERVED.match(p) for p in parts):  # also safe on Windows hosts
+        raise SmokeContractError(f"invalid workspace path: {path!r}")
     return path
+
+
+def validate_timeout(timeout_s: int) -> int:
+    if isinstance(timeout_s, bool) or not 1 <= timeout_s <= MAX_TIMEOUT_S:
+        raise SmokeContractError(f"smoke timeout must be 1..{MAX_TIMEOUT_S} s")
+    return timeout_s
+
+
+def pack_workspace(files: Mapping[str, bytes]) -> bytes:
+    """Deterministic plain tar of a validated workspace (pure: runs in the CPU pool)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for path, data in sorted(validate_workspace(files).items()):
+            info = tarfile.TarInfo(path)
+            info.size, info.mode, info.mtime = len(data), 0o644, 0
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
 
 
 def validate_workspace(files: Mapping[str, bytes]) -> dict[str, bytes]:

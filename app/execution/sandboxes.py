@@ -27,6 +27,7 @@ from app.execution.smoke import (
     parse_metrics,
     run_variants,
     validate_argv,
+    validate_timeout,
     validate_workspace,
 )
 from app.orchestrator.budget import Budget, SpendKind
@@ -134,17 +135,18 @@ class SandboxesSmokeExecutor:
         self, env_id: str, argv: list[str], files: dict[str, bytes], timeout_s: int
     ) -> SmokeResult:
         argv = validate_argv(argv)
-        workspace = {**self._base.get(env_id, {}), **validate_workspace(files)}
+        validate_timeout(timeout_s)
+        workspace = validate_workspace({**self._base.get(env_id, {}), **validate_workspace(files)})
         if sum(len(d) for d in workspace.values()) > MAX_RAW_BYTES:
             raise SmokeUnavailable("workspace too large to inline in a Sandboxes command")
         payload = await asyncio.to_thread(_pack, workspace)
         if len(payload) > MAX_INLINE_BYTES:
             raise SmokeUnavailable("workspace too large to inline in a Sandboxes command")
         marker = f"P2P-METRICS-{secrets.token_hex(8)}"
-        reservation = await self._budget.check_and_reserve(
-            env_id, SpendKind.CLOUD_USD, self._usd_per_hour * (timeout_s + 120) / 3600
-        )
+        reserved = self._usd_per_hour * (timeout_s + 120) / 3600
+        reservation = await self._budget.check_and_reserve(env_id, SpendKind.CLOUD_USD, reserved)
         started = time.monotonic()
+        finished = False  # an abandoned instance keeps running (and billing) up to its timeout
         try:
             spawn = await self._call(
                 "POST",
@@ -169,17 +171,24 @@ class SandboxesSmokeExecutor:
                 await self._sleep(POLL_S)
             else:
                 raise SmokeUnavailable("Sandboxes operation did not finish in time")
+            finished = True
         finally:
             elapsed = time.monotonic() - started
-            await self._budget.commit(reservation, self._usd_per_hour * elapsed / 3600)
+            await self._budget.commit(
+                reservation, self._usd_per_hour * elapsed / 3600 if finished else reserved
+            )
         result = ((op.get("metadata") or {}).get("result") or {}) if isinstance(op, dict) else {}
         code = (result.get("state") or {}).get("exit_code") if isinstance(result, dict) else None
         if not isinstance(code, int) or isinstance(code, bool):
-            raise SmokeUnavailable(f"Sandboxes operation ended without an exit code: {op!r:.200}")
+            status = op.get("status") if isinstance(op, dict) else None
+            raise SmokeUnavailable(
+                f"Sandboxes operation ended without an exit code ({status!s:.32})"
+            )
         stdout, _, tail = _decode(result.get("stdout")).partition(f"\n{marker}\n")
+        tail = tail[: 64 * 1024]
         try:
             metrics = parse_metrics(json.loads(tail)) if tail.strip() else None
-        except ValueError:
+        except (ValueError, RecursionError):
             metrics = None
         return SmokeResult(
             exit_code=code,

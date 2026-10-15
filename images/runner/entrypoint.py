@@ -53,6 +53,7 @@ MANIFEST_KEYS = {
 }  # fmt: skip
 PATH_KEYS = {"overlay", "repo", "data_dir", "workspace", "cache", "results"}
 SCALE_KEYS = {"full", "fraction_of_data", "epochs", "paper_epochs"}
+ARCHIVE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
 PASSTHROUGH_ENV = re.compile(
     r"^(LD_LIBRARY_PATH|TZ|CUDA_[A-Z0-9_]+|NVIDIA_[A-Z0-9_]+|NCCL_[A-Z0-9_]+)$"
 )
@@ -158,10 +159,14 @@ def tar_extract(archive: Path, dest: Path) -> None:  # pragma: no cover - needs 
         )
     except tarfile.TarError as err:
         raise ContractError(f"unreadable archive {archive.name}: {err}") from None
+    except BaseException:
+        proc.kill()  # the real reason is the exception in flight, not zstd's exit status
+        raise
     finally:
         proc.stdout.close()
-        if proc.wait(timeout=60) not in (0, None):
-            raise ContractError(f"could not decompress {archive.name}")
+        status = proc.wait(timeout=60)
+    if status != 0:
+        raise ContractError(f"could not decompress {archive.name}")
 
 
 def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
@@ -300,13 +305,16 @@ def run_seed(
 
 def _read_metric(path: Path, key: str) -> float | None:
     try:
+        if path.stat().st_size > 64 * 1024:
+            return None
         data = json.loads(path.read_text(encoding="utf-8"))
         value = data[key]
-    except (OSError, ValueError, RecursionError, KeyError, TypeError):
+        if type(value) not in (int, float):  # no bools, no numeric strings
+            return None
+        number = float(value)
+    except (OSError, ValueError, RecursionError, KeyError, TypeError, OverflowError):
         return None
-    if type(value) not in (int, float):  # no bools, no numeric strings
-        return None
-    return float(value) if math.isfinite(value) else None
+    return number if math.isfinite(number) else None
 
 
 def _child_env(
@@ -319,6 +327,7 @@ def _child_env(
             "HOME": str(work / "home"),
             "PYTHONPATH": os.pathsep.join(str(p) for p in (overlay, repo, workspace)),
             "PYTHONUNBUFFERED": "1",
+            "PYTHONIOENCODING": "utf-8",
             "P2P_DATA_DIR": str(data),
             "HF_HUB_OFFLINE": "1",
             "HF_DATASETS_OFFLINE": "1",
@@ -400,11 +409,18 @@ def run(
         data_dir = Path(paths["data_dir"])
         if data_dir.is_dir():
             for archive in sorted(data_dir.glob("*.tar.zst")):
-                extract(archive, data / archive.name.removesuffix(".tar.zst"))
+                name = archive.name.removesuffix(".tar.zst")
+                if not ARCHIVE_NAME.fullmatch(name) or set(name) == {"."}:
+                    raise ContractError(f"invalid data archive name: {archive.name[:100]}")
+                extract(archive, data / name)
     except (ContractError, OSError, subprocess.SubprocessError) as err:
         print(f"CONTRACT ERROR: {err}", file=sys.stderr)
         write_results(EXIT_CONTRACT)
         return EXIT_CONTRACT
+    except Terminated:
+        print("TERMINATED during setup: writing results", file=sys.stderr)
+        write_results(EXIT_BUDGET)
+        return EXIT_BUDGET
 
     run_dir, logs, home = work / "run", work / "logs", work / "home"
     for directory in (run_dir, logs, home):
@@ -480,6 +496,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - exerci
     args = parser.parse_args(argv)
     signal.signal(signal.SIGTERM, _on_sigterm)
     if Path(args.smoke_manifest).is_file():  # CPU smoke job (same image, execution-contracts §8)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))  # works under `python -I` too
         import smoke
 
         return smoke.run(Path(args.smoke_manifest), mnt=Path("/mnt/run"), work=Path(args.work))

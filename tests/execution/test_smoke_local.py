@@ -1,6 +1,7 @@
 """LocalTrustedExecutor: dev only, canary papers only, locked-down docker (never run here)."""
 
 import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -116,3 +117,39 @@ def test_image_must_be_pinned_by_digest(tmp_path: Path) -> None:
             work_root=tmp_path,
             docker=FakeDocker(),
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+async def test_a_symlinked_metrics_file_is_not_followed(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.json"
+    secret.write_text(json.dumps({"acc": 0.123}))
+
+    class LinkingDocker(FakeDocker):
+        async def __call__(self, argv: Sequence[str], timeout_s: float) -> tuple[int, str, str]:
+            workspace = next(a for a in argv if a.endswith(":/workspace:rw")).split(":/workspace")[
+                0
+            ]
+            (Path(workspace) / "out").mkdir(parents=True, exist_ok=True)
+            (Path(workspace) / "out" / "metrics.json").symlink_to(secret)
+            return 0, "", ""
+
+    executor = _executor(tmp_path / "root", LinkingDocker())
+    env = await executor.prepare(RUN, {"train.py": b"x"})
+    result = await executor.run(env, ["python", "train.py"], {}, 60)
+    assert result.metrics is None
+
+
+async def test_run_requires_a_canary_approved_prepare(tmp_path: Path) -> None:
+    executor = _executor(tmp_path, FakeDocker())
+    with pytest.raises(LocalTrustedRefused):
+        await executor.run(RUN, ["python", "train.py"], {"train.py": b"x"}, 60)
+
+
+async def test_the_image_entrypoint_is_overridden(tmp_path: Path) -> None:
+    docker = FakeDocker()
+    executor = _executor(tmp_path, docker)
+    env = await executor.prepare(RUN, {"train.py": b"x"})
+    await executor.run(env, ["python", "train.py"], {}, 60)
+    (argv,) = docker.calls
+    assert "--entrypoint=python" in argv
+    assert argv[argv.index(IMAGE) + 1 :] == ["train.py"]

@@ -41,17 +41,53 @@ json.dump({"acc": 0.5, "junk": "x"}, open(os.path.join(a.out, "metrics.json"), "
 """
 
 
-def _setup(tmp_path: Path, mode: str = "ok", **overrides: Any) -> tuple[Path, Path]:
+NONCE = "a1" * 16
+
+
+def workspace_tar(files: dict[str, bytes], links: dict[str, str] | None = None) -> bytes:
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for name, target in (links or {}).items():
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname = tarfile.SYMTYPE, target
+            tar.addfile(info)
+    return buffer.getvalue()
+
+
+def _setup(
+    tmp_path: Path,
+    mode: str = "ok",
+    tar: bytes | None = None,
+    overlay: bool = True,
+    **overrides: Any,
+) -> tuple[Path, Path]:
+    import hashlib
+
     mnt = tmp_path / "mnt"
-    workspace = mnt / "smoke" / "3" / "workspace"
-    workspace.mkdir(parents=True)
-    (workspace / "train.py").write_text(SCRIPT)
+    out = mnt / "smoke" / "3"
+    out.mkdir(parents=True)
+    tar = tar if tar is not None else workspace_tar({"train.py": SCRIPT.encode()})
+    (out / "workspace.tar").write_bytes(tar)
+    (out / "workspace").mkdir()  # planted files next to the archive are never used
+    (out / "workspace" / "sitecustomize.py").write_text("raise SystemExit('planted')")
+    if overlay:
+        (mnt / "staging").mkdir(parents=True)
+        (mnt / "staging" / "overlay.tar.zst").write_bytes(b"")
     manifest = {
         "schema": "p2p.smoke/v1",
         "run_id": RUN,
         "iteration": 3,
         "argv": ["python", "train.py", "--out", "out", "--smoke", "--mode", mode],
         "timeout_s": 60,
+        "workspace_sha256": hashlib.sha256(tar).hexdigest(),
+        "nonce": NONCE,
     }
     manifest.update(overrides)
     path = tmp_path / "smoke.json"
@@ -105,6 +141,8 @@ def test_timeouts_are_enforced(tmp_path: Path) -> None:
         {"iteration": "3/../../x"},
         {"run_id": "../../etc"},
         {"schema": "other"},
+        {"workspace_sha256": "not-hex"},
+        {"nonce": "x"},
     ],
 )
 def test_invalid_manifests_are_contract_errors(tmp_path: Path, override: dict[str, Any]) -> None:
@@ -112,3 +150,44 @@ def test_invalid_manifests_are_contract_errors(tmp_path: Path, override: dict[st
     code = smoke.run(path, mnt=mnt, work=tmp_path / "work", extract=lambda a, d: None)
     assert code == 30
     assert not (mnt / "smoke" / "3" / "result.json").exists()
+
+
+def test_the_result_echoes_the_nonce_and_planted_files_are_ignored(tmp_path: Path) -> None:
+    path, mnt = _setup(tmp_path)
+    result = _run(path, mnt, tmp_path)
+    assert result["nonce"] == NONCE
+    assert result["exit_code"] == 0
+    assert not (tmp_path / "work" / "workspace" / "sitecustomize.py").exists()
+
+
+@pytest.mark.parametrize("case", ["digest", "overlay", "escape"])
+def test_setup_problems_still_produce_a_result(tmp_path: Path, case: str) -> None:
+    if case == "digest":
+        path, mnt = _setup(tmp_path, workspace_sha256="0" * 64)
+    elif case == "overlay":
+        path, mnt = _setup(tmp_path, overlay=False)
+    else:
+        path, mnt = _setup(tmp_path, tar=workspace_tar({"../evil.py": b"x"}))
+    result = _run(path, mnt, tmp_path)
+    assert result["exit_code"] == -1
+    assert result["stderr"].startswith("setup error")
+    assert result["nonce"] == NONCE
+    assert not (tmp_path / "evil.py").exists()
+
+
+def test_symlinks_in_the_workspace_are_not_extracted(tmp_path: Path) -> None:
+    tar = workspace_tar({"train.py": SCRIPT.encode()}, links={"secret.txt": "/etc/passwd"})
+    path, mnt = _setup(tmp_path, tar=tar)
+    _run(path, mnt, tmp_path)
+    assert not (tmp_path / "work" / "workspace" / "secret.txt").exists()
+
+
+def test_results_stay_small_with_non_ascii_output(tmp_path: Path) -> None:
+    script = (
+        "import sys\n"
+        "for _ in range(4000): print('\u2588' * 100)\n"
+        "for _ in range(4000): print('\u2588' * 100, file=sys.stderr)\n"
+    )
+    path, mnt = _setup(tmp_path, tar=workspace_tar({"train.py": script.encode()}))
+    _run(path, mnt, tmp_path)
+    assert (mnt / "smoke" / "3" / "result.json").stat().st_size < 200 * 1024

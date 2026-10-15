@@ -21,7 +21,22 @@ OK = SmokeResult(exit_code=0, stdout="ok", stderr="", duration_s=1.0, metrics={"
 
 @pytest.mark.parametrize(
     "path",
-    ["../x.py", "/etc/passwd", "a/../../b.py", "C:/x.py", "a\\b.py", "", "a\x00.py", "./a.py"],
+    [
+        "../x.py",
+        "/etc/passwd",
+        "a/../../b.py",
+        "C:/x.py",
+        "a\\b.py",
+        "",
+        "a\x00.py",
+        "./a.py",
+        "CON",
+        "nul.py",
+        "com1.txt",
+        "a.",
+        "dir./x.py",
+        "a ",
+    ],
 )
 def test_workspace_paths_must_stay_inside(path: str) -> None:
     with pytest.raises(SmokeContractError):

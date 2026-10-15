@@ -148,3 +148,48 @@ async def test_oversized_workspaces_go_to_the_fallback(store: Store) -> None:
     big = {f"f{i}.py": bytes(range(256)) * 1024 for i in range(4)}  # incompressible-ish, 1 MiB
     with pytest.raises(SmokeUnavailable):
         await smoke.run(env, ["python", "f0.py"], big, 60)
+
+
+@respx.mock
+async def test_hostile_arguments_stay_single_quoted(store: Store) -> None:
+    bodies = _mock_run("{}")
+    smoke = _executor(store)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    hostile = ["it's", "$(id)", "`id`", ";rm -rf /", "a|b", "&&"]
+    await smoke.run(env, ["python", "train.py", *hostile], {}, 60)
+    command = bodies[0]["command"]
+    quoted = " ".join(
+        "'" + a.replace("'", "'\"'\"'") + "'" for a in ["python", "train.py", *hostile]
+    )
+    assert quoted in command
+
+
+@respx.mock
+async def test_an_abandoned_operation_is_charged_in_full(store: Store) -> None:
+    respx.post(f"{SANDBOXES_API}/v1/instances").mock(
+        return_value=httpx.Response(200, json={"uuid": "op-1"})
+    )
+    respx.get(f"{SANDBOXES_API}/v1/operations/op-1").mock(return_value=httpx.Response(503))
+    smoke = _executor(store)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    with pytest.raises(SmokeUnavailable):
+        await smoke.run(env, ["python", "train.py"], {}, 60)
+    assert not smoke._budget._inflight
+    spent = await smoke._budget.run_spend(RUN, SpendKind.CLOUD_USD)
+    assert spent == pytest.approx(0.1 * (60 + 120) / 3600)
+
+
+async def test_timeouts_are_range_checked(store: Store) -> None:
+    smoke = _executor(store)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    with pytest.raises(SmokeContractError):
+        await smoke.run(env, ["python", "train.py"], {}, 10_000)
+
+
+@respx.mock
+async def test_a_deeply_nested_metrics_tail_is_ignored(store: Store) -> None:
+    _mock_run("[" * 100_000)
+    smoke = _executor(store)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    result = await smoke.run(env, ["python", "train.py"], {}, 60)
+    assert result.metrics is None

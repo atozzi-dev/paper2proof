@@ -51,6 +51,8 @@ os.makedirs(a.out, exist_ok=True)
 metrics = {"top1_accuracy": 0.90 + a.seed / 100, "baseline/top1_accuracy": 0.88 + a.seed / 100}
 if a.mode == "nan":
     metrics["top1_accuracy"] = float("nan")
+if a.mode == "huge":
+    metrics = {"top1_accuracy": 10 ** 400, "baseline/top1_accuracy": 0.8}
 if a.mode == "typed":
     metrics = {"top1_accuracy": [True, "0.93", 0.9][a.seed], "baseline/top1_accuracy": 0.8}
 json.dump(metrics, open(os.path.join(a.out, "metrics.json"), "w"))
@@ -317,3 +319,26 @@ def test_safe_extraction_skips_links_and_rejects_escapes(tmp_path: Path) -> None
     ):
         with pytest.raises(entrypoint.ContractError):
             entrypoint.extract_stream(_tar(bad), tmp_path / "bad", max_bytes=1000, max_members=10)
+
+
+def test_a_huge_integer_metric_fails_the_seed_not_the_runner(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="huge")
+    assert _run(manifest, tmp_path) == 10
+    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+
+
+def test_termination_during_extraction_writes_results(tmp_path: Path) -> None:
+    def interrupted(archive: Path, dest: Path) -> None:
+        raise entrypoint.Terminated
+
+    manifest, results = _setup(tmp_path)
+    assert _run(manifest, tmp_path, extract=interrupted) == 20
+    assert _results(results)["exit_reason"] == "budget_timeout"
+
+
+def test_data_archives_need_plain_names(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "...tar.zst").write_bytes(b"")
+    assert _run(manifest, tmp_path) == 30
+    assert _results(results)["exit_reason"] == "contract_error"

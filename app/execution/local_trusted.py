@@ -7,6 +7,7 @@ Even then the container has no network, a read-only root, no capabilities and a 
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import time
@@ -23,6 +24,7 @@ from app.execution.smoke import (
     parse_metrics,
     run_variants,
     validate_argv,
+    validate_timeout,
     validate_workspace,
 )
 
@@ -41,13 +43,24 @@ def load_canaries(path: Path) -> frozenset[str]:
     return frozenset(str(p).lower() for p in papers if _SHA256.fullmatch(str(p).lower()))
 
 
+async def _tail(stream: asyncio.StreamReader | None, cap: int = 64 * 1024) -> bytes:
+    """Read a stream to the end keeping only its last `cap` bytes (bounded memory)."""
+    kept = b""
+    while stream is not None and (chunk := await stream.read(65536)):
+        kept = (kept + chunk)[-cap:]
+    return kept
+
+
 async def docker_cli(argv: Sequence[str], timeout_s: float) -> tuple[int, str, str]:
     """Run the docker CLI (argv list, no shell); kill the container on timeout."""
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout_s)
+        out, err = await asyncio.wait_for(
+            asyncio.gather(_tail(proc.stdout), _tail(proc.stderr)), timeout_s
+        )
+        await proc.wait()
     except TimeoutError:
         name = next(a.removeprefix("--name=") for a in argv if a.startswith("--name="))
         killer = await asyncio.create_subprocess_exec("docker", "kill", name)
@@ -56,6 +69,25 @@ async def docker_cli(argv: Sequence[str], timeout_s: float) -> tuple[int, str, s
         await proc.wait()
         return -1, "", f"smoke run timed out after {timeout_s:g} s"
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def _read_metrics(workspace: Path, relative: str) -> dict[str, float] | None:
+    """The container owns the workspace: never follow a link it planted to a host file."""
+    path = workspace
+    for part in relative.split("/"):
+        path = path / part
+        if path.is_symlink():
+            return None
+    if not path.is_file() or path.stat().st_size > 64 * 1024:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(64 * 1024 + 1)
+        return parse_metrics(json.loads(data))
+    except (OSError, ValueError, RecursionError):
+        return None
 
 
 class LocalTrustedExecutor:
@@ -79,6 +111,7 @@ class LocalTrustedExecutor:
         self._root = work_root
         self._docker = docker
         self._runs = 0
+        self._approved: set[str] = set()  # run ids whose paper passed the canary check
 
     async def prepare(self, run_id: str, files: dict[str, bytes]) -> str:
         digest = await self._paper_sha256(run_id)
@@ -87,6 +120,7 @@ class LocalTrustedExecutor:
         base = self._root / run_slug(run_id)
         shutil.rmtree(base / "base", ignore_errors=True)
         self._write(base / "base", validate_workspace(files))
+        self._approved.add(run_id)
         return run_id
 
     @staticmethod
@@ -99,7 +133,10 @@ class LocalTrustedExecutor:
     async def run(
         self, env_id: str, argv: list[str], files: dict[str, bytes], timeout_s: int
     ) -> SmokeResult:
+        if env_id not in self._approved:
+            raise LocalTrustedRefused("prepare() with a canary paper must come first")
         argv = validate_argv(argv)
+        validate_timeout(timeout_s)
         files = validate_workspace(files)
         self._runs += 1
         slug = run_slug(env_id)
@@ -107,23 +144,24 @@ class LocalTrustedExecutor:
         shutil.rmtree(workspace, ignore_errors=True)
         shutil.copytree(self._root / slug / "base", workspace)
         self._write(workspace, files)
+        validate_workspace(
+            {
+                str(p.relative_to(workspace).as_posix()): b""
+                for p in workspace.rglob("*")
+                if p.is_file()
+            }
+        )
         command = [
             "docker", "run", "--rm", f"--name=p2p-local-{slug}-{self._runs}",
             "--network=none", "--read-only", "--tmpfs=/tmp:rw,size=512m",
             "--pids-limit=256", "--memory=4g", "--cpus=2", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--user=10001:10001",
             "-v", f"{workspace.resolve()}:/workspace:rw", "-w", "/workspace",
-            self._image, *argv,
+            "--entrypoint=python", self._image, *argv[1:],
         ]  # fmt: skip
         started = time.monotonic()
         code, stdout, stderr = await self._docker(command, timeout_s)
-        metrics_file = workspace / SMOKE_METRICS
-        metrics = None
-        if metrics_file.is_file() and metrics_file.stat().st_size <= 64 * 1024:
-            try:
-                metrics = parse_metrics(json.loads(metrics_file.read_text(encoding="utf-8")))
-            except ValueError:
-                metrics = None
+        metrics = _read_metrics(workspace, SMOKE_METRICS)
         return SmokeResult(
             exit_code=code,
             stdout=stdout[-64 * 1024 :],
