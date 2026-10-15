@@ -183,3 +183,15 @@ def test_migration_matches_the_models(tmp_path: Path) -> None:
         diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
     engine.dispose()
     assert diff == []
+
+
+async def test_cancel_wins_over_a_late_begin_or_transition(store: Store) -> None:
+    from app.storage.store import StateConflict
+
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    assert await store.cancel_run(RUN)
+    with pytest.raises(StateConflict):
+        await store.begin_run(RUN, StepName.INGESTING, 1)
+    run = await store.get_run(RUN)
+    assert run is not None and run.status is RunStatus.CANCELLED
+    assert not await store.cancel_run(RUN)  # already terminal

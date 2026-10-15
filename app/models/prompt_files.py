@@ -1,5 +1,6 @@
 """Prompt files: app/models/prompts/<role>_<purpose>.md with a YAML header."""
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+_PLACEHOLDER = re.compile(r"\{\{([a-z_]+)\}\}")
 
 
 class Prompt(BaseModel):
@@ -19,11 +21,9 @@ class Prompt(BaseModel):
     body: str
 
     def render(self, **values: str) -> str:
-        """Replace `{{name}}` placeholders (no format(): bodies contain JSON braces)."""
-        text = self.body
-        for key, value in values.items():
-            text = text.replace("{{" + key + "}}", value)
-        return text
+        """Replace `{{name}}` placeholders in one pass: a value that itself contains
+        `{{...}}` is never expanded again (no format(): bodies contain JSON braces)."""
+        return _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), self.body)
 
 
 @lru_cache(maxsize=64)

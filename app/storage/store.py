@@ -1,11 +1,12 @@
 """Persistence API used by the orchestrator, API and reaper. One writer process (the endpoint)."""
 
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import Update, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.domain.events import PAYLOAD_MODELS, EventEnvelope, EventType
@@ -438,15 +439,23 @@ class Store:
             )
             return list(rows)
 
+    async def _cas(self, s: AsyncSession, statement: Update) -> bool:
+        """Run a conditional UPDATE; True iff exactly one row matched. The condition is
+        evaluated by SQLite under its write lock, so read-then-write races can't happen."""
+        result = await s.execute(statement.execution_options(synchronize_session=False))
+        return cast("CursorResult[Any]", result).rowcount == 1
+
     async def begin_run(self, run_id: str, step: StepName, attempt: int) -> None:
-        """QUEUED -> RUNNING and open the first step, atomically."""
+        """QUEUED -> RUNNING and open the first step, atomically (compare-and-set)."""
         async with self._session() as s, s.begin():
-            run = await s.get(Run, run_id)
-            if run is None:
-                raise KeyError(run_id)
-            if run.status != RunStatus.QUEUED.value:  # compare-and-set
-                raise StateConflict(f"run {run_id} is {run.status}, not QUEUED")
-            run.status = RunStatus.RUNNING.value
+            moved = await self._cas(
+                s,
+                update(Run)
+                .where(Run.id == run_id, Run.status == RunStatus.QUEUED.value)
+                .values(status=RunStatus.RUNNING.value),
+            )
+            if not moved:
+                raise StateConflict(f"run {run_id} is not QUEUED")
             if await s.get(StepRow, (run_id, step.value, attempt)) is None:
                 s.add(StepRow(run_id=run_id, name=step.value, attempt=attempt, status="RUNNING"))
 
@@ -463,55 +472,79 @@ class Store:
         run_status: RunStatus | None = None,
     ) -> None:
         """Close a step and either open the next one or set the run's final status, in one
-        transaction: after a crash there is always exactly one RUNNING step to resume."""
+        transaction: after a crash there is always exactly one RUNNING step to resume.
+        Both rows are compare-and-set: a concurrent driver or an external status change
+        (cancel, kill switch, admin) makes the transition fail instead of being overwritten."""
         if (next_step is None) == (run_status is None):
             raise ValueError("pass exactly one of next_step and run_status")
+        now = utcnow()
         async with self._session() as s, s.begin():
-            # Compare-and-set on both rows: a concurrent driver or an external status change
-            # (cancel, kill) makes the transition fail instead of being overwritten.
-            run = await s.get(Run, run_id)
-            if run is None:
-                raise KeyError(run_id)
-            if run.status != RunStatus.RUNNING.value:
-                raise StateConflict(f"run {run_id} is {run.status}, not RUNNING")
-            row = await s.get(StepRow, (run_id, step.value, attempt))
-            if row is None or row.status != "RUNNING":
-                raise StateConflict(f"step {step.value}#{attempt} of {run_id} is not RUNNING")
-            row.status = step_status
-            row.error_code = error_code.value if error_code else None
-            row.finished_at = utcnow()
+            run_values: dict[str, object] = {"status": RunStatus.RUNNING.value}
+            if run_status is not None:
+                run_values = {
+                    "status": run_status.value,
+                    "error_code": error_code.value if error_code else None,
+                    "finished_at": now if run_status.is_terminal else None,
+                }
+            if not await self._cas(
+                s,
+                update(Run)
+                .where(Run.id == run_id, Run.status == RunStatus.RUNNING.value)
+                .values(**run_values),
+            ):
+                raise StateConflict(f"run {run_id} is not RUNNING")
+            step_values: dict[str, object] = {
+                "status": step_status,
+                "error_code": error_code.value if error_code else None,
+                "finished_at": now,
+            }
             if output_ref is not None:
-                row.output_ref = output_ref
+                step_values["output_ref"] = output_ref
+            if not await self._cas(
+                s,
+                update(StepRow)
+                .where(
+                    StepRow.run_id == run_id,
+                    StepRow.name == step.value,
+                    StepRow.attempt == attempt,
+                    StepRow.status == "RUNNING",
+                )
+                .values(**step_values),
+            ):
+                raise StateConflict(f"step {step.value}#{attempt} of {run_id} is not RUNNING")
             if next_step is not None:
                 name, next_attempt = next_step
                 s.add(
                     StepRow(run_id=run_id, name=name.value, attempt=next_attempt, status="RUNNING")
                 )
-            if run_status is not None:
-                run.status = run_status.value
-                run.error_code = error_code.value if error_code else None
-                if run_status.is_terminal:
-                    run.finished_at = utcnow()
 
     async def close_step(self, run_id: str, step: StepName, attempt: int, status: str) -> None:
         """Close a RUNNING step without touching the run (used after a StateConflict)."""
         async with self._session() as s, s.begin():
-            row = await s.get(StepRow, (run_id, step.value, attempt))
-            if row is not None and row.status == "RUNNING":
-                row.status = status
-                row.finished_at = utcnow()
+            await self._cas(
+                s,
+                update(StepRow)
+                .where(
+                    StepRow.run_id == run_id,
+                    StepRow.name == step.value,
+                    StepRow.attempt == attempt,
+                    StepRow.status == "RUNNING",
+                )
+                .values(status=status, finished_at=utcnow()),
+            )
 
     # --- API support (A-13) -----------------------------------------------------------
 
     async def cancel_run(self, run_id: str) -> bool:
         """QUEUED/RUNNING -> CANCELLED (compare-and-set); the FSM stops at its next check."""
+        active = (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
         async with self._session() as s, s.begin():
-            run = await s.get(Run, run_id)
-            if run is None or RunStatus(run.status).is_terminal:
-                return False
-            run.status = RunStatus.CANCELLED.value
-            run.finished_at = utcnow()
-            return True
+            return await self._cas(
+                s,
+                update(Run)
+                .where(Run.id == run_id, Run.status.in_(active))
+                .values(status=RunStatus.CANCELLED.value, finished_at=utcnow()),
+            )
 
     async def set_approval(self, run_id: str, decision: str) -> None:
         async with self._session() as s, s.begin():

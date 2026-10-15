@@ -38,6 +38,7 @@ _SECRET_NAME = re.compile(
 )
 _SECRET_VALUE = re.compile(
     r"://[^/@\s]+@|-----BEGIN|\b(?:sk-|tvly-|hf_|ghp_|AKIA)[A-Za-z0-9_-]{8,}"
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"  # JWTs (IAM and OIDC tokens)
 )
 
 

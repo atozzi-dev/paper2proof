@@ -73,6 +73,7 @@ async def test_run_bucket_is_idempotent() -> None:
         {"env": {"HTTPS_PROXY": "http://proxy"}},
         {"env": {"P2P_DATA": "https://user:pass@host/x"}},
         {"env": {"P2P_DATA": "-----BEGIN " + "PRIVATE KEY-----"}},  # split: secret hook
+        {"env": {"P2P_DATA": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzYS0xMjMifQ.sig"}},
         {"inject_files": {"/etc/../x": b"{}"}},
         {"inject_files": {"/var/lib/manifest.json": b"{}"}},
         {"inject_files": {"/etc/p2p/a\x00b": b"{}"}},

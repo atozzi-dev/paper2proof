@@ -6,6 +6,7 @@ and an SSE `model.call` event. Model IDs come only from the router (invariant 5)
 """
 
 import asyncio
+import math
 import random
 import re
 import time
@@ -58,7 +59,7 @@ class _Strict(BaseModel):
 
 
 class ProviderConfig(_Strict):
-    base_url: str
+    base_url: str = Field(pattern=r"^https://")  # the Bearer key never travels in clear
     api_key_env: str
     timeout_s: float = Field(gt=0)
     max_retries: int = Field(ge=1, le=10)
@@ -237,13 +238,13 @@ def parse_reset(value: str) -> float | None:
     """'1' -> 1.0, '1.5s' -> 1.5, '250ms' -> 0.25, '1m2s' -> 62.0."""
     value = value.strip()
     try:
-        return float(value)
+        seconds = float(value)
     except ValueError:
-        pass
-    parts = _DURATION.findall(value)
-    if not parts or "".join(n + u for n, u in parts) != value:
-        return None
-    return sum(float(n) * _UNITS[u] for n, u in parts)
+        parts = _DURATION.findall(value)
+        if not parts or "".join(n + u for n, u in parts) != value:
+            return None
+        seconds = sum(float(n) * _UNITS[u] for n, u in parts)
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _retryable(exc: BaseException) -> bool:
@@ -433,28 +434,42 @@ class TokenFactoryClient:
         request = self._request(role, messages, tools, tool_choice, out_cap, response_format)
         est_in = estimate_tokens(str(request.messages)) + estimate_tokens(str(request.tools))
         reservations = await self._reserve(run_id, model_id, est_in, out_cap)
+        # Abandoned or failed generations may still be billed by the provider: charge the input
+        # estimate. Unusable 200s are charged the full reservation (invariant 7, conservative).
+        input_only = (est_in, 0, self.pricing.estimate(model_id, est_in, 0))
+        full = (est_in, out_cap, self.pricing.estimate(model_id, est_in, out_cap))
         started = time.monotonic()
         try:
             raw = await self._call_with_retries(request)
         except _Exhausted:
-            await self._settle(reservations, 0, 0, 0.0)
+            await self._settle(reservations, *input_only)
             raise
         except openai.APIStatusError as err:
-            await self._settle(reservations, 0, 0, 0.0)
+            await self._settle(reservations, 0, 0, 0.0)  # rejected (4xx): nothing generated
             raise P2PError(
                 ErrorCode.MODEL_UNAVAILABLE,
                 f"model call for role {role.value} failed: HTTP {err.status_code}",
             ) from None
         except BaseException:
-            await self._settle(reservations, 0, 0, 0.0)
+            await self._settle(reservations, *input_only)
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
-        parsed = raw.parse()
-        usage = parsed.usage
+        try:
+            parsed = raw.parse()
+            usage = parsed.usage
+        except Exception:
+            await self._settle(reservations, *full)
+            raise P2PError(
+                ErrorCode.MODEL_UNAVAILABLE, f"malformed response for role {role.value}"
+            ) from None
         tokens_in = usage.prompt_tokens if usage else est_in
-        tokens_out = usage.completion_tokens if usage else 0
+        tokens_out = usage.completion_tokens if usage else out_cap
         cost = self.pricing.cost(model_id, tokens_in, tokens_out)
-        await self._settle(reservations, tokens_in, tokens_out, cost or 0.0)
+        # Unpriced models are shown as "n/a" (cost None) but charged at the worst-case price.
+        charged = (
+            cost if cost is not None else self.pricing.estimate(model_id, tokens_in, tokens_out)
+        )
+        await self._settle(reservations, tokens_in, tokens_out, charged)
         remaining = raw.headers.get("x-ratelimit-remaining-tokens")
         await self._recorder.record(
             run_id=run_id,

@@ -61,10 +61,24 @@ def _parse[M: BaseModel](
         raise _Unparseable(raw, _describe(err)) from None
 
 
+_SAFE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
+
+
 def _describe(err: ValidationError) -> str:
-    return "; ".join(
-        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['msg']}" for e in err.errors()[:10]
-    )
+    """Validation errors go back into prompts, so they carry only our vocabulary: pydantic's
+    error type and a path whose keys are identifiers. Keys the model invented (extra fields)
+    are never echoed: they may carry text injected by the paper (invariant 6)."""
+    parts = []
+    for e in err.errors()[:10]:
+        if e["type"] == "extra_forbidden":
+            path = "<unexpected field>"
+        else:
+            keys = [
+                str(p) if isinstance(p, int) or _SAFE_KEY.match(str(p)) else "?" for p in e["loc"]
+            ]
+            path = ".".join(keys) or "<root>"
+        parts.append(f"{path}: {e['type']}")
+    return "; ".join(parts)
 
 
 async def _ask(
