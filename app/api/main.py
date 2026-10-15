@@ -10,7 +10,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import admin, auth, gallery, runs
 from app.api.deps import AppState, get_state
-from app.api.security_headers import SecurityHeadersMiddleware
+from app.api.security_headers import (
+    BodySizeLimitMiddleware,
+    OriginCheckMiddleware,
+    SecurityHeadersMiddleware,
+)
 
 __all__ = ["AppState", "create_app"]
 log = logging.getLogger(__name__)
@@ -24,6 +28,10 @@ def create_app(state: AppState) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.p2p = state
+    # add_middleware puts each new middleware outside the previous ones: headers outermost,
+    # so 403/413/500 responses produced by the inner guards carry them too.
+    app.add_middleware(OriginCheckMiddleware)
+    app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
 
     @app.exception_handler(StarletteHTTPException)
@@ -33,11 +41,6 @@ def create_app(state: AppState) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def bad_request(request: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse({"error": "invalid request"}, status_code=400)
-
-    @app.exception_handler(Exception)
-    async def internal(request: Request, exc: Exception) -> JSONResponse:
-        log.exception("unhandled error", extra={"path": request.url.path})
-        return JSONResponse({"error": "internal error"}, status_code=500)  # no stack traces
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:

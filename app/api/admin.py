@@ -9,15 +9,22 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_state
+from app.api.deps import client_ip, get_state
+from app.settings import MIN_SECRET_LEN
 
 DEFAULT_QUOTA = 3
+ADMIN_FAILURES_PER_MINUTE = 10
 
 
 def require_admin(request: Request, x_admin_token: Annotated[str | None, Header()] = None) -> None:
-    expected = get_state(request).settings.admin_token.get_secret_value().encode()
+    state = get_state(request)
+    expected = state.settings.admin_token.get_secret_value().encode()
     given = (x_admin_token or "").encode()
-    if not hmac.compare_digest(given, expected):
+    # Always compare (constant time), and never accept an empty or short configured token.
+    ok = hmac.compare_digest(given, expected) and len(expected) >= MIN_SECRET_LEN
+    if not ok:
+        if not state.limiter.allow("admin-fail", client_ip(request), ADMIN_FAILURES_PER_MINUTE):
+            raise HTTPException(429, "too many requests")
         raise HTTPException(401, "admin token required")
 
 

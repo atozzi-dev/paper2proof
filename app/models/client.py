@@ -272,6 +272,11 @@ def _wait(state: RetryCallState) -> float:
 class _Exhausted(Exception):
     """Retries on the role's model are used up (429/5xx/timeouts)."""
 
+    def __init__(self, attempts: int = 1, timeouts: int = 0) -> None:
+        super().__init__(f"{attempts} attempts, {timeouts} timeouts")
+        self.attempts = attempts
+        self.timeouts = timeouts
+
 
 # --- client --------------------------------------------------------------------------------
 
@@ -441,8 +446,11 @@ class TokenFactoryClient:
         started = time.monotonic()
         try:
             raw = await self._call_with_retries(request)
-        except _Exhausted:
-            await self._settle(reservations, *input_only)
+        except _Exhausted as exhausted:
+            # Every attempt may be billed for its input; a timed-out one possibly in full.
+            tin = exhausted.attempts * est_in
+            tout = exhausted.timeouts * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
         except openai.APIStatusError as err:
             await self._settle(reservations, 0, 0, 0.0)  # rejected (4xx): nothing generated
@@ -507,33 +515,39 @@ class TokenFactoryClient:
             sleep=self._sleep or asyncio.sleep,
         )
         create = self._openai.chat.completions.with_raw_response.create
+        attempts = timeouts = 0
         try:
             async for attempt in retrying:
                 with attempt:
-                    return await create(
-                        model=req.model,
-                        messages=cast("list[ChatCompletionMessageParam]", req.messages),
-                        max_tokens=req.max_tokens,
-                        temperature=req.temperature,
-                        timeout=req.timeout,
-                        tools=cast("list[ChatCompletionToolParam]", req.tools) or omit,
-                        tool_choice=(
-                            cast("ChatCompletionToolChoiceOptionParam", req.tool_choice)
-                            if req.tool_choice is not None
-                            else omit
-                        ),
-                        response_format=(
-                            cast("ResponseFormat", req.response_format)
-                            if req.response_format is not None
-                            else omit
-                        ),
-                        extra_body=req.extra_body or None,
-                    )
+                    attempts += 1
+                    try:
+                        return await create(
+                            model=req.model,
+                            messages=cast("list[ChatCompletionMessageParam]", req.messages),
+                            max_tokens=req.max_tokens,
+                            temperature=req.temperature,
+                            timeout=req.timeout,
+                            tools=cast("list[ChatCompletionToolParam]", req.tools) or omit,
+                            tool_choice=(
+                                cast("ChatCompletionToolChoiceOptionParam", req.tool_choice)
+                                if req.tool_choice is not None
+                                else omit
+                            ),
+                            response_format=(
+                                cast("ResponseFormat", req.response_format)
+                                if req.response_format is not None
+                                else omit
+                            ),
+                            extra_body=req.extra_body or None,
+                        )
+                    except openai.APITimeoutError:
+                        timeouts += 1  # the provider may have generated (and billed) it all
+                        raise
         except Exception as err:
             if _retryable(err):
-                raise _Exhausted from err
+                raise _Exhausted(attempts, timeouts) from err
             raise
-        raise _Exhausted  # pragma: no cover - AsyncRetrying always returns or raises
+        raise _Exhausted(attempts, timeouts)  # pragma: no cover - always returns or raises
 
 
 @dataclass(frozen=True)

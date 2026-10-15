@@ -3,6 +3,7 @@ import hashlib
 import httpx
 import pytest
 
+from app.api.deps import SESSION_COOKIE
 from app.api.main import AppState
 from app.domain.models import RunStatus, StepName
 from app.storage.store import Store
@@ -57,7 +58,7 @@ async def test_without_session_is_401(client: httpx.AsyncClient) -> None:
 
 
 async def test_forged_cookie_is_401(client: httpx.AsyncClient) -> None:
-    client.cookies.set("p2p_session", "forged.value.sig", domain="testserver")
+    client.cookies.set(SESSION_COOKIE, "forged.value.sig", domain="testserver")
     assert (await _create(client)).status_code == 401
 
 
@@ -125,9 +126,33 @@ async def test_approve_requires_awaiting_approval(client: httpx.AsyncClient, sto
     assert (await client.post(f"/api/runs/{run_id}/approve")).status_code == 204
     run = await store.get_run(run_id)
     assert run is not None and run.approval == "approved"
-    assert (await client.post(f"/api/runs/{run_id}/reject")).status_code == 204
+    # A decision is final: no flip-flopping between approve and reject.
+    assert (await client.post(f"/api/runs/{run_id}/reject")).status_code == 409
     run = await store.get_run(run_id)
-    assert run is not None and run.approval == "rejected"
+    assert run is not None and run.approval == "approved"
+
+
+async def test_approve_on_a_cancelled_run_is_409(client: httpx.AsyncClient, store: Store) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    await store.begin_run(run_id, StepName.AWAITING_APPROVAL, 1)
+    await store.cancel_run(run_id)  # step row still RUNNING, run CANCELLED
+    assert (await client.post(f"/api/runs/{run_id}/approve")).status_code == 409
+
+
+async def test_a_new_approval_step_clears_the_previous_decision(store: Store) -> None:
+    run_id = "r_" + "1" * 26
+    await store.create_run(run_id, "2106.09685", created_by=None, claim_hint=None, budget={})
+    await store.begin_run(run_id, StepName.AWAITING_APPROVAL, 1)
+    assert await store.decide_approval(run_id, "approved")
+    await store.transition(
+        run_id, StepName.AWAITING_APPROVAL, 1, "SUCCEEDED", next_step=(StepName.PROVISIONING, 1)
+    )
+    await store.transition(
+        run_id, StepName.PROVISIONING, 1, "SUCCEEDED", next_step=(StepName.AWAITING_APPROVAL, 2)
+    )
+    run = await store.get_run(run_id)
+    assert run is not None and run.approval is None
 
 
 async def test_bundle_is_404_until_built(client: httpx.AsyncClient) -> None:
@@ -149,3 +174,57 @@ async def test_errors_do_not_leak_internals(client: httpx.AsyncClient) -> None:
     )
     assert response.status_code in (400, 422)
     assert "Traceback" not in response.text
+
+
+async def test_cross_origin_posts_are_rejected(client: httpx.AsyncClient) -> None:
+    await login(client)
+    response = await client.post(
+        "/api/runs", json={"arxiv_id": "2106.09685"}, headers={"Origin": "https://evil.example"}
+    )
+    assert response.status_code == 403
+    same = await client.post(
+        "/api/runs", json={"arxiv_id": "2106.09685"}, headers={"Origin": "https://testserver"}
+    )
+    assert same.status_code == 202
+
+
+async def test_session_cookie_uses_the_host_prefix(client: httpx.AsyncClient) -> None:
+    response = await login(client)
+    assert response.headers["set-cookie"].startswith("__Host-p2p_session=")
+
+
+async def test_oversized_bodies_are_413(client: httpx.AsyncClient) -> None:
+    await login(client)
+    body = b"{" + b" " * 70_000 + b"}"
+    response = await client.post(
+        "/api/runs", content=body, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 413
+
+
+async def test_step_views_hide_storage_keys(client: httpx.AsyncClient, store: Store) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    await store.begin_run(run_id, StepName.INGESTING, 1)
+    await store.transition(
+        run_id,
+        StepName.INGESTING,
+        1,
+        "SUCCEEDED",
+        output_ref="runs/x/ingested.json",
+        next_step=(StepName.EXTRACTING_CLAIMS, 1),
+    )
+    body = (await client.get(f"/api/runs/{run_id}")).json()
+    assert "output_ref" not in body["steps"][0]
+    assert "runs/x" not in str(body)
+
+
+async def test_concurrent_invite_use_never_exceeds_the_quota(store: Store) -> None:
+    import asyncio
+    from datetime import UTC, datetime
+
+    digest = hashlib.sha256(b"burst").hexdigest()
+    await store.create_invite(digest, 3, None)
+    now = datetime.now(UTC)
+    results = await asyncio.gather(*(store.consume_invite(digest, now) for _ in range(10)))
+    assert sum(results) == 3

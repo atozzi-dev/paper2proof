@@ -1,13 +1,14 @@
 """Run endpoints (docs/specs/api-and-events.md)."""
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.types import Receive, Scope, Send
 
 from app.api.deps import (
     Session,
@@ -21,11 +22,11 @@ from app.api.deps import (
 from app.api.sse import event_stream, replay_stream
 from app.domain.ids import new_run_id
 from app.domain.models import Claim, ErrorCode, RunStatus, StepName, Verdict
-from app.storage.store import StepRecord
 
 router = APIRouter(dependencies=[Depends(api_rate_limit)])
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")  # invariant 11: arXiv IDs only
 DRAIN_RETRY_AFTER_S = 120
+LAST_EVENT_ID = re.compile(r"[0-9]{1,18}")
 
 
 class CreateRun(BaseModel):
@@ -48,6 +49,17 @@ class VerdictView(BaseModel):
     verdict: Verdict
 
 
+class StepView(BaseModel):
+    """Public step info: no storage keys (output_ref stays internal)."""
+
+    name: StepName
+    attempt: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    error_code: ErrorCode | None
+
+
 class RunView(BaseModel):
     id: str
     arxiv_id: str
@@ -57,7 +69,7 @@ class RunView(BaseModel):
     finished_at: datetime | None
     listed: bool
     approval: str | None
-    steps: list[StepRecord]
+    steps: list[StepView]
     claims: list[ClaimView]
     verdicts: list[VerdictView]
 
@@ -102,10 +114,25 @@ async def get_run(run_id: str, request: Request) -> RunView:
         finished_at=run.finished_at,
         listed=run.listed,
         approval=run.approval,
-        steps=await store.get_steps(run_id),
+        steps=[StepView.model_validate(st.model_dump()) for st in await store.get_steps(run_id)],
         claims=[ClaimView(claim=c, selected=s) for c, s in await store.get_claims(run_id)],
         verdicts=[VerdictView(claim_id=c, verdict=v) for c, v in await store.list_verdicts(run_id)],
     )
+
+
+class TrackedStreamingResponse(StreamingResponse):
+    """Runs `on_close` exactly once however the stream ends (normal end, client disconnect,
+    cancellation, or the body generator never starting)."""
+
+    def __init__(self, content: AsyncIterator[bytes], on_close: Callable[[], None], **kw: Any):
+        super().__init__(content, **kw)
+        self._on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
 
 
 @router.get("/api/runs/{run_id}/events")
@@ -121,41 +148,44 @@ async def events(
     await visible_run(request, run_id)
     session = read_session(request)
     key = session.sid if session else f"ip:{client_ip(request)}"
+    # Check and take the slot synchronously (no await in between): concurrent requests can't
+    # all pass the check before any of them is counted.
     total = sum(state.open_streams.values())
     if (
         state.open_streams.get(key, 0) >= state.sse_streams_per_session
         or total >= state.sse_streams_total
     ):
         raise HTTPException(429, "too many open streams: use events.json polling")
-    start = int(last_event_id) if last_event_id and last_event_id.isdigit() else after
+    state.open_streams[key] = state.open_streams.get(key, 0) + 1
+
+    def release() -> None:
+        state.open_streams[key] -= 1
+        if state.open_streams[key] <= 0:
+            state.open_streams.pop(key, None)
+
+    start = (
+        int(last_event_id) if last_event_id and LAST_EVENT_ID.fullmatch(last_event_id) else after
+    )
 
     async def finished() -> bool:
         run = await state.store.get_run(run_id)
         return run is None or run.status.is_terminal
 
-    async def body() -> AsyncIterator[bytes]:
-        state.open_streams[key] = state.open_streams.get(key, 0) + 1
-        try:
-            if replay:
-                stream = replay_stream(state.store, run_id, speed=speed)
-            else:
-                stream = event_stream(
-                    state.store,
-                    run_id,
-                    after_id=start,
-                    poll_s=state.sse_poll_s,
-                    heartbeat_s=state.sse_heartbeat_s,
-                    finished=finished,
-                )
-            async for chunk in stream:
-                yield chunk
-        finally:
-            state.open_streams[key] -= 1
-            if state.open_streams[key] <= 0:
-                state.open_streams.pop(key, None)
-
+    if replay:
+        body = replay_stream(state.store, run_id, speed=speed)
+    else:
+        body = event_stream(
+            state.store,
+            run_id,
+            after_id=start,
+            poll_s=state.sse_poll_s,
+            heartbeat_s=state.sse_heartbeat_s,
+            finished=finished,
+        )
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    return StreamingResponse(body(), media_type="text/event-stream", headers=headers)
+    return TrackedStreamingResponse(
+        body, on_close=release, media_type="text/event-stream", headers=headers
+    )
 
 
 @router.get("/api/runs/{run_id}/events.json")
@@ -167,16 +197,11 @@ async def events_json(
     return {"events": [e.model_dump(mode="json") for e in stored]}
 
 
-async def _awaiting_approval(request: Request, run_id: str) -> bool:
-    steps = await get_state(request).store.get_steps(run_id)
-    return any(s.name is StepName.AWAITING_APPROVAL and s.status == "RUNNING" for s in steps)
-
-
 async def _decide(request: Request, run_id: str, decision: str) -> Response:
+    """One final decision per approval step, recorded atomically (compare-and-set)."""
     await visible_run(request, run_id, owner_only=True)
-    if not await _awaiting_approval(request, run_id):
-        raise HTTPException(409, "run is not awaiting approval")
-    await get_state(request).store.set_approval(run_id, decision)
+    if not await get_state(request).store.decide_approval(run_id, decision):
+        raise HTTPException(409, "run is not awaiting a decision")
     return Response(status_code=204)
 
 

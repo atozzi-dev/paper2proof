@@ -13,7 +13,7 @@ from app.orchestrator.budget import Budget, BudgetLimits
 from app.settings import Settings
 from app.storage.store import RunRecord, Store
 
-SESSION_COOKIE = "p2p_session"
+SESSION_COOKIE = "__Host-p2p_session"  # __Host-: Secure, Path=/, no Domain (no sibling planting)
 SESSION_MAX_AGE_S = 7 * 24 * 3600
 API_PER_MINUTE = 60
 SESSION_PER_MINUTE = 5

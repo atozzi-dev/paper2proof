@@ -207,3 +207,16 @@ def test_base_url_must_be_https() -> None:
         ProviderConfig(
             base_url="http://plain.test/v1/", api_key_env="K", timeout_s=1, max_retries=1
         )
+
+
+@respx.mock
+async def test_exhausted_retries_are_charged_per_attempt(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(503, json={}))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    charged = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    assert charged > 0
+    assert charged % 4 == 0  # 4 attempts x the input estimate

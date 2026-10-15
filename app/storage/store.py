@@ -482,6 +482,8 @@ class Store:
         now = utcnow()
         async with self._session() as s, s.begin():
             run_values: dict[str, object] = {"status": RunStatus.RUNNING.value}
+            if next_step is not None and next_step[0] is StepName.AWAITING_APPROVAL:
+                run_values["approval"] = None  # each approval step needs a fresh decision
             if run_status is not None:
                 run_values = {
                     "status": run_status.value,
@@ -548,12 +550,30 @@ class Store:
                 .values(status=RunStatus.CANCELLED.value, finished_at=utcnow()),
             )
 
-    async def set_approval(self, run_id: str, decision: str) -> None:
+    async def decide_approval(self, run_id: str, decision: str) -> bool:
+        """Record the user's decision once: only while the run is RUNNING, its approval step is
+        RUNNING and no decision exists yet (conditional UPDATE). False otherwise."""
+        awaiting = (
+            select(StepRow.run_id)
+            .where(
+                StepRow.run_id == run_id,
+                StepRow.name == StepName.AWAITING_APPROVAL.value,
+                StepRow.status == "RUNNING",
+            )
+            .exists()
+        )
         async with self._session() as s, s.begin():
-            run = await s.get(Run, run_id)
-            if run is None:
-                raise KeyError(run_id)
-            run.approval = decision
+            return await self._cas(
+                s,
+                update(Run)
+                .where(
+                    Run.id == run_id,
+                    Run.status == RunStatus.RUNNING.value,
+                    Run.approval.is_(None),
+                    awaiting,
+                )
+                .values(approval=decision),
+            )
 
     async def set_listed(self, run_id: str, listed: bool) -> bool:
         async with self._session() as s, s.begin():
@@ -607,18 +627,34 @@ class Store:
             return row is not None and (row.expires_at is None or row.expires_at > now)
 
     async def consume_invite(self, code_hash: str, now: datetime) -> bool:
-        """Count one live run against the invite's daily quota; False when exhausted/invalid."""
+        """Count one live run against the invite's daily quota; False when exhausted/invalid.
+        Two conditional UPDATEs (new day / same day): no read-modify-write race."""
         today = now.astimezone(UTC).date()
+        valid = InviteRow.expires_at.is_(None) | (InviteRow.expires_at > now)
         async with self._session() as s, s.begin():
-            row = await s.get(InviteRow, code_hash)
-            if row is None or (row.expires_at is not None and row.expires_at <= now):
-                return False
-            if row.used_on != today:
-                row.used_on, row.used_today = today, 0
-            if row.used_today >= row.quota_per_day:
-                return False
-            row.used_today += 1
-            return True
+            if await self._cas(
+                s,
+                update(InviteRow)
+                .where(
+                    InviteRow.code_hash == code_hash,
+                    valid,
+                    InviteRow.used_on.is_(None) | (InviteRow.used_on != today),
+                    InviteRow.quota_per_day >= 1,
+                )
+                .values(used_on=today, used_today=1),
+            ):
+                return True
+            return await self._cas(
+                s,
+                update(InviteRow)
+                .where(
+                    InviteRow.code_hash == code_hash,
+                    valid,
+                    InviteRow.used_on == today,
+                    InviteRow.used_today < InviteRow.quota_per_day,
+                )
+                .values(used_today=InviteRow.used_today + 1),
+            )
 
     async def set_paper_sha256(self, run_id: str, sha256: str) -> None:
         async with self._session() as s, s.begin():

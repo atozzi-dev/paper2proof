@@ -110,3 +110,44 @@ async def test_stream_limit_per_session(
 
 def test_ts_is_utc() -> None:
     assert datetime.now(UTC).tzinfo is UTC
+
+
+async def test_concurrent_streams_respect_the_cap(
+    client: httpx.AsyncClient, state: AppState, store: Store
+) -> None:
+    import asyncio
+
+    await _seed(store)
+    await store.set_listed(RUN, True)
+    state.sse_streams_per_session = 2
+    gate = asyncio.Event()
+    original = state.store.events_after
+
+    async def slow_events_after(run_id: str, after_id: int) -> list[object]:
+        await gate.wait()
+        return list(await original(run_id, after_id))
+
+    state.store.events_after = slow_events_after  # type: ignore[method-assign,assignment]
+
+    async def open_stream() -> int:
+        async with client.stream("GET", f"/api/runs/{RUN}/events") as response:
+            await response.aread()
+            return response.status_code
+
+    tasks = [asyncio.create_task(open_stream()) for _ in range(5)]
+    await asyncio.sleep(0.3)
+    await store.set_run_status(RUN, RunStatus.COMPLETED)
+    gate.set()
+    codes = await asyncio.gather(*tasks)
+    assert codes.count(200) == 2
+    assert codes.count(429) == 3
+    assert state.open_streams == {}  # released on close
+
+
+async def test_garbage_last_event_id_is_ignored(client: httpx.AsyncClient, store: Store) -> None:
+    await _seed(store)
+    await store.set_run_status(RUN, RunStatus.COMPLETED)
+    await store.set_listed(RUN, True)
+    garbage = {"Last-Event-ID": "\u00b2".encode()}  # a Unicode digit: isdigit() is True
+    response = await client.get(f"/api/runs/{RUN}/events", headers=garbage)
+    assert response.status_code == 200

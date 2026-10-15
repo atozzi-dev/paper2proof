@@ -53,3 +53,24 @@ async def test_invite_creation_returns_the_code_once(
     code = response.json()["code"]
     assert len(code) >= 16
     assert (await login(other_client, code)).status_code == 204
+
+
+async def test_empty_admin_token_never_authenticates(
+    state: AppState, client: httpx.AsyncClient
+) -> None:
+    from pydantic import SecretStr
+
+    state.settings = state.settings.model_copy(update={"admin_token": SecretStr("")})
+    assert (await client.post("/admin/drain", json={"on": True})).status_code == 401
+    empty = {"X-Admin-Token": ""}
+    assert (await client.post("/admin/drain", json={"on": True}, headers=empty)).status_code == 401
+
+
+async def test_admin_failures_are_rate_limited(client: httpx.AsyncClient) -> None:
+    bad = {"X-Admin-Token": "x"}
+    codes = [
+        (await client.post("/admin/drain", json={"on": True}, headers=bad)).status_code
+        for _ in range(12)
+    ]
+    assert codes[:10] == [401] * 10
+    assert 429 in codes[10:]
