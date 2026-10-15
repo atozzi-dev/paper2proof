@@ -8,11 +8,37 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_INJECT_BYTES = 64 * 1024
-# Jobs never receive credentials (invariant 4): refuse env names that look like one.
-_SECRET_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.IGNORECASE)
+MAX_INJECT_FILES = 8
+MAX_INJECT_TOTAL = 256 * 1024
+INJECT_PREFIX = "/etc/p2p/"
+CACHE_BUCKET = "p2p-cache"
+# Jobs run untrusted code: they get an allowlisted environment and never credentials
+# (invariant 4). Names are allowlisted; names and values are also screened for secrets.
+_ENV_ALLOWED = frozenset(
+    {
+        "PYTHONUNBUFFERED",
+        "PYTHONHASHSEED",
+        "PYTHONDONTWRITEBYTECODE",
+        "HF_HUB_OFFLINE",
+        "HF_DATASETS_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "CUDA_VISIBLE_DEVICES",
+        "TZ",
+    }
+)
+_ENV_NAME = re.compile(r"^P2P_[A-Z0-9_]{1,60}$")
+_SECRET_NAME = re.compile(
+    r"KEY|TOKEN|SECRET|PASS|PWD|AUTH|CREDENTIAL|PRIVATE|CERT|DSN|COOKIE|SESSION|BEARER",
+    re.IGNORECASE,
+)
+_SECRET_VALUE = re.compile(
+    r"://[^/@\s]+@|-----BEGIN|\b(?:sk-|tvly-|hf_|ghp_|AKIA)[A-Za-z0-9_-]{8,}"
+)
 
 
 class JobKind(StrEnum):
@@ -69,21 +95,43 @@ class JobSpec(BaseModel):
 
     @field_validator("inject_files")
     @classmethod
-    def _small_absolute_files(cls, files: dict[str, bytes]) -> dict[str, bytes]:
+    def _small_files_under_etc_p2p(cls, files: dict[str, bytes]) -> dict[str, bytes]:
+        if len(files) > MAX_INJECT_FILES:
+            raise ValueError(f"at most {MAX_INJECT_FILES} injected files")
+        if sum(len(c) for c in files.values()) > MAX_INJECT_TOTAL:
+            raise ValueError("injected files too large in total")
         for path, content in files.items():
-            if not path.startswith("/") or ".." in path:
-                raise ValueError(f"inject path must be absolute: {path!r}")
+            if "\x00" in path or "\\" in path or ".." in path:
+                raise ValueError(f"invalid inject path: {path!r}")
+            if not path.startswith(INJECT_PREFIX):
+                raise ValueError(f"inject paths must be under {INJECT_PREFIX}: {path!r}")
             if len(content) > MAX_INJECT_BYTES:
                 raise ValueError(f"injected file too large: {path!r}")
         return files
 
     @field_validator("env")
     @classmethod
-    def _no_secrets(cls, env: dict[str, str]) -> dict[str, str]:
-        bad = [k for k in env if _SECRET_ENV.search(k)]
-        if bad:
-            raise ValueError(f"jobs never receive credentials: {bad}")
+    def _allowlisted_env(cls, env: dict[str, str]) -> dict[str, str]:
+        for name, value in env.items():
+            if name not in _ENV_ALLOWED and not _ENV_NAME.fullmatch(name):
+                raise ValueError(f"env var not allowed in jobs: {name}")
+            if _SECRET_NAME.search(name) or _SECRET_VALUE.search(value):
+                raise ValueError(f"jobs never receive credentials: {name}")
         return env
+
+    @model_validator(mode="after")
+    def _consistent_and_least_privilege(self) -> "JobSpec":
+        kind_in_name, slug = self.name.split("-")[1:3]
+        if kind_in_name != self.kind.value:
+            raise ValueError("job name prefix does not match its kind")
+        own_bucket = f"p2p-run-{slug}"
+        for volume in self.volumes:
+            if volume.source == CACHE_BUCKET:
+                if volume.mode == "rw" and self.kind is not JobKind.PROVISION:
+                    raise ValueError("only the provisioner may write the cache")
+            elif volume.source != own_bucket:
+                raise ValueError(f"jobs may mount only {own_bucket} and {CACHE_BUCKET}")
+        return self
 
 
 class JobHandle(BaseModel):

@@ -227,3 +227,71 @@ async def test_cpu_bound_work_runs_in_the_pool(store: Store) -> None:
 
     with pytest.raises(RuntimeError, match="no CPU pool"):
         await ctx(None).run_cpu(sum, [1])
+
+
+async def test_submitting_twice_runs_one_driver(
+    store: Store, make_orchestrator: OrchestratorFactory
+) -> None:
+    await new_run(store)
+    steps = make_steps()
+    orchestrator = make_orchestrator(steps)
+    first = await orchestrator.submit(RUN)
+    second = await orchestrator.submit(RUN)
+    assert first is second
+    assert await first is RunStatus.COMPLETED
+    assert steps[StepName.INGESTING].calls == [1]
+
+
+async def test_cancel_during_a_step_is_not_overwritten(
+    store: Store, make_orchestrator: OrchestratorFactory
+) -> None:
+    await new_run(store)
+
+    async def cancel_then_continue(ctx: RunContext) -> StepResult:
+        await ctx.store.set_run_status(ctx.run_id, RunStatus.CANCELLED)  # e.g. user pressed Cancel
+        return StepResult(next=StepName.ANALYZING)
+
+    class Executing:
+        name = StepName.EXECUTING
+
+        async def run(self, ctx: RunContext) -> StepResult:
+            return await cancel_then_continue(ctx)
+
+    steps = make_steps()
+    steps[StepName.EXECUTING] = Executing()  # type: ignore[assignment]
+    assert await (await make_orchestrator(steps).submit(RUN)) is RunStatus.CANCELLED
+    run = await store.get_run(RUN)
+    assert run is not None and run.status is RunStatus.CANCELLED
+    assert steps[StepName.ANALYZING].calls == []
+
+
+async def test_inconsistent_history_fails_the_run(
+    store: Store, make_orchestrator: OrchestratorFactory
+) -> None:
+    await new_run(store)
+    await store.begin_run(RUN, StepName.INGESTING, 1)
+    await store.upsert_step(RUN, StepName.DISCOVERING, 1, "RUNNING")  # two RUNNING rows
+    status = await (await make_orchestrator(make_steps()).submit(RUN))
+    assert status is RunStatus.FAILED
+    run = await store.get_run(RUN)
+    assert run is not None and run.error_code is ErrorCode.INTERNAL_ERROR
+
+
+async def test_long_error_messages_still_emit_events(
+    store: Store, make_orchestrator: OrchestratorFactory
+) -> None:
+    await new_run(store)
+    steps = make_steps()
+    steps[StepName.PLANNING] = _raise(P2PError(ErrorCode.NO_CLAIMS, "x" * 5000))
+    assert await (await make_orchestrator(steps).submit(RUN)) is RunStatus.FAILED
+    events = await _events(store)
+    errors = [p for _, p in events if isinstance(p, ErrorPayload)]
+    assert len(errors[-1].message) <= 2000
+    assert isinstance(events[-1][1], RunStatusPayload)
+
+
+def test_failed_step_results_need_an_error_code() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="error_code"):
+        StepResult(next=RunStatus.FAILED)

@@ -19,7 +19,7 @@ from app.domain.models import ErrorCode, RunStatus, StepName
 from app.execution.backend import JobBackend
 from app.orchestrator.budget import Budget, BudgetExceeded, BudgetLimits, KillSwitchActive
 from app.orchestrator.context import RunContext
-from app.storage.store import Store
+from app.storage.store import StateConflict, Store
 
 log = logging.getLogger(__name__)
 
@@ -41,13 +41,19 @@ TRANSITIONS: dict[StepName, frozenset[StepName | RunStatus]] = {
 }
 FIRST_STEP = S.INGESTING
 STEP_STATUS_FOR_RUN = {RunStatus.COMPLETED: "SUCCEEDED", RunStatus.CANCELLED: "CANCELLED"}
+MAX_ERROR_MESSAGE = 2000  # ErrorPayload limit
 
 
 @dataclass(frozen=True)
 class StepResult:
     next: StepName | RunStatus
     output_ref: str | None = None
-    error_code: ErrorCode | None = None  # with a FAILED/CANCELLED `next`
+    error_code: ErrorCode | None = None  # required with a FAILED/BUDGET_EXCEEDED `next`
+
+    def __post_init__(self) -> None:
+        failing = (RunStatus.FAILED, RunStatus.BUDGET_EXCEEDED)
+        if self.next in failing and self.error_code is None:
+            raise ValueError("a failing StepResult needs an error_code")
 
 
 class Step(Protocol):
@@ -86,9 +92,17 @@ class Orchestrator:
         self._jobs = jobs
         self._cpu_pool = cpu_pool
         self._slots = asyncio.Semaphore(limits.global_.concurrent_runs)
+        self._tasks: dict[str, asyncio.Task[RunStatus]] = {}
 
     async def submit(self, run_id: str) -> "asyncio.Task[RunStatus]":
-        return asyncio.create_task(self._drive(run_id), name=f"run-{run_id}")
+        """Start driving a run; a run already being driven returns the existing task."""
+        current = self._tasks.get(run_id)
+        if current is not None and not current.done():
+            return current
+        task = asyncio.create_task(self._drive(run_id), name=f"run-{run_id}")
+        self._tasks[run_id] = task
+        task.add_done_callback(lambda t: self._tasks.pop(run_id, None) if t is task else None)
+        return task
 
     async def resume_all(self) -> list["asyncio.Task[RunStatus]"]:
         """On startup: restart every non-terminal run from its last unfinished step."""
@@ -123,13 +137,29 @@ class Orchestrator:
                 return RunStatus.FAILED
             step, attempt = point
             if run.status is RunStatus.QUEUED:
-                await self._store.begin_run(run_id, step, attempt)
+                try:
+                    await self._store.begin_run(run_id, step, attempt)
+                except StateConflict:
+                    return await self._current_status(run_id)
                 await self._emit(run_id, EventType.RUN_STATUS, {"status": RunStatus.RUNNING})
             while True:
-                outcome = await self._run_step(run_id, step, attempt)
+                # Stop between steps if someone (user, admin, reaper) ended the run meanwhile.
+                current = await self._current_status(run_id)
+                if current is not RunStatus.RUNNING:
+                    await self._store.close_step(run_id, step, attempt, "CANCELLED")
+                    return current
+                try:
+                    outcome = await self._run_step(run_id, step, attempt)
+                except StateConflict:
+                    await self._store.close_step(run_id, step, attempt, "CANCELLED")
+                    return await self._current_status(run_id)
                 if isinstance(outcome, RunStatus):
                     return outcome
                 step, attempt = outcome
+
+    async def _current_status(self, run_id: str) -> RunStatus:
+        run = await self._store.get_run(run_id)
+        return run.status if run is not None else RunStatus.FAILED
 
     async def _execute(self, ctx: RunContext) -> StepResult | _Ending:
         """Run the step and map exceptions to a terminal ending (never re-raises Exception)."""
@@ -225,6 +255,7 @@ class Orchestrator:
         ok = status is RunStatus.COMPLETED
         await self._emit_finished(ctx, started, ok=ok, error_code=code)
         if code is not None and not ok and status is not RunStatus.CANCELLED:
-            await self._emit(ctx.run_id, EventType.ERROR, {"code": code, "message": ending.message})
+            message = (ending.message or code.value)[:MAX_ERROR_MESSAGE]
+            await self._emit(ctx.run_id, EventType.ERROR, {"code": code, "message": message})
         await self._emit(ctx.run_id, EventType.RUN_STATUS, {"status": status, "error_code": code})
         return status
