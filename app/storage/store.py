@@ -413,3 +413,64 @@ class Store:
                 row = LedgerDaily(day=day, inference_usd=0.0, cloud_usd=0.0, kill_switch=on)
                 s.add(row)
             row.kill_switch = on
+
+    # --- FSM transitions (app.orchestrator.fsm) -------------------------------------------
+
+    async def active_run_ids(self) -> list[str]:
+        """Runs that are not terminal, oldest first (resumed on startup)."""
+        active = [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(Run.id).where(Run.status.in_(active)).order_by(Run.created_at, Run.id)
+            )
+            return list(rows)
+
+    async def begin_run(self, run_id: str, step: StepName, attempt: int) -> None:
+        """QUEUED -> RUNNING and open the first step, atomically."""
+        async with self._session() as s, s.begin():
+            run = await s.get(Run, run_id)
+            if run is None:
+                raise KeyError(run_id)
+            run.status = RunStatus.RUNNING.value
+            if await s.get(StepRow, (run_id, step.value, attempt)) is None:
+                s.add(StepRow(run_id=run_id, name=step.value, attempt=attempt, status="RUNNING"))
+
+    async def transition(
+        self,
+        run_id: str,
+        step: StepName,
+        attempt: int,
+        step_status: str,
+        *,
+        error_code: ErrorCode | None = None,
+        output_ref: str | None = None,
+        next_step: tuple[StepName, int] | None = None,
+        run_status: RunStatus | None = None,
+    ) -> None:
+        """Close a step and either open the next one or set the run's final status, in one
+        transaction: after a crash there is always exactly one RUNNING step to resume."""
+        if (next_step is None) == (run_status is None):
+            raise ValueError("pass exactly one of next_step and run_status")
+        async with self._session() as s, s.begin():
+            row = await s.get(StepRow, (run_id, step.value, attempt))
+            if row is None:
+                row = StepRow(run_id=run_id, name=step.value, attempt=attempt, status=step_status)
+                s.add(row)
+            row.status = step_status
+            row.error_code = error_code.value if error_code else None
+            row.finished_at = utcnow()
+            if output_ref is not None:
+                row.output_ref = output_ref
+            if next_step is not None:
+                name, next_attempt = next_step
+                s.add(
+                    StepRow(run_id=run_id, name=name.value, attempt=next_attempt, status="RUNNING")
+                )
+            if run_status is not None:
+                run = await s.get(Run, run_id)
+                if run is None:
+                    raise KeyError(run_id)
+                run.status = run_status.value
+                run.error_code = error_code.value if error_code else None
+                if run_status.is_terminal:
+                    run.finished_at = utcnow()
