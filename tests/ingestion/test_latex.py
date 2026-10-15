@@ -1,3 +1,5 @@
+import pytest
+
 from app.ingestion.archive import extract_source
 from app.ingestion.latex import (
     MAX_DEPTH,
@@ -85,3 +87,33 @@ def test_flatten_bounds_work_even_when_inputs_expand_to_nothing() -> None:
     assert "[input size limit]" in text
     assert len(text) <= MAX_FLATTEN_CHARS + 100
     assert MAX_INPUTS < 3000
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        rb"\input{" * 80_000,
+        rb"\section{" * 80_000,
+        b"\begin{table}" * 60_000,
+        b"\begin{abstract}" * 60_000,
+        b"\begin{table}" + b"\begin{tabular}{" * 60_000 + rb"\end{table}",
+        b"\title{" + b"{" * 500_000,
+        rb"\cline{" * 100_000,
+    ],
+    ids=["input", "section", "table", "abstract", "tabular", "title", "cline"],
+)
+def test_hostile_sources_parse_in_linear_time(payload: bytes) -> None:
+    import time
+
+    files = {"main.tex": b"\\documentclass{article}\begin{document}" + payload}
+    started = time.monotonic()
+    parse_latex(files, arxiv_id="0000.00001", title=None)
+    assert time.monotonic() - started < 2
+
+
+def test_a_commented_documentclass_does_not_pick_the_main_file() -> None:
+    files = {
+        "a.tex": b"% \\documentclass{article}\begin{document}\nnot main",
+        "b.tex": b"\\documentclass{article}\n\begin{document}main\\end{document}",
+    }
+    assert find_main(files) == "b.tex"

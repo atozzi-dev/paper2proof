@@ -101,3 +101,26 @@ def test_artifact_keys_cannot_escape_the_root(tmp_path: Path) -> None:
     for bad in ("../x", "/abs", "a/../../b", "a\\b", ""):
         with pytest.raises(ValueError):
             store.put_bytes(bad, b"x")
+
+
+async def test_a_parse_that_takes_too_long_fails_the_step(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    import app.orchestrator.steps.ingesting as ingesting
+
+    def slow(*args: Any) -> Any:
+        time.sleep(1.0)
+        raise AssertionError("should have been abandoned")
+
+    monkeypatch.setattr(ingesting, "_parse", slow)
+    with ThreadPoolExecutor(1) as pool:
+        ctx = await _ctx(store, pool)
+        step = IngestingStep(
+            FakeArxiv(canary_tar()), LocalArtifactStore(tmp_path), parse_timeout_s=0.2
+        )
+        with pytest.raises(P2PError) as err:
+            await step.run(ctx)
+    assert err.value.code is ErrorCode.INGEST_FAILED
+    assert "too long" in err.value.message

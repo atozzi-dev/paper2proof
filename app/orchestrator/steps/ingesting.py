@@ -39,9 +39,12 @@ def _render(pdf: bytes) -> list[RenderedPage]:
 class IngestingStep:
     name = StepName.INGESTING
 
-    def __init__(self, papers: PaperSource, artifacts: ArtifactStore) -> None:
+    def __init__(
+        self, papers: PaperSource, artifacts: ArtifactStore, *, parse_timeout_s: float = 120
+    ) -> None:
         self._papers = papers
         self._artifacts = artifacts
+        self._parse_timeout = parse_timeout_s
 
     async def run(self, ctx: RunContext) -> StepResult:
         run = await ctx.store.get_run(ctx.run_id)
@@ -56,14 +59,18 @@ class IngestingStep:
         except Exception as err:
             raise P2PError(ErrorCode.INGEST_FAILED, "could not download the paper") from err
         try:
-            paper, pdf = await ctx.run_cpu(_parse, data, run.arxiv_id, meta.title)
+            paper, pdf = await ctx.run_cpu(
+                _parse, data, run.arxiv_id, meta.title, timeout_s=self._parse_timeout
+            )
+        except TimeoutError:
+            raise P2PError(ErrorCode.INGEST_FAILED, "parsing the paper took too long") from None
         except (ArchiveError, ValueError) as err:
             raise P2PError(ErrorCode.INGEST_FAILED, f"unusable paper source: {err}") from err
 
         prefix = f"runs/{ctx.run_id}"
         if pdf is not None:
             images = []
-            for page in await ctx.run_cpu(_render, pdf):
+            for page in await ctx.run_cpu(_render, pdf, timeout_s=self._parse_timeout):
                 key = f"{prefix}/pages/{page.page}.png"
                 await asyncio.to_thread(self._artifacts.put_bytes, key, page.png)
                 images.append(PageImage(page=page.page, key=key))

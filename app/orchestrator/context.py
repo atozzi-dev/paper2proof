@@ -29,8 +29,13 @@ class RunContext:
     async def emit(self, type: EventType, payload: BaseModel | dict[str, Any]) -> int:
         return await self.store.append_event(self.run_id, type, payload)
 
-    async def run_cpu[T](self, fn: Callable[..., T], *args: Any) -> T:
-        """CPU-bound work (parsing, rasterizing, hashing) off the event loop (invariant 12)."""
+    async def run_cpu[T](
+        self, fn: Callable[..., T], *args: Any, timeout_s: float | None = None
+    ) -> T:
+        """CPU-bound work (parsing, rasterizing, hashing) off the event loop (invariant 12).
+        With `timeout_s`, TimeoutError is raised when the work takes longer; the worker
+        finishes on its own (pure functions over bounded inputs)."""
         if self.cpu_pool is None:
             raise RuntimeError("no CPU pool configured")
-        return await asyncio.get_running_loop().run_in_executor(self.cpu_pool, fn, *args)
+        future = asyncio.get_running_loop().run_in_executor(self.cpu_pool, fn, *args)
+        return await asyncio.wait_for(future, timeout_s) if timeout_s else await future
