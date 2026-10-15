@@ -63,6 +63,7 @@ def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
     ):
         return None
     commit, lock = data.get("repo_commit"), data.get("lock_sha256")
+    snapshot = data.get("repo_files_sha256")
     datasets = data.get("datasets")
     return {  # whitelisted fields only: later steps and bundles read this artifact
         "schema": "p2p.provision-report/v1",
@@ -80,6 +81,9 @@ def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
             if isinstance(d, str) and _DATASET.fullmatch(d)
         ],
         "smoke": data.get("smoke") is True,
+        "repo_files_sha256": (
+            snapshot if isinstance(snapshot, str) and _SHA256.fullmatch(snapshot) else None
+        ),
     }
 
 

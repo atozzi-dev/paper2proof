@@ -476,3 +476,50 @@ def test_the_deadline_handler_writes_the_error_and_exits(
     provision.deadline_expired(staging)
     assert exits == [1]
     assert "deadline" in json.loads((staging / "provision_error.json").read_text())["error"]
+
+
+def test_a_repository_snapshot_is_written_with_its_digest(tmp_path: Path) -> None:
+    import hashlib
+
+    class Repo(FakeRunner):
+        def __call__(self, argv: Sequence[str], **kwargs: Any) -> str:
+            out = super().__call__(argv, **kwargs)
+            if "clone" in argv:
+                dest = Path(list(argv)[-1])
+                (dest / "src").mkdir()
+                (dest / "src" / "model.py").write_text("class Net: ...\n")
+                (dest / "weights.bin").write_bytes(b"\x00" * 10)
+                (dest / "notes.md").write_text("x" * (300 * 1024))  # too large: skipped
+            return out
+
+    report, paths = _provision(tmp_path, Repo())
+    raw = (paths.staging / "repo_files.json").read_bytes()
+    assert report["repo_files_sha256"] == hashlib.sha256(raw).hexdigest()
+    files = json.loads(raw)["files"]
+    assert files["src/model.py"] == "class Net: ...\n"
+    assert "weights.bin" not in files and "notes.md" not in files
+
+
+def test_the_deadline_exit_happens_even_when_the_error_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exits: list[int] = []
+    monkeypatch.setattr(provision.os, "_exit", exits.append)
+    blocked = tmp_path / "staging"
+    blocked.write_text("a file where the directory should be")
+    provision.deadline_expired(blocked)
+    assert exits == [1]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_a_symlinked_staging_directory_is_replaced(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    paths = _paths(tmp_path)
+    paths.staging.symlink_to(elsewhere, target_is_directory=True)
+    provision.provision(
+        provision.validate_manifest(manifest()), paths, FakeRunner(), fake_fetch, fake_smoke,
+        deadline_s=1080,
+    )  # fmt: skip
+    assert not paths.staging.is_symlink()
+    assert not list(elsewhere.iterdir())

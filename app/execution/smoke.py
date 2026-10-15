@@ -6,6 +6,7 @@ untrusted code produced the results.
 """
 
 import asyncio
+import hashlib
 import io
 import math
 import re
@@ -70,6 +71,12 @@ def validate_timeout(timeout_s: int) -> int:
     if isinstance(timeout_s, bool) or not 1 <= timeout_s <= MAX_TIMEOUT_S:
         raise SmokeContractError(f"smoke timeout must be 1..{MAX_TIMEOUT_S} s")
     return timeout_s
+
+
+def pack_with_digest(files: Mapping[str, bytes]) -> tuple[bytes, str]:
+    """The archive and its sha256, both computed in the CPU pool (invariant 12)."""
+    archive = pack_workspace(files)
+    return archive, hashlib.sha256(archive).hexdigest()
 
 
 def pack_workspace(files: Mapping[str, bytes]) -> bytes:

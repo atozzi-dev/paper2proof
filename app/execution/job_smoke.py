@@ -11,7 +11,6 @@ control plane never reuses a name), and a smoke job left running by a restart is
 """
 
 import asyncio
-import hashlib
 import json
 import secrets
 import time
@@ -27,7 +26,7 @@ from app.execution.smoke import (
     SmokeContractError,
     SmokeResult,
     SmokeUnavailable,
-    pack_workspace,
+    pack_with_digest,
     parse_smoke_result,
     run_variants,
     validate_argv,
@@ -39,7 +38,7 @@ from app.orchestrator.context import RunContext
 from app.orchestrator.steps.jobs import run_job, utcnow
 
 SMOKE_PLATFORM, SMOKE_PRESET = "cpu-d3", "4vcpu-16gb"
-SMOKE_WATCHDOG_S = 5 * 60  # execution-contracts §8
+SMOKE_SETUP_S = 180  # job start, image pull and extraction before the script runs (S-12)
 MAX_RESULT_BYTES = 256 * 1024
 
 
@@ -111,7 +110,7 @@ class JobSmokeExecutor:
         workspace = validate_workspace({**self._base.get(env_id, {}), **validate_workspace(files)})
         validate_timeout(timeout_s)
         ctx = self._ctx
-        archive = await ctx.run_cpu(pack_workspace, workspace)
+        archive, digest = await ctx.run_cpu(pack_with_digest, workspace)
         iteration = await self._next_iteration(env_id)
         nonce = secrets.token_hex(16)
         await self._storage.put_bytes(env_id, f"smoke/{iteration}/workspace.tar", archive)
@@ -121,7 +120,7 @@ class JobSmokeExecutor:
             "iteration": iteration,
             "argv": argv,
             "timeout_s": timeout_s,
-            "workspace_sha256": hashlib.sha256(archive).hexdigest(),
+            "workspace_sha256": digest,
             "nonce": nonce,
         }
         bucket = await ctx.jobs.ensure_run_bucket(env_id)
@@ -140,7 +139,7 @@ class JobSmokeExecutor:
             inject_files={"/etc/p2p/smoke.json": json.dumps(manifest).encode()},
             env={"PYTHONUNBUFFERED": "1"},
             preemptible=False,
-            watchdog_s=SMOKE_WATCHDOG_S,
+            watchdog_s=timeout_s + SMOKE_SETUP_S,
         )
         started = time.monotonic()
         outcome = await run_job(

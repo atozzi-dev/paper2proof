@@ -75,6 +75,14 @@ def validate(manifest: Any) -> dict[str, Any]:
         raise ContractError(f"invalid manifest: {type(err).__name__}") from None
 
 
+def _runner_flag(arg: str) -> bool:
+    """--seed, --out and --smoke belong to the runner (argparse also accepts prefixes)."""
+    if arg.startswith("--"):
+        name = arg[2:].split("=", 1)[0]
+        return bool(name) and any(f.startswith(name) for f in ("seed", "out", "smoke"))
+    return len(arg) >= 2 and arg[0] == "-" and arg[1] in "so"
+
+
 def _short_str(value: Any, limit: int) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit
 
@@ -116,6 +124,7 @@ def _validate(manifest: Any) -> dict[str, Any]:
     need(isinstance(paths, dict) and set(paths) == PATH_KEYS, "paths")
     need(all(isinstance(paths[k], str) for k in PATH_KEYS - {"repo"}), "paths")
     need(paths["repo"] is None or isinstance(paths["repo"], str), "paths.repo")
+    need(not any(_runner_flag(a) for a in args), "args set a runner flag")
     need(_short_str(m["claim_ref"], 128), "claim_ref")
     need(_short_str(m["metric"], 64), "metric")
     need(isinstance(m["higher_is_better"], bool), "higher_is_better")
@@ -413,6 +422,7 @@ def run(
                 if not ARCHIVE_NAME.fullmatch(name) or set(name) == {"."}:
                     raise ContractError(f"invalid data archive name: {archive.name[:100]}")
                 extract(archive, data / name)
+        gpu = gpu_name()  # nvidia-smi can take seconds: SIGTERM here still writes results
     except (ContractError, OSError, subprocess.SubprocessError) as err:
         print(f"CONTRACT ERROR: {err}", file=sys.stderr)
         write_results(EXIT_CONTRACT)
@@ -426,7 +436,6 @@ def run(
     for directory in (run_dir, logs, home):
         directory.mkdir(parents=True, exist_ok=True)
     env = _child_env(work, overlay, repo, workspace, data)
-    gpu = gpu_name()
     budget = float(
         budget_override_s if budget_override_s is not None else manifest["budget_seconds"]
     )

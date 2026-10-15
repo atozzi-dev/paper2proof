@@ -112,7 +112,7 @@ def test_a_passing_script_reports_its_metrics(tmp_path: Path) -> None:
     path, mnt = _setup(tmp_path)
     result = _run(path, mnt, tmp_path)
     assert result["exit_code"] == 0
-    assert result["metrics"] == {"acc": 0.5, "junk": "x"}  # filtered by the control plane
+    assert result["metrics"] == {"acc": 0.5}  # flat numeric values only
     assert "data dir" in result["stdout"]
 
 
@@ -191,3 +191,16 @@ def test_results_stay_small_with_non_ascii_output(tmp_path: Path) -> None:
     path, mnt = _setup(tmp_path, tar=workspace_tar({"train.py": script.encode()}))
     _run(path, mnt, tmp_path)
     assert (mnt / "smoke" / "3" / "result.json").stat().st_size < 200 * 1024
+
+
+def test_only_flat_numeric_metrics_are_reported(tmp_path: Path) -> None:
+    script = (
+        "import json, os, sys\n"
+        "out = sys.argv[sys.argv.index('--out') + 1]\n"
+        "os.makedirs(out, exist_ok=True)\n"
+        "json.dump({'acc': 0.5, 'curve': [1e15] * 2000, 'nested': {'a': 1}, 'flag': True},\n"
+        "          open(os.path.join(out, 'metrics.json'), 'w'))\n"
+    )
+    path, mnt = _setup(tmp_path, tar=workspace_tar({"train.py": script.encode()}))
+    result = _run(path, mnt, tmp_path)
+    assert result["metrics"] == {"acc": 0.5}

@@ -59,6 +59,12 @@ MAX_REQUIREMENT_FILE = 64 * 1024
 MAX_REQUIREMENT_FILES = 10
 MAX_REQUIREMENT_CHARS = 128 * 1024  # all files together, in the report
 MAX_TRUSTED_OVERLAYS = 300
+SNAPSHOT_SUFFIXES = (".py", ".md", ".txt", ".rst", ".yaml", ".yml", ".json", ".cfg", ".toml",
+                     ".ini", ".sh", ".ipynb")  # fmt: skip
+SNAPSHOT_PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")
+MAX_SNAPSHOT_FILE = 200 * 1024
+MAX_SNAPSHOT_FILES = 400
+MAX_SNAPSHOT_BYTES = 3 * 1024 * 1024
 COMMAND_TIMEOUT_S = 900
 DEFAULT_DEADLINE_S = 1080  # 18 of the 20 watchdog minutes: leave time to write the error file
 PYTHON_VERSION = "3.12"
@@ -475,8 +481,33 @@ def clone_repo(
             files[path.name] = text
             budget -= cost
     _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
+    _write_snapshot(dest, paths.staging / "repo_files.json")
     resolved = commit.strip()
     return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
+
+
+def _write_snapshot(repo: Path, out: Path) -> None:
+    """Readable text files of the clone for the Coder's read_file (the control plane never
+    unpacks repository archives). Regular files only, plain path segments, bounded sizes."""
+    files: dict[str, str] = {}
+    total = 0
+    for path in sorted(repo.rglob("*")):
+        rel = path.relative_to(repo).as_posix()
+        parts = rel.split("/")
+        if parts[0] == ".git" or path.is_symlink() or not path.is_file():
+            continue
+        if not path.name.endswith(SNAPSHOT_SUFFIXES) or len(parts) > 8:
+            continue
+        if not all(SNAPSHOT_PART.fullmatch(p) for p in parts):
+            continue
+        size = path.stat().st_size
+        if size > MAX_SNAPSHOT_FILE or total + size > MAX_SNAPSHOT_BYTES:
+            continue
+        files[rel] = path.read_text(encoding="utf-8", errors="replace")
+        total += size
+        if len(files) >= MAX_SNAPSHOT_FILES:
+            break
+    out.write_text(json.dumps({"files": files}, ensure_ascii=False), encoding="utf-8")
 
 
 def split_files(names: Sequence[str], split: str) -> list[str]:
@@ -580,6 +611,7 @@ def _clean_staging(staging: Path) -> None:
         "overlay.tar.zst",
         "repo.tar.zst",
         "lock.txt",
+        "repo_files.json",
     ):
         (staging / name).unlink(missing_ok=True)
     data = staging / "data"
@@ -603,6 +635,8 @@ def provision(
         manifest.deadline_unix if manifest.deadline_unix is not None else time.time() + deadline_s
     )
     clock.timeout()
+    if paths.staging.is_symlink():  # planted by a smoke job sharing the bucket
+        paths.staging.unlink()
     for directory in (paths.staging, paths.cache, paths.work, paths.work / "home"):
         directory.mkdir(parents=True, exist_ok=True)
     _clean_staging(paths.staging)
@@ -620,6 +654,11 @@ def provision(
         "repo": manifest.repo_url is not None,
         "repo_commit": commit,
         "requirement_files": requirement_files,
+        "repo_files_sha256": (
+            _sha256(paths.staging / "repo_files.json")
+            if (paths.staging / "repo_files.json").is_file()
+            else None
+        ),
         "datasets": datasets,
         "smoke": manifest.smoke_dataset is not None,
     }
@@ -632,13 +671,19 @@ def provision(
 def deadline_expired(staging: Path) -> None:
     """Write the error and leave at once: raising would wait for in-process download threads
     (huggingface_hub joins its pool) until the watchdog cancels the job without a message."""
-    staging.mkdir(parents=True, exist_ok=True)
-    with (staging / "provision_error.json").open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"error": "provisioning deadline reached"}))
-        handle.flush()
-        os.fsync(handle.fileno())
-    print("PROVISION FAILED: provisioning deadline reached", file=sys.stderr, flush=True)
-    os._exit(1)
+    try:
+        if staging.is_symlink():
+            staging.unlink()
+        staging.mkdir(parents=True, exist_ok=True)
+        with (staging / "provision_error.json").open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"error": "provisioning deadline reached"}))
+            handle.flush()
+            os.fsync(handle.fileno())
+        print("PROVISION FAILED: provisioning deadline reached", file=sys.stderr, flush=True)
+    except OSError:
+        pass  # a full or broken mount must not keep us waiting: the watchdog still reports it
+    finally:
+        os._exit(1)
 
 
 def _arm_deadline(manifest: Manifest, staging: Path) -> None:  # pragma: no cover - POSIX

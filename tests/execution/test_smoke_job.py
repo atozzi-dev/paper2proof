@@ -227,3 +227,13 @@ async def test_a_smoke_job_still_running_after_a_restart_is_cancelled(store: Sto
     await smoke.run(env, ARGV, {}, 60)
     assert jobs.cancelled == [f"p2p-smoke-{RUN[2:]}-1"]
     assert f"p2p-smoke-{RUN[2:]}-2" in jobs.jobs
+
+
+async def test_the_watchdog_leaves_room_for_setup(store: Store) -> None:
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_result(storage))
+    smoke, _ = await _executor(store, jobs, storage)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    await smoke.run(env, ARGV, {}, 60)
+    ((_, _, _, spec),) = jobs.jobs.values()
+    assert spec.watchdog_s == 60 + 180

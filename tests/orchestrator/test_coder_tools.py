@@ -9,6 +9,7 @@ from app.orchestrator.coder_tools import (
     TOOL_DEFS,
     ToolError,
     Workspace,
+    check_user_args,
     parse_args,
 )
 
@@ -93,3 +94,40 @@ def test_snapshot_round_trip() -> None:
     ws.write("workspace/a.py", "é\n")
     again = Workspace.from_snapshot(ws.snapshot())
     assert again.files == ws.files
+
+
+def test_a_near_miss_patch_on_a_large_file_fails_fast() -> None:
+    import time
+
+    ws = Workspace()
+    ws.write("workspace/big.py", "".join(f"x{i} = {i}\n" for i in range(7000)))
+    context = "".join(f" y{i} = {i}\n" for i in range(3000))
+    diff = f"--- a/workspace/big.py\n+++ b/workspace/big.py\n@@ -1,3000 +1,3000 @@\n{context}"
+    started = time.monotonic()
+    with pytest.raises(ToolError):
+        ws.apply_patch(diff)
+    assert time.monotonic() - started < 0.5
+
+
+def test_patched_files_keep_the_write_limit() -> None:
+    ws = Workspace()
+    ws.write("workspace/a.py", "a\n")
+    big = "".join(f"+{'x' * 99}\n" for i in range(1100))
+    diff = f"--- a/workspace/a.py\n+++ b/workspace/a.py\n@@ -1,1 +1,1101 @@\n a\n{big}"
+    with pytest.raises(ToolError):
+        ws.apply_patch(diff)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--seed", "1"], ["--se"], ["--out=x"], ["--o", "x"], ["--smoke"], ["--sm"], ["-s"]],
+)
+def test_runner_owned_flags_are_rejected(args: list[str]) -> None:
+    with pytest.raises(ToolError):
+        check_user_args(args)
+
+
+def test_other_flags_pass() -> None:
+    assert check_user_args(["--epochs", "2", "--lr=0.1", "--outdir-name", "x"]) == [
+        "--epochs", "2", "--lr=0.1", "--outdir-name", "x",
+    ]  # fmt: skip

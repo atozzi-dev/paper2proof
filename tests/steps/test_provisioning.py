@@ -536,3 +536,13 @@ async def test_the_manifest_fits_with_a_full_trust_store(store: Store, tmp_path:
     manifest = json.loads(spec.inject_files["/etc/p2p/provision.json"])
     assert len(manifest["trusted_overlays"]) == 300
     assert len(spec.inject_files["/etc/p2p/provision.json"]) < 60 * 1024
+
+
+async def test_the_repository_snapshot_digest_is_kept(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(storage, repo_files_sha256="d" * 64)
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["repo_files_sha256"] == "d" * 64

@@ -1,0 +1,56 @@
+[
+ {
+  "tool_calls": [
+   {
+    "id": "call_1",
+    "name": "write_file",
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('ok')\\n\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_2",
+    "name": "run_smoke",
+    "arguments": "{\"script\": \"train.py\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_3",
+    "name": "write_file",
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('changed')\\n\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_4",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": []}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_5",
+    "name": "run_smoke",
+    "arguments": "{\"script\": \"train.py\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_6",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": []}"
+   }
+  ]
+ }
+]

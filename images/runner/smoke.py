@@ -18,6 +18,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -123,7 +124,10 @@ def _encoded_tail(text: str, limit: int = TAIL_BYTES) -> str:
 def _extract_workspace(archive: Path, dest: Path, digest: str) -> None:
     if not archive.is_file() or archive.stat().st_size > MAX_WORKSPACE_BYTES:
         raise ContractError("workspace archive missing or too large")
-    data = archive.read_bytes()
+    with archive.open("rb") as handle:
+        data = handle.read(MAX_WORKSPACE_BYTES + 1)
+    if len(data) > MAX_WORKSPACE_BYTES:
+        raise ContractError("workspace archive too large")
     if hashlib.sha256(data).hexdigest() != digest:
         raise ContractError("workspace archive does not match the manifest digest")
     import io
@@ -132,14 +136,28 @@ def _extract_workspace(archive: Path, dest: Path, digest: str) -> None:
     extract_stream(io.BytesIO(data), dest, max_bytes=MAX_WORKSPACE_BYTES, max_members=1000)
 
 
-def _read_metrics(path: Path) -> dict[str, Any] | None:
+def _read_metrics(path: Path) -> dict[str, float] | None:
+    """Flat, finite, numeric top-level values only (the control plane filters them again):
+    nested or huge values would bloat result.json past what the control plane reads."""
     if not path.is_file() or path.stat().st_size > 64 * 1024:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, RecursionError):
         return None
-    return data if isinstance(data, dict) else None  # filtered again by the control plane
+    if not isinstance(data, dict):
+        return None
+    metrics: dict[str, float] = {}
+    for key, value in list(data.items())[:100]:
+        if not isinstance(key, str) or len(key) > 100 or type(value) not in (int, float):
+            continue
+        try:
+            number = float(value)
+        except OverflowError:
+            continue
+        if math.isfinite(number):
+            metrics[key] = number
+    return metrics
 
 
 def run(
@@ -164,7 +182,9 @@ def run(
         result["nonce"] = manifest["nonce"]
         out_dir.mkdir(parents=True, exist_ok=True)
         tmp = out_dir / "result.json.tmp"
-        tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8", errors="backslashreplace"
+        )
         tmp.replace(out_dir / "result.json")
         shutil.rmtree(work / "home", ignore_errors=True)
         return 0

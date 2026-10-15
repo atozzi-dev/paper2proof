@@ -106,8 +106,7 @@ def _run(manifest: Path, tmp_path: Path, **kwargs: Any) -> int:
     code: int = entrypoint.run(
         manifest,
         work=tmp_path / "work",
-        gpu_name=lambda: "NVIDIA L40S",
-        **kwargs,
+        **{"gpu_name": lambda: "NVIDIA L40S", **kwargs},
     )
     return code
 
@@ -342,3 +341,18 @@ def test_data_archives_need_plain_names(tmp_path: Path) -> None:
     (tmp_path / "data" / "...tar.zst").write_bytes(b"")
     assert _run(manifest, tmp_path) == 30
     assert _results(results)["exit_reason"] == "contract_error"
+
+
+@pytest.mark.parametrize("args", [["--seed", "5"], ["--sm"], ["--out=/tmp/x"]])
+def test_runner_owned_flags_in_args_are_contract_errors(tmp_path: Path, args: list[str]) -> None:
+    manifest, _ = _setup(tmp_path, args=args)
+    assert _run(manifest, tmp_path) == 30
+
+
+def test_termination_while_probing_the_gpu_writes_results(tmp_path: Path) -> None:
+    def interrupted() -> str:
+        raise entrypoint.Terminated
+
+    manifest, results = _setup(tmp_path)
+    assert _run(manifest, tmp_path, gpu_name=interrupted) == 20
+    assert _results(results)["exit_reason"] == "budget_timeout"

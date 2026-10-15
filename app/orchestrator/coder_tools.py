@@ -25,6 +25,8 @@ MAX_PATCH_CHARS = 200 * 1024
 WORKSPACE = "workspace/"
 REPO = "repo/"
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+HUNK_FUZZ_LINES = 200  # a moved hunk is searched only this far from its stated line
+RUNNER_FLAGS = ("seed", "out", "smoke")  # set by the runner; argparse also accepts prefixes
 
 
 class ToolError(Exception):
@@ -108,6 +110,19 @@ def parse_args(name: str, raw: str) -> _Args:
     except (ValueError, RecursionError, ValidationError) as err:
         first = err.errors()[0]["msg"] if isinstance(err, ValidationError) else "invalid JSON"
         raise ToolError(f"invalid arguments for {name}: {first}") from None
+
+
+def check_user_args(args: list[str]) -> list[str]:
+    """Extra script arguments may never set (or abbreviate) a flag the runner owns: a copied
+    `--seed 0` or `--smoke` would make every seed identical or run on the smoke subset."""
+    for arg in args:
+        if arg.startswith("--"):
+            name = arg[2:].split("=", 1)[0]
+            if name and any(flag.startswith(name) for flag in RUNNER_FLAGS):
+                raise ToolError(f"{arg} is set by the runner (--seed, --out and --smoke)")
+        elif len(arg) >= 2 and arg[0] == "-" and arg[1] in "so":
+            raise ToolError(f"{arg} may abbreviate a flag the runner sets")
+    return list(args)
 
 
 def _workspace_rel(path: str) -> str:
@@ -202,7 +217,10 @@ class Workspace:
             if new_path is None:
                 updated.pop(rel, None)
             else:
-                updated[rel] = ("\n".join(new) + "\n").encode("utf-8") if new else b""
+                data = ("\n".join(new) + "\n").encode("utf-8") if new else b""
+                if len(data) > MAX_WRITE_BYTES:
+                    raise ToolError(f"{target} would exceed 100 KB")
+                updated[rel] = data
             changed.append(target)
         if not changed:
             raise ToolError("not a unified diff")
@@ -244,11 +262,14 @@ def _apply_hunks(old: list[str], hunks: list[tuple[int, list[str]]], target: str
         replacement = [line[1:] for line in body if line[0] in (" ", "+")]
         at = max(start - 1, 0) if expected else min(max(start, 0), len(old))
         if old[at : at + len(expected)] != expected:  # tolerate a moved hunk, never a changed one
+            low = max(pos, at - HUNK_FUZZ_LINES)
+            high = min(len(old) - len(expected), at + HUNK_FUZZ_LINES)
+            first = expected[0] if expected else None
             at = next(
                 (
                     k
-                    for k in range(pos, len(old) - len(expected) + 1)
-                    if old[k : k + len(expected)] == expected
+                    for k in range(low, high + 1)
+                    if old[k] == first and old[k : k + len(expected)] == expected
                 ),
                 -1,
             )
