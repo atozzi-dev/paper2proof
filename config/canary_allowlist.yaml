@@ -1,0 +1,3 @@
+# SHA-256 of canary papers (eval set A). LocalTrustedExecutor runs ONLY these, ONLY with P2P_ENV=dev.
+# Populated by task A-29.
+papers: []

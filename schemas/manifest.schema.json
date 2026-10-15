@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paper2proof.dev/schemas/manifest.schema.json",
+  "title": "p2p.manifest/v1 — exec job manifest (injected, <= 64 KiB)",
+  "type": "object",
+  "additionalProperties": false,
+  "if": { "properties": { "claim_type": { "const": "RELATIVE" } } },
+  "then": { "properties": { "baseline_name": { "type": "string", "minLength": 1 } } },
+  "required": ["schema", "run_id", "attempt", "image_digest", "entrypoint", "args", "seeds", "budget_seconds", "paths", "claim_ref", "metric", "higher_is_better", "claim_type", "baseline_name", "scale"],
+  "properties": {
+    "schema": { "const": "p2p.manifest/v1" },
+    "run_id": { "type": "string", "pattern": "^r_[0-9a-z]{26}$" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 5 },
+    "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "entrypoint": { "type": "string", "pattern": "^workspace/(?!.*\\.\\.)[A-Za-z0-9_./-]+\\.py$" },
+    "args": { "type": "array", "items": { "type": "string", "maxLength": 200 }, "maxItems": 20 },
+    "seeds": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 1, "maxItems": 20, "uniqueItems": true },
+    "budget_seconds": { "type": "integer", "minimum": 60, "maximum": 1800 },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["overlay", "repo", "data_dir", "workspace", "cache", "results"],
+      "properties": {
+        "overlay": { "type": "string" },
+        "repo": { "type": ["string", "null"] },
+        "data_dir": { "type": "string" },
+        "workspace": { "type": "string" },
+        "cache": { "type": "string" },
+        "results": { "type": "string" }
+      }
+    },
+    "claim_ref": { "type": "string" },
+    "metric": { "type": "string", "maxLength": 64 },
+    "higher_is_better": { "type": "boolean" },
+    "claim_type": { "enum": ["ABSOLUTE", "RELATIVE"] },
+    "baseline_name": { "type": ["string", "null"], "maxLength": 128, "description": "Required (non-null) for RELATIVE claims" },
+    "scale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full"],
+      "properties": {
+        "full": { "type": "boolean" },
+        "fraction_of_data": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "epochs": { "type": "integer", "minimum": 1 },
+        "paper_epochs": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    }
+  }
+}

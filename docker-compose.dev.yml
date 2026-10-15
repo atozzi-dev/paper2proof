@@ -1,0 +1,20 @@
+# Local dev stack (P2P_ENV=dev). S3-compatible storage stands in for Nebius Object Storage.
+# Upstream MinIO images are no longer publicly pullable; the Chainguard build is, pinned by digest.
+# Credentials come from .env (gitignored): MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
+name: paper2proof-dev
+
+services:
+  minio:
+    image: chainguard/minio@sha256:2136d593beacf4461187035eca949fe49abd589d5079735025c711ca58fee0c8
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  minio-data:

@@ -1,0 +1,33 @@
+# Role -> model resolution. IDs are resolved at startup against GET /v1/models.
+# Use `match` (case-insensitive substring, must hit exactly one model) or `exact_id`.
+# Quote "on"/"off": unquoted, YAML 1.1 parsers turn them into booleans.
+# Update after spike S-2 (docs/spikes/RESULTS.md).
+provider:
+  base_url: https://api.tokenfactory.nebius.com/v1/
+  api_key_env: NEBIUS_API_KEY
+  timeout_s: 120
+  max_retries: 4
+
+roles:
+  reader:  { match: "nemotron-3-super",    max_output: 8000, temperature: 0.1, reasoning: "off" }
+  coder:   { match: "nemotron-3-super",    max_output: 6000, temperature: 0.2, reasoning: "off" }
+  planner: { match: "nemotron-3-ultra",    max_output: 8000, temperature: 0.2, reasoning: "on", timeout_s: 300 }
+  judge:   { match: "nemotron-3-ultra",    max_output: 3000, temperature: 0.0, reasoning: "on", timeout_s: 300 }
+  vision:  { match: "nano-omni",           max_output: 2000, temperature: 0.0, reasoning: "off" }
+  utility: { match: "nemotron-3-nano-30b", max_output: 1500, temperature: 0.0, reasoning: "off" }
+
+fallbacks:
+  planner: reader
+  judge: reader
+  coder: planner     # reader runs the same model as coder; fall back to a different one
+  reader: null
+  utility: null
+  vision: null      # no text-only substitute: skip figure extraction and log a warning
+
+structured_output:
+  # "json_schema" if spike S-2 confirmed response_format support for the role's model, else "tool"
+  reader: tool
+  planner: tool
+  judge: tool
+  vision: tool
+  utility: tool

@@ -1,0 +1,12 @@
+# Verdict engine configuration (docs/specs/verdict-engine.md). Hashed into every verdict.
+tol_rel: 0.02
+default_tol_abs: 0.0
+tol_abs:
+  top1_accuracy: 0.005
+  accuracy: 0.005
+  f1: 0.005
+  auc: 0.005
+  bleu: 0.5
+rho: 0.5
+min_seeds: 3
+confidence: 0.95

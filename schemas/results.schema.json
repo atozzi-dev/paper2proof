@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paper2proof.dev/schemas/results.schema.json",
+  "title": "p2p.results/v1 — written by the runner, validated by the control plane (max 256 KB)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "attempt", "claim_ref", "claim_type", "metric", "higher_is_better", "scale", "per_seed", "wall_clock_s", "gpu", "exit_reason"],
+  "properties": {
+    "schema": { "const": "p2p.results/v1" },
+    "run_id": { "type": "string", "pattern": "^r_[0-9a-z]{26}$" },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "claim_ref": { "type": "string" },
+    "claim_type": { "enum": ["ABSOLUTE", "RELATIVE"] },
+    "metric": { "type": "string", "maxLength": 64 },
+    "higher_is_better": { "type": "boolean" },
+    "scale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full"],
+      "properties": {
+        "full": { "type": "boolean" },
+        "fraction_of_data": { "type": "number" },
+        "epochs": { "type": "integer" },
+        "paper_epochs": { "type": ["integer", "null"] }
+      }
+    },
+    "per_seed": {
+      "type": "array", "maxItems": 20,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["seed", "value"],
+        "properties": { "seed": { "type": "integer" }, "value": { "type": ["number", "null"], "description": "null only when ok is false" }, "ok": { "type": "boolean" } }
+      }
+    },
+    "baseline": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["name", "per_seed"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 128 },
+        "per_seed": {
+          "type": "array", "maxItems": 20,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["seed", "value"],
+            "properties": { "seed": { "type": "integer" }, "value": { "type": ["number", "null"] } }
+          }
+        }
+      }
+    },
+    "wall_clock_s": { "type": "number", "minimum": 0 },
+    "gpu": { "type": "string", "maxLength": 128 },
+    "exit_reason": { "enum": ["completed", "experiment_error", "budget_timeout", "contract_error"] }
+  }
+}

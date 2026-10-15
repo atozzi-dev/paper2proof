@@ -1,0 +1,18 @@
+# USD per 1M tokens. Indicative values from third-party aggregators (Oct 2026).
+# MUST be reconciled with the official Token Factory price page before the eval (task A-30).
+# Keys are resolved model IDs (case-insensitive match).
+currency: USD
+models:
+  nvidia/nemotron-3-super-120b-a12b:      { input: 0.30, output: 0.90 }
+  nvidia/Nemotron-3-Ultra-550b-a55b:      { input: 1.00, output: 3.00 }
+  nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B:  { input: 0.06, output: 0.24 }
+  nvidia/Nemotron-3-Nano-Omni:            { input: 0.06, output: 0.24 }
+batch_discount: 0.5
+
+# Nebius AI Cloud list prices, eu-north1, from Oct 8 2026 (USD per hour)
+cloud:
+  cpu-d3:      { vcpu: 0.015, ram_gib: 0.0045 }
+  cpu-e2:      { vcpu: 0.012, ram_gib: 0.0045 }
+  gpu-l40s-a:  { gpu: 1.35, vcpu: 0.012, ram_gib: 0.0032, preemptible: { gpu: 0.65, vcpu: 0.006, ram_gib: 0.0016 } }
+  gpu-l40s-d:  { gpu: 1.35, vcpu: 0.010, ram_gib: 0.0032, preemptible: { gpu: 0.65, vcpu: 0.005, ram_gib: 0.0016 } }
+  disk_network_ssd_gib_month: 0.071

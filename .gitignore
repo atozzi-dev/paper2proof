@@ -1,0 +1,50 @@
+# Secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local state (SQLite, MinIO data, run staging)
+var/
+*.db
+*.db-wal
+*.db-shm
+
+# Web
+node_modules/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+.terraform.lock.hcl.bak
+
+# Build artefacts
+deploy/digests.json
+
+# OS and editors
+*.stackdump
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

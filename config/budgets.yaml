@@ -1,0 +1,20 @@
+# Enforced by app/orchestrator/budget.py before every model call and job submission.
+per_run:
+  tokens_in: 1500000
+  tokens_out: 150000
+  inference_usd: 1.00
+  gpu_minutes: 30
+  fix_iterations: 8
+  package_requests: 2
+  tavily_credits: 20
+global:
+  concurrent_runs: 2
+  cloud_usd_per_day: 15.00
+  inference_usd_per_day: 6.00
+  dev_inference_usd_per_day: 2.00     # P2P_ENV=dev
+  tavily_credits_per_day: 200
+approval:
+  auto_approve_below_usd: 0.60        # estimated cloud + inference cost of the plan
+  approval_timeout_min: 30
+invites:
+  default_quota_per_day: 3

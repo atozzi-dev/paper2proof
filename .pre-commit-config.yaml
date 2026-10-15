@@ -1,0 +1,34 @@
+# Local hooks only: they run the same tools as `make lint`, pinned by uv.lock.
+repos:
+  - repo: local
+    hooks:
+      - id: forbid-secret-files
+        name: forbid .env, keys, credentials and Terraform state
+        language: fail
+        entry: "Secret-bearing file staged; keep it out of the repo."
+        files: '(^|/)\.env(\..+)?$|\.pem$|\.key$|credentials.*\.json$|\.tfstate(\.backup)?$|\.tfvars$'
+        exclude: '(^|/)\.env\.example$|\.tfvars\.example$'
+      - id: detect-private-key
+        name: detect private keys
+        language: pygrep
+        entry: '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+      - id: detect-api-keys
+        name: detect API keys
+        language: pygrep
+        entry: 'tvly-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{16}'
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: uv run ruff check --force-exclude
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: uv run ruff format --force-exclude --check
+        types_or: [python, pyi]
+      - id: mypy
+        name: mypy --strict app
+        language: system
+        entry: uv run mypy app
+        pass_filenames: false
+        files: '^app/.*\.py$'
