@@ -43,10 +43,16 @@ if a.mode == "slow":
 if a.mode == "chatty":
     for i in range(8):
         print(f"step {i}", flush=True); time.sleep(0.1)
+if a.mode == "longlines":
+    print("y" * 50_000, flush=True)
+    print("z" * 5_000, file=sys.stderr, flush=True)
+    sys.stdout.buffer.write(b"\\xff\\xfe not utf-8\\n"); sys.stdout.flush()
 os.makedirs(a.out, exist_ok=True)
 metrics = {"top1_accuracy": 0.90 + a.seed / 100, "baseline/top1_accuracy": 0.88 + a.seed / 100}
 if a.mode == "nan":
     metrics["top1_accuracy"] = float("nan")
+if a.mode == "typed":
+    metrics = {"top1_accuracy": [True, "0.93", 0.9][a.seed], "baseline/top1_accuracy": 0.8}
 json.dump(metrics, open(os.path.join(a.out, "metrics.json"), "w"))
 """
 
@@ -55,7 +61,8 @@ def _setup(
     tmp_path: Path, *, mode: str = "ok", budget: int = 600, **overrides: Any
 ) -> tuple[Path, Path]:
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace.mkdir(parents=True)
+    (tmp_path / "overlay.tar.zst").write_bytes(b"")  # extracted by the fake `extract`
     (workspace / "train.py").write_text(SCRIPT)
     results = tmp_path / "results"
     manifest = {
@@ -88,11 +95,15 @@ def _setup(
     return path, results
 
 
+def _extract(archive: Path, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+
+
 def _run(manifest: Path, tmp_path: Path, **kwargs: Any) -> int:
+    kwargs.setdefault("extract", _extract)
     code: int = entrypoint.run(
         manifest,
         work=tmp_path / "work",
-        extract=lambda archive, dest: dest.mkdir(parents=True, exist_ok=True),
         gpu_name=lambda: "NVIDIA L40S",
         **kwargs,
     )
@@ -186,3 +197,123 @@ def test_stdlib_validator_agrees_with_the_schema(label: str, mutate: Any) -> Non
     mutate(data)
     with pytest.raises(entrypoint.ContractError):
         entrypoint.validate(data)
+
+
+def test_type_errors_in_the_manifest_are_contract_errors(tmp_path: Path) -> None:
+    manifest, _ = _setup(tmp_path, seeds=[[1], [2]])
+    assert _run(manifest, tmp_path) == 30
+    manifest, _ = _setup(tmp_path / "b", scale={"full": False, "extra": 1})
+    assert _run(manifest, tmp_path / "b") == 30
+
+
+def test_a_missing_overlay_or_a_broken_archive_is_a_contract_error(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path)
+    (tmp_path / "overlay.tar.zst").unlink()
+    assert _run(manifest, tmp_path) == 30
+    assert _results(results)["exit_reason"] == "contract_error"
+
+    def broken(archive: Path, dest: Path) -> None:
+        raise entrypoint.ContractError("archive member escapes")
+
+    manifest, results = _setup(tmp_path / "b")
+    assert _run(manifest, tmp_path / "b", extract=broken) == 30
+    data = _results(results)
+    assert data["exit_reason"] == "contract_error"
+    assert all(s["ok"] is False for s in data["per_seed"])
+
+
+def test_metric_values_must_be_real_numbers(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="typed")
+    assert _run(manifest, tmp_path) == 10
+    data = _results(results)
+    assert [s["ok"] for s in data["per_seed"]] == [False, False, True]
+    assert [b["value"] for b in data["baseline"]["per_seed"]] == [None, None, 0.8]
+
+
+def test_output_is_bounded_and_decoded_leniently(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="longlines")
+    assert _run(manifest, tmp_path, log_cap_chars=60_000) == 0
+    assert all(len(line) <= 2000 for line in (results / "live.log").read_text().splitlines())
+    stdout = (results / "stdout.log").read_text(encoding="utf-8")
+    assert len(stdout) <= 60_000 + 200
+    assert "[log truncated]" in stdout
+
+
+def test_results_are_written_after_every_seed(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path)
+    seen: list[int] = []
+
+    def on_seed(done: int) -> None:
+        seen.append(sum(s["ok"] for s in _results(results)["per_seed"]))
+
+    assert _run(manifest, tmp_path, on_seed=on_seed) == 0
+    assert seen == [1, 2, 3]
+
+
+def test_termination_writes_partial_results(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path)
+
+    def on_seed(done: int) -> None:
+        if done == 1:
+            raise entrypoint.Terminated
+
+    assert _run(manifest, tmp_path, on_seed=on_seed) == 20
+    data = _results(results)
+    assert data["exit_reason"] == "budget_timeout"
+    assert [s["ok"] for s in data["per_seed"]] == [True, False, False]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_a_seed_timeout_kills_its_whole_process_tree(tmp_path: Path) -> None:
+    marker = tmp_path / "child-alive"
+    spawner = f"""
+import subprocess, sys, time
+child = "import time; time.sleep(3); open({str(marker)!r}, 'w').write('x')"
+subprocess.Popen([sys.executable, "-c", child])
+time.sleep(30)
+"""
+    workspace = tmp_path / "workspace"
+    manifest, _ = _setup(tmp_path, mode="slow")
+    (workspace / "train.py").write_text(spawner)
+    assert _run(manifest, tmp_path, budget_override_s=1.0, kill_grace_s=0.5) == 20
+    time.sleep(4)
+    assert not marker.exists()
+
+
+def _tar(members: list[tuple[str, bytes | None, str | None]]) -> Any:
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, data, link in members:
+            info = tarfile.TarInfo(name)
+            if link is not None:
+                info.type, info.linkname = tarfile.SYMTYPE, link
+                tar.addfile(info)
+            else:
+                assert data is not None
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    buffer.seek(0)
+    return buffer
+
+
+def test_safe_extraction_skips_links_and_rejects_escapes(tmp_path: Path) -> None:
+    dest = tmp_path / "out"
+    entrypoint.extract_stream(
+        _tar([("a/ok.txt", b"hi", None), ("a/link", None, "/etc/passwd")]),
+        dest,
+        max_bytes=1000,
+        max_members=10,
+    )
+    assert (dest / "a" / "ok.txt").read_bytes() == b"hi"
+    assert not (dest / "a" / "link").exists()
+    for bad in (
+        [("../evil.txt", b"x", None)],
+        [("/abs.txt", b"x", None)],
+        [(f"f{i}", b"x", None) for i in range(11)],
+        [("big", b"x" * 1001, None)],
+    ):
+        with pytest.raises(entrypoint.ContractError):
+            entrypoint.extract_stream(_tar(bad), tmp_path / "bad", max_bytes=1000, max_members=10)
