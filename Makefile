@@ -21,6 +21,7 @@ ifneq ($(strip $(SHELL_SCRIPTS)),)
 	$(UV) run shellcheck $(SHELL_SCRIPTS)
 endif
 	$(UV) run actionlint
+	$(UV) run actionlint spikes/s7_oidc.yml
 	cd web && $(NPM) run lint && $(NPM) run typecheck
 
 test: ## pytest (no live tests) + vitest
