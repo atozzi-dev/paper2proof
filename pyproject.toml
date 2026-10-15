@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
     "pyyaml>=6.0.2,<7",
+    "scipy>=1.14",
 ]
 
 [dependency-groups]
@@ -20,8 +21,10 @@ dev = [
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
     "respx>=0.21",
     "ruff>=0.8",
+    "scipy-stubs>=1.14",
     "shellcheck-py>=0.10.0.1",
     "types-jsonschema>=4.23",
     "types-pyyaml>=6.0.12",

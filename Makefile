@@ -25,7 +25,7 @@ endif
 	cd web && $(NPM) run lint && $(NPM) run typecheck
 
 test: ## pytest (no live tests) + vitest
-	$(UV) run pytest -m "not live"
+	$(UV) run pytest -m "not live" --cov=app/verdict --cov-fail-under=100
 	cd web && $(NPM) test
 
 test-live: ## Real Token Factory / Tavily / Nebius calls: costs money, ask first
