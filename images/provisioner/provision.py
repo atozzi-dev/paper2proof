@@ -154,7 +154,7 @@ def build_env(paths: Paths) -> dict[str, str]:
 
 
 def subprocess_runner(argv: Sequence[str], *, env: dict[str, str], cwd: Path | None = None) -> None:
-    subprocess.run(  # noqa: S603 (argv list built by this module, never a shell)
+    subprocess.run(
         list(argv),
         env=env,
         cwd=cwd,

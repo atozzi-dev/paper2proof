@@ -64,6 +64,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "S", "ASYNC", "RUF", "PTH"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+# Container entrypoints call tools from the image PATH (uv, git, tar, nvidia-smi) by design.
+"images/**" = ["S603", "S607"]
 
 [tool.mypy]
 python_version = "3.12"
