@@ -22,6 +22,7 @@ from app.domain.models import (
 from app.storage.tables import (
     ClaimRow,
     EventRow,
+    InviteRow,
     JobRow,
     LedgerDaily,
     LedgerEntry,
@@ -52,8 +53,27 @@ class RunRecord(_Record):
     claim_hint: str | None
     budget: dict[str, Any]
     listed: bool
+    approval: str | None
+    verdict_summary: str | None
     created_at: datetime
     finished_at: datetime | None
+
+
+def _run_record(row: Run) -> RunRecord:
+    return RunRecord(
+        id=row.id,
+        arxiv_id=row.arxiv_id,
+        status=RunStatus(row.status),
+        error_code=ErrorCode(row.error_code) if row.error_code else None,
+        created_by=row.created_by,
+        claim_hint=row.claim_hint,
+        budget=row.budget_json,
+        listed=row.listed,
+        approval=row.approval,
+        verdict_summary=row.verdict_summary,
+        created_at=row.created_at,
+        finished_at=row.finished_at,
+    )
 
 
 class StepRecord(_Record):
@@ -107,18 +127,7 @@ class Store:
             row = await s.get(Run, run_id)
             if row is None:
                 return None
-            return RunRecord(
-                id=row.id,
-                arxiv_id=row.arxiv_id,
-                status=RunStatus(row.status),
-                error_code=ErrorCode(row.error_code) if row.error_code else None,
-                created_by=row.created_by,
-                claim_hint=row.claim_hint,
-                budget=row.budget_json,
-                listed=row.listed,
-                created_at=row.created_at,
-                finished_at=row.finished_at,
-            )
+            return _run_record(row)
 
     async def set_run_status(
         self, run_id: str, status: RunStatus, error_code: ErrorCode | None = None
@@ -491,3 +500,87 @@ class Store:
             if row is not None and row.status == "RUNNING":
                 row.status = status
                 row.finished_at = utcnow()
+
+    # --- API support (A-13) -----------------------------------------------------------
+
+    async def cancel_run(self, run_id: str) -> bool:
+        """QUEUED/RUNNING -> CANCELLED (compare-and-set); the FSM stops at its next check."""
+        async with self._session() as s, s.begin():
+            run = await s.get(Run, run_id)
+            if run is None or RunStatus(run.status).is_terminal:
+                return False
+            run.status = RunStatus.CANCELLED.value
+            run.finished_at = utcnow()
+            return True
+
+    async def set_approval(self, run_id: str, decision: str) -> None:
+        async with self._session() as s, s.begin():
+            run = await s.get(Run, run_id)
+            if run is None:
+                raise KeyError(run_id)
+            run.approval = decision
+
+    async def set_listed(self, run_id: str, listed: bool) -> bool:
+        async with self._session() as s, s.begin():
+            run = await s.get(Run, run_id)
+            if run is None:
+                return False
+            run.listed = listed
+            return True
+
+    async def list_gallery(self, limit: int = 100) -> list[RunRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(Run).where(Run.listed.is_(True)).order_by(Run.created_at.desc()).limit(limit)
+            )
+            return [_run_record(r) for r in rows]
+
+    async def verdict_counts(self) -> dict[str, int]:
+        async with self._session() as s:
+            rows = await s.execute(
+                select(VerdictRow.verdict, func.count()).group_by(VerdictRow.verdict)
+            )
+            return {str(v): int(n) for v, n in rows.all()}
+
+    async def list_verdicts(self, run_id: str) -> list[tuple[str, Verdict]]:
+        async with self._session() as s:
+            ids = await s.scalars(
+                select(VerdictRow.claim_id)
+                .where(VerdictRow.run_id == run_id)
+                .order_by(VerdictRow.claim_id)
+            )
+            claim_ids = list(ids)
+        verdicts = [(cid, await self.get_verdict(run_id, cid)) for cid in claim_ids]
+        return [(cid, v) for cid, v in verdicts if v is not None]
+
+    async def create_invite(
+        self, code_hash: str, quota_per_day: int, expires_at: datetime | None
+    ) -> None:
+        async with self._session() as s, s.begin():
+            s.add(
+                InviteRow(
+                    code_hash=code_hash,
+                    quota_per_day=quota_per_day,
+                    used_today=0,
+                    expires_at=expires_at,
+                )
+            )
+
+    async def invite_valid(self, code_hash: str, now: datetime) -> bool:
+        async with self._session() as s:
+            row = await s.get(InviteRow, code_hash)
+            return row is not None and (row.expires_at is None or row.expires_at > now)
+
+    async def consume_invite(self, code_hash: str, now: datetime) -> bool:
+        """Count one live run against the invite's daily quota; False when exhausted/invalid."""
+        today = now.astimezone(UTC).date()
+        async with self._session() as s, s.begin():
+            row = await s.get(InviteRow, code_hash)
+            if row is None or (row.expires_at is not None and row.expires_at <= now):
+                return False
+            if row.used_on != today:
+                row.used_on, row.used_today = today, 0
+            if row.used_today >= row.quota_per_day:
+                return False
+            row.used_today += 1
+            return True

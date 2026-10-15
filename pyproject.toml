@@ -8,7 +8,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.14",
+    "fastapi>=0.115",
     "httpx>=0.28",
+    "itsdangerous>=2.2",
     "jsonschema>=4.23",
     "openai>=1.55,<2",
     "pydantic>=2.9,<3",
@@ -17,6 +19,7 @@ dependencies = [
     "scipy>=1.14",
     "sqlalchemy[asyncio]>=2.0.36",
     "tenacity>=9.0",
+    "uvicorn[standard]>=0.32",
 ]
 
 [dependency-groups]

@@ -1,0 +1,151 @@
+import hashlib
+
+import httpx
+import pytest
+
+from app.api.main import AppState
+from app.domain.models import RunStatus, StepName
+from app.storage.store import Store
+from tests.api.conftest import RecordingSubmit, login
+
+
+async def _create(client: httpx.AsyncClient, arxiv_id: str = "2106.09685") -> httpx.Response:
+    return await client.post("/api/runs", json={"arxiv_id": arxiv_id, "claim_hint": None})
+
+
+async def test_session_sets_a_hardened_cookie(client: httpx.AsyncClient) -> None:
+    response = await login(client)
+    assert response.status_code == 204
+    cookie = response.headers["set-cookie"].lower()
+    for flag in ("httponly", "secure", "samesite=strict", "max-age=604800", "p2p_session="):
+        assert flag in cookie
+
+
+async def test_unknown_invite_is_rejected(client: httpx.AsyncClient) -> None:
+    assert (await login(client, "wrong")).status_code == 401
+
+
+async def test_create_run_submits_and_returns_ids(
+    client: httpx.AsyncClient, submitted: RecordingSubmit, store: Store
+) -> None:
+    await login(client)
+    response = await _create(client)
+    assert response.status_code == 202
+    body = response.json()
+    assert body["run_id"].startswith("r_")
+    assert body["events_url"] == f"/api/runs/{body['run_id']}/events"
+    assert submitted.run_ids == [body["run_id"]]
+    run = await store.get_run(body["run_id"])
+    assert run is not None and run.arxiv_id == "2106.09685"
+
+
+@pytest.mark.parametrize(
+    "arxiv_id", ["2106.096", "https://arxiv.org/abs/2106.09685", "2106.09685v", "../etc", ""]
+)
+async def test_invalid_arxiv_ids_are_400(client: httpx.AsyncClient, arxiv_id: str) -> None:
+    await login(client)
+    assert (await _create(client, arxiv_id)).status_code == 400
+
+
+async def test_versioned_ids_are_accepted(client: httpx.AsyncClient) -> None:
+    await login(client)
+    assert (await _create(client, "2106.09685v2")).status_code == 202
+
+
+async def test_without_session_is_401(client: httpx.AsyncClient) -> None:
+    assert (await _create(client)).status_code == 401
+
+
+async def test_forged_cookie_is_401(client: httpx.AsyncClient) -> None:
+    client.cookies.set("p2p_session", "forged.value.sig", domain="testserver")
+    assert (await _create(client)).status_code == 401
+
+
+async def test_kill_switch_is_402(client: httpx.AsyncClient, state: AppState) -> None:
+    await login(client)
+    await state.budget.set_kill_switch(True)
+    assert (await _create(client)).status_code == 402
+
+
+async def test_draining_is_503_with_retry_after(client: httpx.AsyncClient, state: AppState) -> None:
+    await login(client)
+    state.draining = True
+    response = await _create(client)
+    assert response.status_code == 503
+    assert response.headers["retry-after"].isdigit()
+
+
+async def test_invite_quota_is_429(client: httpx.AsyncClient, store: Store) -> None:
+    await store.create_invite(hashlib.sha256(b"one-a-day").hexdigest(), 1, None)
+    await login(client, "one-a-day")
+    assert (await _create(client)).status_code == 202
+    assert (await _create(client)).status_code == 429
+
+
+async def test_owner_sees_the_run_and_others_get_404(
+    client: httpx.AsyncClient, other_client: httpx.AsyncClient
+) -> None:
+    await login(client)
+    await login(other_client)
+    run_id = (await _create(client)).json()["run_id"]
+    mine = await client.get(f"/api/runs/{run_id}")
+    assert mine.status_code == 200
+    assert mine.json()["status"] == "QUEUED"
+    assert (await other_client.get(f"/api/runs/{run_id}")).status_code == 404
+    assert (await other_client.get(f"/api/runs/{run_id}/events.json")).status_code == 404
+    assert (await other_client.post(f"/api/runs/{run_id}/cancel")).status_code == 404
+    unknown = "r_" + "0" * 26
+    assert (await client.get(f"/api/runs/{unknown}")).status_code == 404
+
+
+async def test_gallery_runs_are_public(
+    client: httpx.AsyncClient, other_client: httpx.AsyncClient, store: Store
+) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    await store.set_listed(run_id, True)
+    assert (await other_client.get(f"/api/runs/{run_id}")).status_code == 200
+    gallery = (await other_client.get("/api/gallery")).json()
+    assert [card["id"] for card in gallery] == [run_id]
+
+
+async def test_cancel(client: httpx.AsyncClient, store: Store) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    assert (await client.post(f"/api/runs/{run_id}/cancel")).status_code == 202
+    run = await store.get_run(run_id)
+    assert run is not None and run.status is RunStatus.CANCELLED
+
+
+async def test_approve_requires_awaiting_approval(client: httpx.AsyncClient, store: Store) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    assert (await client.post(f"/api/runs/{run_id}/approve")).status_code == 409
+    await store.begin_run(run_id, StepName.AWAITING_APPROVAL, 1)
+    assert (await client.post(f"/api/runs/{run_id}/approve")).status_code == 204
+    run = await store.get_run(run_id)
+    assert run is not None and run.approval == "approved"
+    assert (await client.post(f"/api/runs/{run_id}/reject")).status_code == 204
+    run = await store.get_run(run_id)
+    assert run is not None and run.approval == "rejected"
+
+
+async def test_bundle_is_404_until_built(client: httpx.AsyncClient) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    assert (await client.get(f"/api/runs/{run_id}/bundle")).status_code == 404
+
+
+async def test_session_endpoint_is_rate_limited(client: httpx.AsyncClient) -> None:
+    codes = [(await login(client, "wrong")).status_code for _ in range(6)]
+    assert codes[:5] == [401] * 5
+    assert codes[5] == 429
+
+
+async def test_errors_do_not_leak_internals(client: httpx.AsyncClient) -> None:
+    await login(client)
+    response = await client.post(
+        "/api/runs", content=b"{not json", headers={"content-type": "application/json"}
+    )
+    assert response.status_code in (400, 422)
+    assert "Traceback" not in response.text

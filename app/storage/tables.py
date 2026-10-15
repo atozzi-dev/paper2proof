@@ -64,6 +64,7 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     finished_at: Mapped[datetime | None]
     verdict_summary: Mapped[str | None] = mapped_column(String(64))
+    approval: Mapped[str | None] = mapped_column(String(16))  # None | approved | rejected
 
 
 class ClaimRow(Base):
