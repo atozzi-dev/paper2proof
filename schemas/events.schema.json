@@ -1,0 +1,963 @@
+{
+  "$defs": {
+    "ApprovalRequiredPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expires_at"
+      ],
+      "title": "ApprovalRequiredPayload",
+      "type": "object"
+    },
+    "Claim": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Name"
+        },
+        "claim_type": {
+          "$ref": "#/$defs/ClaimType"
+        },
+        "claimed_delta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claimed Delta"
+        },
+        "dataset": {
+          "title": "Dataset",
+          "type": "string"
+        },
+        "higher_is_better": {
+          "title": "Higher Is Better",
+          "type": "boolean"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "metric": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Metric",
+          "type": "string"
+        },
+        "reported_std": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported Std"
+        },
+        "reported_value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reported Value"
+        },
+        "setting": {
+          "title": "Setting",
+          "type": "string"
+        },
+        "source_ref": {
+          "title": "Source Ref",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "claim_type",
+        "metric",
+        "higher_is_better",
+        "dataset",
+        "setting",
+        "reported_value",
+        "source_ref"
+      ],
+      "title": "Claim",
+      "type": "object"
+    },
+    "ClaimExtractedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "$ref": "#/$defs/Claim"
+        }
+      },
+      "required": [
+        "claim"
+      ],
+      "title": "ClaimExtractedPayload",
+      "type": "object"
+    },
+    "ClaimType": {
+      "enum": [
+        "ABSOLUTE",
+        "RELATIVE"
+      ],
+      "title": "ClaimType",
+      "type": "string"
+    },
+    "CostUpdatePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "cloud_usd": {
+          "minimum": 0,
+          "title": "Cloud Usd",
+          "type": "number"
+        },
+        "inference_usd": {
+          "minimum": 0,
+          "title": "Inference Usd",
+          "type": "number"
+        },
+        "total_usd": {
+          "minimum": 0,
+          "title": "Total Usd",
+          "type": "number"
+        }
+      },
+      "required": [
+        "inference_usd",
+        "cloud_usd",
+        "total_usd"
+      ],
+      "title": "CostUpdatePayload",
+      "type": "object"
+    },
+    "DatasetReq": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "hf",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_bytes": {
+          "default": 2000000000,
+          "exclusiveMinimum": 0,
+          "maximum": 10000000000,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "split": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Split"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "DatasetReq",
+      "type": "object"
+    },
+    "EgressBlockedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "title": "Host",
+          "type": "string"
+        },
+        "subnet": {
+          "title": "Subnet",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "subnet"
+      ],
+      "title": "EgressBlockedPayload",
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "SCHEMA_ERROR",
+        "MODEL_UNAVAILABLE",
+        "BUDGET_EXCEEDED",
+        "KILL_SWITCH",
+        "CAPACITY",
+        "TIMEOUT",
+        "PROVISION_FAILED",
+        "SMOKE_EXHAUSTED",
+        "PACKAGE_REJECTED",
+        "RUNTIME_ERROR",
+        "CONTRACT_ERROR",
+        "INGEST_FAILED",
+        "NO_CLAIMS",
+        "APPROVAL_TIMEOUT",
+        "INTERNAL_ERROR"
+      ],
+      "title": "ErrorCode",
+      "type": "string"
+    },
+    "ErrorPayload": {
+      "additionalProperties": false,
+      "description": "User-visible error. Never a stack trace.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "maxLength": 2000,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ErrorPayload",
+      "type": "object"
+    },
+    "EventType": {
+      "enum": [
+        "run.status",
+        "step.started",
+        "step.finished",
+        "claim.extracted",
+        "plan.ready",
+        "approval.required",
+        "model.call",
+        "sandbox.output",
+        "job.status",
+        "job.log",
+        "egress.blocked",
+        "verdict.ready",
+        "cost.update",
+        "warning",
+        "error"
+      ],
+      "title": "EventType",
+      "type": "string"
+    },
+    "JobLogPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "prov",
+            "exec",
+            "smoke"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "title": "Lines",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "lines"
+      ],
+      "title": "JobLogPayload",
+      "type": "object"
+    },
+    "JobStatusPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "prov",
+            "exec",
+            "smoke"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "state"
+      ],
+      "title": "JobStatusPayload",
+      "type": "object"
+    },
+    "ModelCallPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cost Usd"
+        },
+        "latency_ms": {
+          "minimum": 0,
+          "title": "Latency Ms",
+          "type": "integer"
+        },
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "tokens_in": {
+          "minimum": 0,
+          "title": "Tokens In",
+          "type": "integer"
+        },
+        "tokens_out": {
+          "minimum": 0,
+          "title": "Tokens Out",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "model_id",
+        "tokens_in",
+        "tokens_out",
+        "latency_ms",
+        "cost_usd"
+      ],
+      "title": "ModelCallPayload",
+      "type": "object"
+    },
+    "PackageReq": {
+      "additionalProperties": false,
+      "description": "A package as requested (Planner or Coder). Kept raw: the package policy (A-19) judges it.",
+      "properties": {
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "specifier": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Specifier"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "PackageReq",
+      "type": "object"
+    },
+    "Plan": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Claim Ids",
+          "type": "array"
+        },
+        "claim_types": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ClaimType"
+          },
+          "title": "Claim Types",
+          "type": "object"
+        },
+        "datasets": {
+          "items": {
+            "$ref": "#/$defs/DatasetReq"
+          },
+          "title": "Datasets",
+          "type": "array"
+        },
+        "entrypoint_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entrypoint Hint"
+        },
+        "gpu_minutes_est": {
+          "minimum": 0,
+          "title": "Gpu Minutes Est",
+          "type": "number"
+        },
+        "mode": {
+          "$ref": "#/$defs/PlanMode"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "packages": {
+          "items": {
+            "$ref": "#/$defs/PackageReq"
+          },
+          "title": "Packages",
+          "type": "array"
+        },
+        "scale": {
+          "$ref": "#/$defs/Scale"
+        },
+        "seeds": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Seeds",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "claim_ids",
+        "claim_types",
+        "scale",
+        "seeds",
+        "gpu_minutes_est"
+      ],
+      "title": "Plan",
+      "type": "object"
+    },
+    "PlanMode": {
+      "enum": [
+        "REPO_FIRST",
+        "FROM_SCRATCH"
+      ],
+      "title": "PlanMode",
+      "type": "string"
+    },
+    "PlanReadyPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "est_cost_usd": {
+          "minimum": 0,
+          "title": "Est Cost Usd",
+          "type": "number"
+        },
+        "needs_approval": {
+          "title": "Needs Approval",
+          "type": "boolean"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      },
+      "required": [
+        "plan",
+        "est_cost_usd",
+        "needs_approval"
+      ],
+      "title": "PlanReadyPayload",
+      "type": "object"
+    },
+    "ReasonCode": {
+      "enum": [
+        "BUDGET",
+        "CAPACITY",
+        "MISSING_DATA",
+        "RUNTIME_ERROR",
+        "UNDERSPECIFIED_CLAIM",
+        "INSUFFICIENT_SEEDS",
+        "HIGH_VARIANCE",
+        "REDUCED_SCALE_ABSOLUTE",
+        "REDUCED_SCALE_CONTRADICTS"
+      ],
+      "title": "ReasonCode",
+      "type": "string"
+    },
+    "RunStatus": {
+      "enum": [
+        "QUEUED",
+        "RUNNING",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "BUDGET_EXCEEDED"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "RunStatusPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/RunStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "RunStatusPayload",
+      "type": "object"
+    },
+    "SandboxOutputPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "branch": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Branch"
+        },
+        "iteration": {
+          "minimum": 0,
+          "title": "Iteration",
+          "type": "integer"
+        },
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "title": "Lines",
+          "type": "array"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ],
+          "title": "Stream",
+          "type": "string"
+        }
+      },
+      "required": [
+        "iteration",
+        "stream",
+        "lines"
+      ],
+      "title": "SandboxOutputPayload",
+      "type": "object"
+    },
+    "Scale": {
+      "enum": [
+        "FULL",
+        "REDUCED"
+      ],
+      "title": "Scale",
+      "type": "string"
+    },
+    "StepFinishedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "step": {
+          "$ref": "#/$defs/StepName"
+        }
+      },
+      "required": [
+        "step",
+        "attempt",
+        "ok",
+        "duration_ms"
+      ],
+      "title": "StepFinishedPayload",
+      "type": "object"
+    },
+    "StepName": {
+      "enum": [
+        "INGESTING",
+        "EXTRACTING_CLAIMS",
+        "DISCOVERING",
+        "PLANNING",
+        "AWAITING_APPROVAL",
+        "PROVISIONING",
+        "SMOKE_TESTING",
+        "EXECUTING",
+        "ANALYZING",
+        "VERDICT"
+      ],
+      "title": "StepName",
+      "type": "string"
+    },
+    "StepStartedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "step": {
+          "$ref": "#/$defs/StepName"
+        }
+      },
+      "required": [
+        "step",
+        "attempt"
+      ],
+      "title": "StepStartedPayload",
+      "type": "object"
+    },
+    "Verdict": {
+      "additionalProperties": false,
+      "properties": {
+        "ci_high": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ci High"
+        },
+        "ci_low": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ci Low"
+        },
+        "kind": {
+          "$ref": "#/$defs/VerdictKind"
+        },
+        "mean": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mean"
+        },
+        "n_seeds": {
+          "minimum": 0,
+          "title": "N Seeds",
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasonCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "std": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Std"
+        },
+        "tolerance": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Tolerance",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "reason",
+        "n_seeds",
+        "mean",
+        "std",
+        "ci_low",
+        "ci_high",
+        "tolerance"
+      ],
+      "title": "Verdict",
+      "type": "object"
+    },
+    "VerdictKind": {
+      "enum": [
+        "REPRODUCED",
+        "REPRODUCED_AT_REDUCED_SCALE",
+        "NOT_REPRODUCED",
+        "INCONCLUSIVE"
+      ],
+      "title": "VerdictKind",
+      "type": "string"
+    },
+    "VerdictReadyPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "explanation_md": {
+          "title": "Explanation Md",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "claim_id",
+        "verdict",
+        "explanation_md"
+      ],
+      "title": "VerdictReadyPayload",
+      "type": "object"
+    },
+    "WarningPayload": {
+      "additionalProperties": false,
+      "description": "Non-fatal condition shown in the timeline (e.g. DISCOVERY_DEGRADED, ABSOLUTE at REDUCED).",
+      "properties": {
+        "code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 2000,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "WarningPayload",
+      "type": "object"
+    }
+  },
+  "$id": "https://paper2proof.dev/schemas/events.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One stored event; `id` is the monotonic SSE id used for Last-Event-ID resumption.",
+  "properties": {
+    "id": {
+      "minimum": 1,
+      "title": "Id",
+      "type": "integer"
+    },
+    "payload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunStatusPayload"
+        },
+        {
+          "$ref": "#/$defs/StepStartedPayload"
+        },
+        {
+          "$ref": "#/$defs/StepFinishedPayload"
+        },
+        {
+          "$ref": "#/$defs/ClaimExtractedPayload"
+        },
+        {
+          "$ref": "#/$defs/PlanReadyPayload"
+        },
+        {
+          "$ref": "#/$defs/ApprovalRequiredPayload"
+        },
+        {
+          "$ref": "#/$defs/ModelCallPayload"
+        },
+        {
+          "$ref": "#/$defs/SandboxOutputPayload"
+        },
+        {
+          "$ref": "#/$defs/JobStatusPayload"
+        },
+        {
+          "$ref": "#/$defs/JobLogPayload"
+        },
+        {
+          "$ref": "#/$defs/EgressBlockedPayload"
+        },
+        {
+          "$ref": "#/$defs/VerdictReadyPayload"
+        },
+        {
+          "$ref": "#/$defs/CostUpdatePayload"
+        },
+        {
+          "$ref": "#/$defs/WarningPayload"
+        },
+        {
+          "$ref": "#/$defs/ErrorPayload"
+        }
+      ],
+      "title": "Payload"
+    },
+    "run_id": {
+      "pattern": "^r_[0-9a-z]{26}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "ts": {
+      "format": "date-time",
+      "title": "Ts",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/EventType"
+    }
+  },
+  "required": [
+    "id",
+    "run_id",
+    "ts",
+    "type",
+    "payload"
+  ],
+  "title": "p2p SSE event envelope (generated by scripts/export_schemas.py)",
+  "type": "object",
+  "x-event-types": {
+    "approval.required": "ApprovalRequiredPayload",
+    "claim.extracted": "ClaimExtractedPayload",
+    "cost.update": "CostUpdatePayload",
+    "egress.blocked": "EgressBlockedPayload",
+    "error": "ErrorPayload",
+    "job.log": "JobLogPayload",
+    "job.status": "JobStatusPayload",
+    "model.call": "ModelCallPayload",
+    "plan.ready": "PlanReadyPayload",
+    "run.status": "RunStatusPayload",
+    "sandbox.output": "SandboxOutputPayload",
+    "step.finished": "StepFinishedPayload",
+    "step.started": "StepStartedPayload",
+    "verdict.ready": "VerdictReadyPayload",
+    "warning": "WarningPayload"
+  }
+}

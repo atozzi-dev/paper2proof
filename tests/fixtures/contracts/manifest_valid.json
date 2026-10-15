@@ -1,0 +1,24 @@
+{
+  "schema": "p2p.manifest/v1",
+  "run_id": "r_01jb7z00000000000000000000",
+  "attempt": 1,
+  "image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "entrypoint": "workspace/train.py",
+  "args": ["--epochs", "5"],
+  "seeds": [0, 1, 2],
+  "budget_seconds": 1500,
+  "paths": {
+    "overlay": "/mnt/run/staging/overlay.tar.zst",
+    "repo": null,
+    "data_dir": "/mnt/run/staging/data",
+    "workspace": "/mnt/run/staging/workspace",
+    "cache": "/mnt/cache",
+    "results": "/mnt/run/results/1"
+  },
+  "claim_ref": "c1",
+  "metric": "top1_accuracy",
+  "higher_is_better": true,
+  "claim_type": "RELATIVE",
+  "baseline_name": "resnet18",
+  "scale": {"full": false, "fraction_of_data": 0.1, "epochs": 5, "paper_epochs": 200}
+}

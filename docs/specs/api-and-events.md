@@ -63,9 +63,10 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | `egress.blocked` | `{host, subnet}` (from gateway logs, best effort) |
 | `verdict.ready` | `{claim_id, verdict: Verdict, explanation_md}` |
 | `cost.update` | `{inference_usd, cloud_usd, total_usd}` |
+| `warning` | `{code, message}` (non-fatal: `DISCOVERY_DEGRADED`, ABSOLUTE claim at REDUCED scale, …) |
 | `error` | `{code, message}` (no stack traces) |
 
-All payloads are pydantic models in `app/domain/events.py`. The frontend imports TypeScript types generated from the OpenAPI schema (`npm run gen:types`).
+All payloads are pydantic models in `app/domain/events.py`. `schemas/events.schema.json` is generated from them (`uv run python scripts/export_schemas.py`); a contract test fails if it is stale. The frontend imports TypeScript types generated from the OpenAPI schema (`npm run gen:types`).
 
 ## Security headers (all responses)
 

@@ -6,6 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "jsonschema>=4.23",
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
     "pyyaml>=6.0.2,<7",
@@ -22,6 +23,7 @@ dev = [
     "respx>=0.21",
     "ruff>=0.8",
     "shellcheck-py>=0.10.0.1",
+    "types-jsonschema>=4.23",
     "types-pyyaml>=6.0.12",
 ]
 
