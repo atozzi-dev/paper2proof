@@ -476,3 +476,63 @@ async def test_a_failing_job_lookup_releases_the_reservations(
     with pytest.raises(RuntimeError):
         await run_job(ctx, spec, usd_per_hour=0.1, poll_s=15, clock=clock, sleep=clock.sleep)
     assert not ctx.budget._inflight
+
+
+class _SlowGateway(FakeJobBackend):
+    def __init__(self, clock: FakeClock, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.clock = clock
+
+    async def ensure_gateway_up(self) -> None:
+        self.clock.t += 300  # a cold start
+        await super().ensure_gateway_up()
+
+
+async def test_the_deadline_is_anchored_after_the_gateway_is_up(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage, clock = FakeRunStorage(), FakeClock()
+    jobs = _SlowGateway(clock, on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    await _step(store, artifacts, storage, clock).run(ctx)
+    manifest = _manifest(ctx)
+    anchor = NOW + timedelta(seconds=300)
+    assert manifest["deadline_unix"] == (anchor + timedelta(minutes=18)).timestamp()
+    job = await store.get_job(f"p2p-prov-{RUN[2:]}-1")
+    assert job is not None and job.created_at == anchor  # the watchdog uses the same anchor
+
+
+async def test_the_stored_report_keeps_only_validated_fields(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(
+        storage,
+        repo_commit="not-a-commit",
+        datasets=["ok__name", "../../bad", 5],
+        lock_sha256="c" * 64,
+        injected={"evil": True},
+    )
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert "injected" not in stored
+    assert stored["repo_commit"] is None
+    assert stored["datasets"] == ["ok__name"]
+    assert stored["lock_sha256"] == "c" * 64
+
+
+async def test_the_manifest_fits_with_a_full_trust_store(store: Store, tmp_path: Path) -> None:
+    await store.create_run("r_01jb7z00000000000000000001", "0000.00002", created_by=None,
+                           claim_hint=None, budget={})  # fmt: skip
+    for i in range(400):
+        await store.trust_overlay(f"{i:064x}", "e" * 64, "r_01jb7z00000000000000000001")
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    spec = next(iter(ctx.jobs.jobs.values()))[3]  # type: ignore[attr-defined]
+    manifest = json.loads(spec.inject_files["/etc/p2p/provision.json"])
+    assert len(manifest["trusted_overlays"]) == 300
+    assert len(spec.inject_files["/etc/p2p/provision.json"]) < 60 * 1024

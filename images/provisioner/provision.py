@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -208,7 +209,9 @@ def _validate(data: Any) -> Manifest:
             raise _fail("invalid trusted overlays")
     deadline = data.get("deadline_unix")
     if deadline is not None and (
-        isinstance(deadline, bool) or not isinstance(deadline, int | float)
+        isinstance(deadline, bool)
+        or not isinstance(deadline, int | float)
+        or not math.isfinite(deadline)
     ):
         raise _fail("invalid deadline")
     policy = data.get("policy") or {}
@@ -466,10 +469,11 @@ def clone_repo(
             continue
         if path.stat().st_size <= MAX_REQUIREMENT_FILE:
             text = path.read_text(encoding="utf-8", errors="replace")
-            if len(text) > budget:
+            cost = len(json.dumps(text, ensure_ascii=False))  # as it lands in the report
+            if cost > budget:
                 break
             files[path.name] = text
-            budget -= len(text)
+            budget -= cost
     _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
     resolved = commit.strip()
     return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
@@ -568,15 +572,21 @@ def fetch_datasets(
 
 
 def _clean_staging(staging: Path) -> None:
-    """Outputs of an earlier attempt must never be mistaken for this one's."""
+    """Outputs of an earlier attempt must never be mistaken for this one's. Smoke jobs share
+    the bucket: a planted symlink is removed itself, never followed."""
     for name in (
         "provision_error.json",
         "provision_report.json",
         "overlay.tar.zst",
         "repo.tar.zst",
+        "lock.txt",
     ):
         (staging / name).unlink(missing_ok=True)
-    shutil.rmtree(staging / "data", ignore_errors=True)
+    data = staging / "data"
+    if data.is_symlink():
+        data.unlink()
+    else:
+        shutil.rmtree(data, ignore_errors=True)
 
 
 def provision(
@@ -619,16 +629,29 @@ def provision(
     return report
 
 
-def _arm_deadline(manifest: Manifest) -> None:  # pragma: no cover - POSIX, in the image
-    """In-process work (HF downloads, parquet, hashing) is interrupted at the deadline too."""
+def deadline_expired(staging: Path) -> None:
+    """Write the error and leave at once: raising would wait for in-process download threads
+    (huggingface_hub joins its pool) until the watchdog cancels the job without a message."""
+    staging.mkdir(parents=True, exist_ok=True)
+    with (staging / "provision_error.json").open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"error": "provisioning deadline reached"}))
+        handle.flush()
+        os.fsync(handle.fileno())
+    print("PROVISION FAILED: provisioning deadline reached", file=sys.stderr, flush=True)
+    os._exit(1)
+
+
+def _arm_deadline(manifest: Manifest, staging: Path) -> None:  # pragma: no cover - POSIX
+    """In-process work (HF downloads, parquet, hashing) is stopped at the deadline too."""
     if manifest.deadline_unix is None or not hasattr(signal, "setitimer"):
         return
-
-    def expired(signum: int, frame: object) -> None:
-        raise _fail("provisioning deadline reached")
-
-    signal.signal(signal.SIGALRM, expired)
+    signal.signal(signal.SIGALRM, lambda signum, frame: deadline_expired(staging))
     signal.setitimer(signal.ITIMER_REAL, max(manifest.deadline_unix - time.time(), 1.0))
+
+
+def _disarm_deadline() -> None:  # pragma: no cover - POSIX
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -641,9 +664,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     paths = Paths(staging=Path(args.staging), cache=Path(args.cache), work=Path(args.work))
     try:
         manifest = validate_manifest(json.loads(Path(args.manifest).read_text(encoding="utf-8")))
-        _arm_deadline(manifest)
+        _arm_deadline(manifest, paths.staging)
         os.environ.update(build_env(paths))  # in-process HF downloads use local caches too
-        provision(manifest, paths, subprocess_runner, hf_fetch, parquet_smoke)
+        try:
+            provision(manifest, paths, subprocess_runner, hf_fetch, parquet_smoke)
+        finally:
+            _disarm_deadline()  # a late alarm must not turn a finished run into a failure
     except Exception as err:  # any failure becomes a readable error file, never a bare crash
         message = (
             str(err)

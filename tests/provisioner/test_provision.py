@@ -153,6 +153,8 @@ def _provision(
         {"cache_salt": ""},
         {"trusted_overlays": {"not-hex": "x"}},
         {"deadline_unix": "soon"},
+        {"deadline_unix": float("inf")},
+        {"deadline_unix": float("nan")},
     ],
 )
 def test_manifest_validation_rejects_unsafe_inputs(overrides: dict[str, Any]) -> None:
@@ -432,3 +434,45 @@ def test_main_writes_an_error_file_for_any_failure(tmp_path: Path) -> None:
     )
     assert code == 1
     assert "error" in json.loads((staging / "provision_error.json").read_text())
+
+
+def test_requirement_text_budget_counts_its_json_encoding(tmp_path: Path) -> None:
+    class ControlChars(FakeRunner):
+        def __call__(self, argv: Sequence[str], **kwargs: Any) -> str:
+            out = super().__call__(argv, **kwargs)
+            if "clone" in argv:
+                dest = Path(list(argv)[-1])
+                for i in range(3):
+                    (dest / f"requirements-{i}.txt").write_text("\x01" * 60_000)
+            return out
+
+    _, paths = _provision(tmp_path, ControlChars())
+    assert len((paths.staging / "provision_report.json").read_bytes()) < 400 * 1024
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_planted_symlinks_in_staging_are_removed_not_followed(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    paths.staging.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep")
+    (paths.staging / "data").symlink_to(victim, target_is_directory=True)
+    (paths.staging / "lock.txt").symlink_to(victim / "keep.txt")
+    provision.provision(
+        provision.validate_manifest(manifest()), paths, FakeRunner(), fake_fetch, fake_smoke,
+        deadline_s=1080,
+    )  # fmt: skip
+    assert (victim / "keep.txt").read_text() == "keep"
+    assert not (paths.staging / "data").is_symlink()
+
+
+def test_the_deadline_handler_writes_the_error_and_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exits: list[int] = []
+    monkeypatch.setattr(provision.os, "_exit", exits.append)
+    staging = tmp_path / "staging"
+    provision.deadline_expired(staging)
+    assert exits == [1]
+    assert "deadline" in json.loads((staging / "provision_error.json").read_text())["error"]

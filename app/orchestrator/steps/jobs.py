@@ -60,8 +60,11 @@ async def run_job(
     clock: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], Awaitable[None]],
     gpu: bool = False,
+    started: datetime | None = None,
 ) -> JobOutcome:
-    """Submit (get-by-name first, so a resumed step finds its job) and wait for the job."""
+    """Submit (get-by-name first, so a resumed step finds its job) and wait for the job.
+    `started` anchors a new job's watchdog when the caller already put a deadline derived from
+    it into the job (a recorded job always keeps its first submission time)."""
     watchdog = timedelta(seconds=spec.watchdog_s)
     cost = await ctx.budget.check_and_reserve(
         ctx.run_id, SpendKind.CLOUD_USD, usd_per_hour * spec.watchdog_s / 3600
@@ -83,7 +86,10 @@ async def run_job(
         if minutes is not None:
             await ctx.budget.commit(minutes, 0)
         raise
-    started = existing.created_at if existing is not None else began
+    if existing is not None:
+        started = existing.created_at
+    elif started is None:
+        started = began
 
     async def settle() -> None:
         watched_s = max(0.0, (clock() - began).total_seconds())

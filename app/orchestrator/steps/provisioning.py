@@ -35,6 +35,9 @@ STAGING_OUTPUTS = ("staging/provision_error.json", "staging/provision_report.jso
 DEADLINE_MARGIN = timedelta(minutes=2)  # the provisioner writes its error file before the cancel
 MAX_REPORT_BYTES = 512 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_DATASET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(?:__[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?$")
+_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
 
 def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
@@ -53,9 +56,31 @@ def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
         if not isinstance(value, str) or not _SHA256.fullmatch(value):
             return None
     files = data.get("requirement_files", {})
-    if not isinstance(files, dict) or not all(isinstance(v, str) for v in files.values()):
+    if not isinstance(files, dict) or len(files) > 10:
         return None
-    return data
+    if not all(
+        isinstance(k, str) and _FILE.fullmatch(k) and isinstance(v, str) for k, v in files.items()
+    ):
+        return None
+    commit, lock = data.get("repo_commit"), data.get("lock_sha256")
+    datasets = data.get("datasets")
+    return {  # whitelisted fields only: later steps and bundles read this artifact
+        "schema": "p2p.provision-report/v1",
+        "run_id": run_id,
+        "overlay_cache_key": data["overlay_cache_key"],
+        "overlay_cache_hit": data["overlay_cache_hit"],
+        "overlay_sha256": data["overlay_sha256"],
+        "lock_sha256": lock if isinstance(lock, str) and _SHA256.fullmatch(lock) else None,
+        "repo": data.get("repo") is True,
+        "repo_commit": commit if isinstance(commit, str) and _COMMIT.fullmatch(commit) else None,
+        "requirement_files": files,
+        "datasets": [
+            d
+            for d in (datasets if isinstance(datasets, list) else [])[:3]
+            if isinstance(d, str) and _DATASET.fullmatch(d)
+        ],
+        "smoke": data.get("smoke") is True,
+    }
 
 
 def _error_message(raw: bytes | None) -> str:
@@ -151,8 +176,16 @@ class ProvisioningStep:
         runner_digest = self._config.runner_image.rsplit("@", 1)[1]
         provisioner_digest = self._config.provisioner_image.rsplit("@", 1)[1]
         name = job_name(JobKind.PROVISION, ctx.run_id, ctx.attempt)
+        bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
+        await ctx.jobs.ensure_gateway_up()  # may cold-start the VM: anchor the deadline after it
         existing = await ctx.store.get_job(name)
-        submitted = existing.created_at if existing is not None else self._clock()
+        listed = [t for h, _, t in await ctx.jobs.list_jobs(name) if h.name == name]
+        if existing is not None:
+            submitted = existing.created_at
+        elif listed:  # submitted before a crash, never recorded
+            submitted = listed[0]
+        else:
+            submitted = self._clock()
         deadline = submitted + timedelta(seconds=WATCHDOG_S) - DEADLINE_MARGIN
         manifest = {
             "schema": "p2p.provision/v1",
@@ -171,10 +204,7 @@ class ProvisioningStep:
             "trusted_overlays": await ctx.store.trusted_overlays(),
             "deadline_unix": deadline.timestamp(),
         }
-        bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
-        await ctx.jobs.ensure_gateway_up()
-        in_backend = any(h.name == name for h, _, _ in await ctx.jobs.list_jobs(name))
-        if existing is None and not in_backend:  # a fresh job: earlier outputs are stale
+        if existing is None and not listed:  # a fresh job: earlier outputs are stale
             for key in STAGING_OUTPUTS:
                 await self._storage.delete(ctx.run_id, key)
         spec = JobSpec(
@@ -201,6 +231,7 @@ class ProvisioningStep:
             poll_s=self._poll_s,
             clock=self._clock,
             sleep=self._sleep,
+            started=submitted,
         )
         if outcome.run_cancelled:
             return StepResult(next=RunStatus.CANCELLED)
