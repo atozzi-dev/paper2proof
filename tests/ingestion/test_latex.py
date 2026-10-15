@@ -1,5 +1,5 @@
 from app.ingestion.archive import extract_source
-from app.ingestion.latex import MAX_DEPTH, find_main, flatten, parse_latex
+from app.ingestion.latex import MAX_DEPTH, MAX_FLATTEN_CHARS, find_main, flatten, parse_latex
 from tests.ingestion.helpers import canary_tar
 
 
@@ -56,3 +56,12 @@ def test_missing_inputs_are_marked_not_fatal() -> None:
 def test_input_paths_cannot_escape() -> None:
     files = {"main.tex": b"\\input{../../etc/passwd}", "etc/passwd": b"root"}
     assert "root" not in flatten(files, "main.tex")
+
+
+def test_flatten_caps_the_output_of_a_fan_out() -> None:
+    # every level inputs the next one 6 times: 6**5 copies of the leaf without a cap
+    files = {f"f{i}.tex": (rf"\input{{f{i + 1}}} " * 6).encode() for i in range(5)}
+    files["f5.tex"] = b"x" * 1000
+    text = flatten(files, "f0.tex")
+    assert len(text) <= MAX_FLATTEN_CHARS + 100
+    assert "[input size limit]" in text

@@ -8,6 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.domain.models import DatasetReq
 
 GITHUB_REPO = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+# The provisioner (images/provisioner/provision.py) enforces the same patterns and caps.
+HF_DATASET_ID = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?$"
+)
+HF_SPLIT = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+MAX_DATASETS = 3
+MAX_DATASETS_BYTES = 20 * 2**30
 
 
 class RepoRef(BaseModel):

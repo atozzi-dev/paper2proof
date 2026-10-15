@@ -14,6 +14,7 @@ class RunStorage(Protocol):
         self, run_id: str, key: str, *, max_bytes: int = MAX_READ_BYTES
     ) -> bytes | None: ...
     async def put_bytes(self, run_id: str, key: str, data: bytes) -> None: ...
+    async def delete(self, run_id: str, key: str) -> None: ...
 
 
 class FakeRunStorage:
@@ -30,3 +31,6 @@ class FakeRunStorage:
 
     async def put_bytes(self, run_id: str, key: str, data: bytes) -> None:
         self.objects[(run_id, key)] = data
+
+    async def delete(self, run_id: str, key: str) -> None:
+        self.objects.pop((run_id, key), None)

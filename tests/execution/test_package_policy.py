@@ -149,3 +149,32 @@ def test_repo_requirements_are_parsed_from_common_files() -> None:
     assert parse_repo_requirements(files) == {
         "torch", "einops", "pytest", "timm", "pillow", "scikit-learn", "tqdm", "lightning",
     }  # fmt: skip
+
+
+def test_hostile_or_odd_repo_files_contribute_nothing() -> None:
+    bomb = "a: &a [x, x, x]\nb: &b [*a, *a, *a]\ndependencies: [*b]\n"
+    odd = "dependencies:\n  - pip: [1, {x: y}, null, einops]\n  - 7\n  - pip: 5\n"
+    assert parse_repo_requirements({"environment.yml": bomb}) == set()  # aliases are refused
+    assert parse_repo_requirements({"environment.yml": odd}) == {"einops"}
+    assert parse_repo_requirements({"environment.yml": "dependencies: 5\n"}) == set()
+    assert parse_repo_requirements({"environment.yaml": "- just\n- a list\n"}) == set()
+    assert (
+        parse_repo_requirements({"pyproject.toml": '[project]\ndependencies = "torch"\n'}) == set()
+    )
+    assert parse_repo_requirements({"pyproject.toml": "tool = 5\nproject = 3\n"}) == set()
+
+
+@respx.mock
+async def test_specifiers_allow_plain_spaces_only_and_are_normalized(
+    policy: PackagePolicy,
+) -> None:
+    respx.get("https://pypi.org/pypi/einops/json").mock(return_value=_pypi("einops"))
+    for bad in ["==0.8\n", ">=0.7,\t<1", "==0.8\r", "\n==0.8"]:
+        decision = await policy.validate(
+            [PackageReq(name="einops", specifier=bad)], PolicyContext()
+        )
+        assert decision.decisions[0].reason is Reason.REJECT_SYNTAX, bad
+    ok = await policy.validate(
+        [PackageReq(name="einops", specifier=" >= 0.7 , < 1 ")], PolicyContext()
+    )
+    assert ok.accepted[0].specifier == ">=0.7,<1"

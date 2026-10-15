@@ -22,9 +22,8 @@ PYPI = "https://pypi.org/pypi"
 CACHE_TTL = timedelta(hours=24)
 _NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")  # PEP 508 name
 _VERSION = r"[A-Za-z0-9.*+!_-]{1,40}"
-_SPEC = re.compile(
-    rf"^(?:===|==|~=|!=|<=|>=|<|>)\s*{_VERSION}(?:\s*,\s*(?:===|==|~=|!=|<=|>=|<|>)\s*{_VERSION})*$"
-)
+_OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
+_SPEC = re.compile(rf"^ *{_OP} *{_VERSION}(?: *, *{_OP} *{_VERSION})* *$")  # plain spaces only
 TYPOSQUAT_DISTANCE = 2
 
 
@@ -165,10 +164,14 @@ class PackagePolicy:
         self._pypi = pypi
         self._now = now
 
+    @property
+    def config(self) -> PolicyConfig:
+        return self._config
+
     def _syntax_ok(self, req: PackageReq) -> bool:
         if not _NAME.fullmatch(req.name):
             return False
-        return req.specifier is None or bool(_SPEC.fullmatch(req.specifier.strip()))
+        return req.specifier is None or bool(_SPEC.fullmatch(req.specifier))
 
     async def _decide(self, req: PackageReq, context: PolicyContext) -> PackageDecision:
         cfg = self._config
@@ -179,6 +182,8 @@ class PackagePolicy:
         # 1: a plain name and version specifier: no URLs, git+, paths, options, extras, markers
         if not self._syntax_ok(req):
             return decision(Reason.REJECT_SYNTAX, "not a plain package name/specifier")
+        if req.specifier is not None:  # what goes into the manifest: no whitespace at all
+            req = PackageReq(name=req.name, specifier=req.specifier.replace(" ", "") or None)
         name = normalize(req.name)
         if name in cfg.denylist:  # 2
             return decision(Reason.REJECT_DENYLIST)
@@ -231,30 +236,66 @@ def _names(lines: list[str]) -> set[str]:
     return names
 
 
+class _NoAliasLoader(yaml.SafeLoader):
+    """Safe YAML without anchors/aliases: an untrusted file can't expand into a huge document."""
+
+    def compose_node(self, parent: yaml.Node | None, index: int) -> yaml.Node | None:
+        if self.check_event(yaml.AliasEvent):
+            raise yaml.YAMLError("aliases are not allowed")
+        event = self.peek_event()  # type: ignore[no-untyped-call]
+        if getattr(event, "anchor", None):
+            raise yaml.YAMLError("anchors are not allowed")
+        return super().compose_node(parent, index)
+
+
+def _strings(value: object) -> list[str]:
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
+def _dict(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _parse_one(base: str, text: str) -> set[str]:
+    if base.startswith("requirements") and base.endswith(".txt"):
+        return _names(text.splitlines())
+    if base == "pyproject.toml":
+        data = tomllib.loads(text)
+        names = _names(_strings(_dict(data.get("project")).get("dependencies")))
+        poetry = _dict(_dict(_dict(data.get("tool")).get("poetry")).get("dependencies"))
+        declared = {n for n in poetry if n.lower() != "python" and _NAME.fullmatch(n)}
+        return names | {normalize(n) for n in declared}
+    if base == "setup.cfg":
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read_string(text)
+        return _names(parser.get("options", "install_requires", fallback="").splitlines())
+    if base in ("environment.yml", "environment.yaml"):
+        env = yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 - SafeLoader subclass
+        found: set[str] = set()
+        for dep in _dict(env).get("dependencies") or []:
+            if isinstance(dep, dict):
+                found |= _names(_strings(dep.get("pip")))
+            elif isinstance(dep, str) and not dep.startswith("python"):
+                found |= _names([dep.split("=")[0]])
+        return found
+    return set()
+
+
 def parse_repo_requirements(files: Mapping[str, str]) -> set[str]:
+    """Names declared by the repository's requirement files. CPU-bound on hostile input: call it
+    through `RunContext.run_cpu` (invariant 12)."""
     names: set[str] = set()
     for path, text in files.items():
         base = path.rsplit("/", 1)[-1].lower()
         try:
-            if base.startswith("requirements") and base.endswith(".txt"):
-                names |= _names(text.splitlines())
-            elif base == "pyproject.toml":
-                data = tomllib.loads(text)
-                names |= _names(list(data.get("project", {}).get("dependencies", [])))
-                poetry = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
-                names |= {normalize(n) for n in poetry if n.lower() != "python"}
-            elif base == "setup.cfg":
-                parser = configparser.ConfigParser()
-                parser.read_string(text)
-                raw = parser.get("options", "install_requires", fallback="")
-                names |= _names(raw.splitlines())
-            elif base in ("environment.yml", "environment.yaml"):
-                env = yaml.safe_load(text) or {}
-                for dep in env.get("dependencies", []):
-                    if isinstance(dep, dict):
-                        names |= _names([str(d) for d in dep.get("pip", [])])
-                    elif isinstance(dep, str) and not dep.startswith("python"):
-                        names |= _names([dep.split("=")[0]])
-        except (ValueError, configparser.Error, yaml.YAMLError, tomllib.TOMLDecodeError):
+            names |= _parse_one(base, text)
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+            configparser.Error,
+            yaml.YAMLError,
+            tomllib.TOMLDecodeError,
+        ):
             continue  # a broken file in an untrusted repo just contributes nothing
     return names

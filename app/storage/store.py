@@ -90,6 +90,16 @@ class StepRecord(_Record):
     output_ref: str | None
 
 
+class JobRecord(_Record):
+    name: str
+    kind: str
+    run_id: str
+    nebius_job_id: str | None
+    status: str
+    deadline: datetime | None
+    created_at: datetime
+
+
 class DailySpend(_Record):
     inference_usd: float
     cloud_usd: float
@@ -297,6 +307,21 @@ class Store:
             if job_id is None:  # pragma: no cover - the row exists after the upsert
                 raise RuntimeError(f"job {name} not recorded")
             return job_id
+
+    async def get_job(self, name: str) -> JobRecord | None:
+        async with self._session() as s:
+            row = await s.scalar(select(JobRow).where(JobRow.name == name))
+            if row is None:
+                return None
+            return JobRecord(
+                name=row.name,
+                kind=row.kind,
+                run_id=row.run_id,
+                nebius_job_id=row.nebius_job_id,
+                status=row.status,
+                deadline=row.deadline,
+                created_at=row.created_at,
+            )
 
     async def update_job(
         self,

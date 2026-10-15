@@ -5,9 +5,15 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 
-from app.domain.discovery import Discovery
+from app.domain.discovery import (
+    HF_DATASET_ID,
+    HF_SPLIT,
+    MAX_DATASETS,
+    MAX_DATASETS_BYTES,
+    Discovery,
+)
 from app.domain.events import EventType
-from app.domain.models import ClaimType, PackageReq, Plan, Scale, StepName
+from app.domain.models import ClaimType, DatasetReq, PackageReq, Plan, Scale, StepName
 from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
@@ -34,6 +40,19 @@ def correct_plan(plan: Plan, *, selected: set[str], gpu_cap: float) -> tuple[Pla
         extra = [s for s in range(100) if s not in seeds][: MIN_SEEDS - len(seeds)]
         seeds += extra
         notes.append(f"seeds raised to {MIN_SEEDS} (the verdict needs at least {MIN_SEEDS})")
+    datasets: list[DatasetReq] = []
+    for dataset in plan.datasets:  # the provisioner would refuse anything else (fail early)
+        valid = HF_DATASET_ID.fullmatch(dataset.id) and (
+            dataset.split is None or HF_SPLIT.fullmatch(dataset.split)
+        )
+        total = sum(d.max_bytes for d in datasets) + dataset.max_bytes
+        if valid and len(datasets) < MAX_DATASETS and total <= MAX_DATASETS_BYTES:
+            datasets.append(dataset)
+    if len(datasets) != len(plan.datasets):
+        notes.append(
+            f"dropped datasets that are invalid or over the cap ({MAX_DATASETS} datasets, "
+            f"{MAX_DATASETS_BYTES // 2**30} GiB in total)"
+        )
     gpu, scale = plan.gpu_minutes_est, plan.scale
     if gpu > gpu_cap:
         gpu, scale = gpu_cap, Scale.REDUCED
@@ -43,6 +62,7 @@ def correct_plan(plan: Plan, *, selected: set[str], gpu_cap: float) -> tuple[Pla
             "claim_ids": claim_ids,
             "claim_types": {c: plan.claim_types[c] for c in claim_ids},
             "seeds": seeds,
+            "datasets": datasets,
             "gpu_minutes_est": gpu,
             "scale": scale,
             "notes": [*plan.notes, *notes],

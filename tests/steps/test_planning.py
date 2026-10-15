@@ -9,6 +9,7 @@ from app.domain.events import ApprovalRequiredPayload, PlanReadyPayload, Warning
 from app.domain.models import (
     Claim,
     ClaimType,
+    DatasetReq,
     ErrorCode,
     Plan,
     PlanMode,
@@ -20,7 +21,7 @@ from app.models.fake import FakeModelClient
 from app.models.pricing import load_cloud_prices
 from app.orchestrator.cost_estimate import estimate_plan_cost
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
-from app.orchestrator.steps.planning import PlanningStep
+from app.orchestrator.steps.planning import PlanningStep, correct_plan
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
@@ -172,3 +173,23 @@ async def test_approval_decisions(
     )
     result = await step.run(ctx)  # type: ignore[arg-type]
     assert result.next is expected
+
+
+def test_plan_datasets_are_validated_and_capped() -> None:
+    datasets = [
+        DatasetReq(kind="hf", id="../etc"),
+        DatasetReq(kind="hf", id="a/b", split="train[:10%]"),
+        *(DatasetReq(kind="hf", id=f"org/d{i}", max_bytes=8_000_000_000) for i in range(4)),
+    ]
+    plan = Plan(
+        mode=PlanMode.REPO_FIRST,
+        claim_ids=["c1"],
+        claim_types={"c1": ClaimType.RELATIVE},
+        scale=Scale.REDUCED,
+        seeds=[0, 1, 2],
+        datasets=datasets,
+        gpu_minutes_est=10,
+    )
+    corrected, notes = correct_plan(plan, selected={"c1"}, gpu_cap=30)
+    assert [d.id for d in corrected.datasets] == ["org/d0", "org/d1"]  # a third breaks 20 GiB
+    assert any("dataset" in n for n in notes)

@@ -5,8 +5,8 @@ The manifest is injected (read-only, <= 64 KiB) instead of being written to the 
 import asyncio
 import contextlib
 import json
-import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 from app.domain.discovery import Discovery
 from app.domain.errors import P2PError
@@ -22,11 +22,14 @@ from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import PROVISION_PLATFORM, PROVISION_PRESET
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of
-from app.orchestrator.steps.jobs import run_job
+from app.orchestrator.steps.jobs import run_job, utcnow
 from app.storage.artifacts import ArtifactStore
 
 WATCHDOG_S = 20 * 60  # execution-contracts §8
 SMOKE_ROWS = 512
+RUNNER_PYTHON = "3.12"  # what the runner image runs: overlays are only valid for that
+RUNNER_PLATFORM = "x86_64-manylinux_2_28"
+STAGING_OUTPUTS = ("staging/provision_error.json", "staging/provision_report.json")
 
 
 class ProvisioningStep:
@@ -41,7 +44,7 @@ class ProvisioningStep:
         config: ExecutionConfig,
         cloud: CloudPrices,
         poll_s: float = 15,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._policy = policy
@@ -57,17 +60,26 @@ class ProvisioningStep:
         data: dict[str, object] = await asyncio.to_thread(self._artifacts.get_json, key)
         return data
 
-    async def _repo_requirements(self, ctx: RunContext) -> set[str]:
-        """Requirement files the provisioner found in the clone during an earlier attempt."""
+    async def _repo_requirements(self, ctx: RunContext, discovery: Discovery) -> set[str]:
+        """Requirement files the provisioner found in the clone during an earlier attempt. Only
+        an official repository (linked by the authors) can exempt names from the typosquat and
+        age checks: a repository found by search could be anybody's."""
+        if discovery.repo is None or not discovery.repo.official:
+            return set()
         try:
             report = await self._json(f"runs/{ctx.run_id}/provision_report.json")
         except FileNotFoundError:
             return set()
-        files = report.get("requirement_files")
-        return parse_repo_requirements(files) if isinstance(files, dict) else set()
+        raw = report.get("requirement_files")
+        if not isinstance(raw, dict):
+            return set()
+        files = {str(k): v for k, v in raw.items() if isinstance(v, str)}
+        return await ctx.run_cpu(parse_repo_requirements, files)
 
-    async def _packages(self, ctx: RunContext, plan: Plan) -> list[PackageReq]:
-        repo_requirements = await self._repo_requirements(ctx)
+    async def _packages(
+        self, ctx: RunContext, plan: Plan, discovery: Discovery
+    ) -> list[PackageReq]:
+        repo_requirements = await self._repo_requirements(ctx, discovery)
         planned = await self._policy.validate(
             plan.packages, PolicyContext(repo_requirements=repo_requirements)
         )
@@ -100,7 +112,9 @@ class ProvisioningStep:
         discovery = Discovery.model_validate(
             await self._json(await output_of(ctx, StepName.DISCOVERING))
         )
-        packages = await self._packages(ctx, plan)
+        packages = await self._packages(ctx, plan, discovery)
+        policy = self._policy.config
+        runner_digest = self._config.runner_image.rsplit("@", 1)[1]
         manifest = {
             "schema": "p2p.provision/v1",
             "run_id": ctx.run_id,
@@ -111,11 +125,17 @@ class ProvisioningStep:
                 {"dataset": plan.datasets[0].id, "rows": SMOKE_ROWS} if plan.datasets else None
             ),
             "hf_token_secret": None,
+            "cache_salt": f"{runner_digest}+py{RUNNER_PYTHON}+{RUNNER_PLATFORM}",
+            "policy": {"denylist": sorted(policy.denylist), "popular": sorted(policy.popular)},
         }
         bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
         await ctx.jobs.ensure_gateway_up()
+        name = job_name(JobKind.PROVISION, ctx.run_id, ctx.attempt)
+        if await ctx.store.get_job(name) is None:  # a fresh job: earlier outputs are stale
+            for key in STAGING_OUTPUTS:
+                await self._storage.delete(ctx.run_id, key)
         spec = JobSpec(
-            name=job_name(JobKind.PROVISION, ctx.run_id, ctx.attempt),
+            name=name,
             kind=JobKind.PROVISION,
             image_digest_ref=self._config.provisioner_image,
             platform=PROVISION_PLATFORM,

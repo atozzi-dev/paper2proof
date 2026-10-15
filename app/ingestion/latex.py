@@ -7,6 +7,7 @@ import re
 from app.domain.paper import IngestedPaper, Section, Table
 
 MAX_DEPTH = 5
+MAX_FLATTEN_CHARS = 600_000  # ~ a long paper with appendices; arXiv sources are untrusted
 _INPUT = re.compile(r"\\(?:input|include)\s*\{([^}]*)\}")
 _COMMENT = re.compile(r"(?<!\\)%[^\n]*")
 _SECTION = re.compile(r"\\section\*?\s*\{")
@@ -59,21 +60,36 @@ def _resolve(name: str) -> str | None:
     return name if name.endswith(".tex") else f"{name}.tex"
 
 
-def flatten(files: dict[str, bytes], main: str, depth: int = 0) -> str:
-    """Inline \\input/\\include up to MAX_DEPTH levels; never reads outside the archive."""
-    text = _text(files[main])
+def flatten(files: dict[str, bytes], main: str) -> str:
+    """Inline \\input/\\include up to MAX_DEPTH levels; never reads outside the archive. The
+    output is capped at MAX_FLATTEN_CHARS: a file can input another one many times over."""
+    left = [MAX_FLATTEN_CHARS]
 
-    def replace(match: re.Match[str]) -> str:
-        target = _resolve(match.group(1))
-        if target is None:
-            return "[blocked input]"
-        if depth + 1 > MAX_DEPTH:
-            return "[input depth limit]"
-        if target not in files:
-            return f"[missing input: {match.group(1).strip()}]"
-        return flatten(files, target, depth + 1)
+    def expand(name: str, depth: int) -> str:
+        text = _text(files[name])
+        if left[0] <= 0:
+            return "[input size limit]"
 
-    return _INPUT.sub(replace, text)
+        def replace(match: re.Match[str]) -> str:
+            target = _resolve(match.group(1))
+            if target is None:
+                return "[blocked input]"
+            if depth + 1 > MAX_DEPTH:
+                return "[input depth limit]"
+            if target not in files:
+                return f"[missing input: {match.group(1).strip()}]"
+            if left[0] <= 0:
+                return "[input size limit]"
+            inlined = expand(target, depth + 1)
+            left[0] -= len(inlined)
+            return inlined
+
+        return _INPUT.sub(replace, text)
+
+    out = expand(main, 0)
+    if len(out) > MAX_FLATTEN_CHARS:
+        out = out[:MAX_FLATTEN_CHARS] + "[input size limit]"
+    return out
 
 
 def _rows(tabular: str) -> list[list[str]]:

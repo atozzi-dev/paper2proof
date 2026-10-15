@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,15 +21,16 @@ from app.domain.models import (
     Scale,
     StepName,
 )
-from app.execution.backend import JobKind, JobSpec, JobState
+from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
 from app.execution.config import ExecutionConfig
 from app.execution.fake_backend import FakeJobBackend
 from app.execution.naming import bucket_name
 from app.execution.package_policy import PackagePolicy, PyPIClient, load_policy_config
 from app.execution.run_storage import FakeRunStorage
 from app.models.pricing import load_cloud_prices
-from app.orchestrator.budget import SpendKind
+from app.orchestrator.budget import BudgetExceeded, SpendKind
 from app.orchestrator.context import RunContext
+from app.orchestrator.steps.jobs import run_job
 from app.orchestrator.steps.provisioning import ProvisioningStep
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
@@ -57,11 +59,13 @@ def _pypi() -> httpx.Response:
 
 
 class FakeClock:
+    """Wall clock (datetime) driven by the fake sleep."""
+
     def __init__(self) -> None:
         self.t = 0.0
 
-    def __call__(self) -> float:
-        return self.t
+    def __call__(self) -> datetime:
+        return NOW + timedelta(seconds=self.t)
 
     async def sleep(self, seconds: float) -> None:
         self.t += seconds
@@ -73,6 +77,7 @@ async def _setup(
     *,
     packages: list[str],
     smoke_request: list[str] | None = None,
+    official: bool = True,
 ) -> tuple[RunContext, LocalArtifactStore]:
     artifacts = LocalArtifactStore(tmp_path)
     plan = Plan(
@@ -87,7 +92,11 @@ async def _setup(
     )
     artifacts.put_json(PLAN_KEY, {"plan": plan.model_dump(mode="json"), "est_cost_usd": 0.2})
     discovery = Discovery(
-        repo=RepoRef(url="https://github.com/org/repo", source="paper", official=True)
+        repo=RepoRef(
+            url="https://github.com/org/repo",
+            source="paper" if official else "tavily",
+            official=official,
+        )
     )
     artifacts.put_json(DISCOVERY_KEY, discovery.model_dump(mode="json"))
     previous = [
@@ -240,3 +249,128 @@ async def test_all_requested_packages_rejected_fails(store: Store, tmp_path: Pat
     with pytest.raises(P2PError) as err:
         await _step(store, artifacts, FakeRunStorage(), FakeClock()).run(ctx)
     assert err.value.code is ErrorCode.PACKAGE_REJECTED
+
+
+def _manifest(ctx: RunContext) -> Any:
+    spec = next(iter(ctx.jobs.jobs.values()))[3]  # type: ignore[attr-defined]
+    return json.loads(spec.inject_files["/etc/p2p/provision.json"])
+
+
+@respx.mock
+@pytest.mark.parametrize("official", [True, False])
+async def test_repo_requirements_exempt_typosquats_only_for_official_repos(
+    store: Store, tmp_path: Path, official: bool
+) -> None:
+    respx.get("https://pypi.org/pypi/torchao/json").mock(return_value=_pypi())
+    ctx, artifacts = await _setup(store, tmp_path, packages=["torchao"], official=official)
+    artifacts.put_json(  # an earlier attempt's clone declared it
+        f"runs/{RUN}/provision_report.json",
+        {"requirement_files": {"requirements.txt": "torchao\n"}},
+    )
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert _manifest(ctx)["packages"] == (["torchao"] if official else [])
+
+
+async def test_manifest_carries_the_cache_salt_and_the_policy(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    manifest = _manifest(ctx)
+    salt = manifest["cache_salt"]
+    assert EXEC_CFG.runner_image.split("@")[1] in salt  # the overlay matches one runner image
+    assert "3.12" in salt
+    assert re.fullmatch(r"[A-Za-z0-9_.:+-]{1,200}", salt)  # the provisioner's SALT pattern
+    assert "pip" in manifest["policy"]["denylist"]
+    assert "torch" in manifest["policy"]["popular"]
+    assert len(json.dumps(manifest)) < 64 * 1024
+
+
+async def test_a_stale_error_from_an_earlier_attempt_is_not_reported(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    storage.objects[(RUN, "staging/provision_error.json")] = b'{"error": "old failure"}'
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(JobState.FAILED)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert "old failure" not in err.value.message
+
+
+async def test_a_resumed_job_keeps_its_original_deadline(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    jobs = FakeJobBackend(JobState.RUNNING)
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    clock = FakeClock()
+    name = f"p2p-prov-{RUN[2:]}-1"
+    await store.record_job(  # submitted 19 minutes ago, before a restart
+        RUN, "prov", name, "fakejob-0", bucket_name(RUN), at=clock() - timedelta(minutes=19)
+    )
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, FakeRunStorage(), clock).run(ctx)
+    assert err.value.code is ErrorCode.TIMEOUT
+    assert clock.t <= 2 * 60
+    assert jobs.cancelled == [name]
+
+
+class _FlakyStatus(FakeJobBackend):
+    def __init__(self, failures: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.failures = failures
+
+    async def status(self, handle: JobHandle) -> JobState:
+        if self.failures > 0:
+            self.failures -= 1
+            raise ConnectionError("control plane blip")
+        return await super().status(handle)
+
+
+async def test_transient_status_errors_are_retried(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    jobs = _FlakyStatus(2, on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.next is StepName.SMOKE_TESTING
+
+
+async def test_a_failing_poll_cancels_the_job_and_settles_the_budget(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    jobs = _FlakyStatus(1000, final_state=JobState.RUNNING)
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    with pytest.raises(ConnectionError):
+        await _step(store, artifacts, FakeRunStorage(), FakeClock()).run(ctx)
+    assert jobs.cancelled == [f"p2p-prov-{RUN[2:]}-1"]
+    assert not ctx.budget._inflight
+
+
+async def test_a_refused_gpu_reservation_releases_the_cloud_one(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, _ = await _setup(store, tmp_path, packages=[])
+    spec = JobSpec(
+        name=f"p2p-exec-{RUN[2:]}-1",
+        kind=JobKind.EXEC,
+        image_digest_ref=EXEC_CFG.runner_image,
+        platform="gpu-l40s-d",
+        preset="1gpu-16vcpu-96gb",
+        disk_gib=50,
+        subnet_id="vpcsubnet-exec",
+        volumes=[],
+        inject_files={},
+        env={},
+        preemptible=True,
+        watchdog_s=10 * 3600,  # far more GPU minutes than the per-run budget
+    )
+    clock = FakeClock()
+    with pytest.raises(BudgetExceeded):
+        await run_job(
+            ctx, spec, usd_per_hour=0.01, poll_s=15, clock=clock, sleep=clock.sleep, gpu=True
+        )
+    assert not ctx.budget._inflight
+    assert not ctx.jobs.jobs  # type: ignore[attr-defined]

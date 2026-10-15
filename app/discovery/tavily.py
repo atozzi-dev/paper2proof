@@ -52,25 +52,34 @@ class TavilyClient:
         if hit is not None:
             return hit
         reservation = await budget.check_and_reserve(run_id, SpendKind.TAVILY_CREDITS, credits)
+        spent = 0.0  # settled in `finally`, whatever happens below
         client = self._http or httpx.AsyncClient(timeout=60)
         try:
-            response = await client.post(
-                f"{TAVILY_API}/{path}",
-                json={**body, "include_usage": True},
-                headers={"Authorization": f"Bearer {self._key.get_secret_value()}"},
-            )
-        except httpx.HTTPError as err:
-            await budget.commit(reservation, 0)
-            raise TavilyUnavailable(f"Tavily unreachable: {type(err).__name__}") from None
+            try:
+                response = await client.post(
+                    f"{TAVILY_API}/{path}",
+                    json={**body, "include_usage": True},
+                    headers={"Authorization": f"Bearer {self._key.get_secret_value()}"},
+                )
+            except httpx.HTTPError as err:
+                raise TavilyUnavailable(f"Tavily unreachable: {type(err).__name__}") from None
+            if response.status_code != 200:
+                raise TavilyUnavailable(f"Tavily returned HTTP {response.status_code}")
+            spent = credits  # answered: assume billed until the usage field says otherwise
+            try:
+                data = response.json()
+            except ValueError:
+                raise TavilyUnavailable("Tavily returned a malformed body") from None
+            if not isinstance(data, dict):
+                raise TavilyUnavailable("Tavily returned a malformed body")
+            usage = data.get("usage")
+            used = usage.get("credits") if isinstance(usage, dict) else None
+            if isinstance(used, int | float) and math.isfinite(used) and used >= 0:
+                spent = float(used)
         finally:
             if self._http is None:
                 await client.aclose()
-        if response.status_code != 200:
-            await budget.commit(reservation, 0)
-            raise TavilyUnavailable(f"Tavily returned HTTP {response.status_code}")
-        data: dict[str, Any] = response.json()
-        used = (data.get("usage") or {}).get("credits")
-        await budget.commit(reservation, float(used) if isinstance(used, int | float) else credits)
+            await budget.commit(reservation, spent)
         await store.cache_put("tavily", key, data)
         return data
 

@@ -6,7 +6,6 @@
 """
 
 import asyncio
-import re
 from datetime import timedelta
 
 import httpx
@@ -14,7 +13,7 @@ import httpx
 from app.discovery.hf_papers import HfPapers
 from app.discovery.rank import github_repos, rank_candidates
 from app.discovery.tavily import TavilyClient, TavilyResult, TavilyUnavailable
-from app.domain.discovery import Discovery, RepoRef
+from app.domain.discovery import HF_DATASET_ID, Discovery, RepoRef
 from app.domain.events import EventType
 from app.domain.models import DatasetReq, StepName
 from app.ingestion.arxiv import ArxivClient, ArxivMetadata
@@ -27,7 +26,6 @@ from app.storage.store import Store
 
 DEGRADED = "DISCOVERY_DEGRADED"
 METADATA_TTL = timedelta(hours=24)
-_HF_DATASET = re.compile(r"^[A-Za-z0-9_.-]{1,96}(/[A-Za-z0-9_.-]{1,96})?$")
 
 
 class DiscoveringStep:
@@ -108,7 +106,7 @@ class DiscoveringStep:
         datasets = [
             DatasetReq(kind="hf", id=d)
             for d in await self._hf.dataset_ids(arxiv_id)
-            if _HF_DATASET.fullmatch(d)
+            if HF_DATASET_ID.fullmatch(d)
         ]
 
         official = [

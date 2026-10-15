@@ -127,6 +127,22 @@ async def test_record_job_is_idempotent_by_name(store: Store) -> None:
     assert first == second
 
 
+async def test_get_job_returns_the_first_submission(store: Store) -> None:
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    at = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    assert await store.get_job("p2p-exec-x-1") is None
+    await store.record_job(RUN, "exec", "p2p-exec-x-1", "job-1", "p2p-run-x", at=at)
+    await store.record_job(RUN, "exec", "p2p-exec-x-1", "job-1", "p2p-run-x")  # a retry
+    job = await store.get_job("p2p-exec-x-1")
+    assert job is not None
+    assert (job.name, job.kind, job.status, job.created_at) == (
+        "p2p-exec-x-1",
+        "exec",
+        "SUBMITTED",
+        at,
+    )
+
+
 async def test_claims_and_verdicts_round_trip(store: Store) -> None:
     await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
     claim = Claim(

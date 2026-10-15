@@ -1,6 +1,7 @@
 """Helpers to run a single step against a real Store with a previous step's output in place."""
 
 import itertools
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.domain.models import StepName
@@ -12,6 +13,7 @@ from app.storage.store import Store
 ROOT = Path(__file__).resolve().parents[2]
 RUN = "r_01jb7z00000000000000000000"
 LLM_FIXTURES = ROOT / "tests" / "fixtures" / "llm"
+CPU_POOL = ThreadPoolExecutor(max_workers=2)  # the app uses a process pool; threads suffice here
 
 
 async def ctx_at(
@@ -50,5 +52,5 @@ async def ctx_at(
         budget=Budget(store, limits, env="test"),
         limits=limits,
         jobs=FakeJobBackend(),
-        cpu_pool=None,
+        cpu_pool=CPU_POOL,
     )
