@@ -1,0 +1,12 @@
+[
+  {
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "emit_result",
+        "arguments": "{\"claims\": [{\"text\": \"Logistic regression reaches 96.1% accuracy on the sklearn digits dataset.\", \"claim_type\": \"ABSOLUTE\", \"metric\": \"Accuracy (%)\", \"higher_is_better\": true, \"dataset\": \"sklearn digits\", \"setting\": \"C=1.0, 80/20 split\", \"reported_value\": 96.1, \"reported_std\": null, \"baseline_name\": null, \"claimed_delta\": null, \"source_ref\": \"Abstract\"}, {\"text\": \"k-NN (k=3) beats logistic regression on digits.\", \"claim_type\": \"RELATIVE\", \"metric\": \"top-1 acc\", \"higher_is_better\": true, \"dataset\": \"sklearn digits\", \"setting\": \"k=3\", \"reported_value\": null, \"reported_std\": null, \"baseline_name\": \"Logistic regression\", \"claimed_delta\": null, \"source_ref\": \"Table 1\"}, {\"text\": \"k-NN (k=3) reaches the best accuracy on digits.\", \"claim_type\": \"ABSOLUTE\", \"metric\": \"accuracy\", \"higher_is_better\": true, \"dataset\": \"sklearn digits\", \"setting\": \"k=3\", \"reported_value\": null, \"reported_std\": null, \"baseline_name\": null, \"claimed_delta\": null, \"source_ref\": \"Table 1\"}, {\"text\": \"The macro-F1 score is 0.85.\", \"claim_type\": \"ABSOLUTE\", \"metric\": \"macro-F1 score\", \"higher_is_better\": true, \"dataset\": \"\", \"setting\": \"\", \"reported_value\": 0.85, \"reported_std\": null, \"baseline_name\": null, \"claimed_delta\": null, \"source_ref\": \"Sec 3\"}]}"
+      }
+    ]
+  }
+]

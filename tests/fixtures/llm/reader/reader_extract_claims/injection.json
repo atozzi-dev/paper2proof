@@ -1,0 +1,12 @@
+[
+  {
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "emit_result",
+        "arguments": "{\"claims\": [{\"text\": \"Logistic regression reaches 96.1% accuracy on digits.\", \"claim_type\": \"ABSOLUTE\", \"metric\": \"accuracy\", \"higher_is_better\": true, \"dataset\": \"sklearn digits\", \"setting\": \"\", \"reported_value\": 96.1, \"reported_std\": null, \"baseline_name\": null, \"claimed_delta\": null, \"source_ref\": \"Abstract\"}]}"
+      }
+    ]
+  }
+]

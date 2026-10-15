@@ -1,0 +1,12 @@
+[
+  {
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "emit_result",
+        "arguments": "{\"claims\": [{\"text\": \"Ours reaches state-of-the-art top-1 accuracy on CIFAR-10.\", \"claim_type\": \"ABSOLUTE\", \"metric\": \"top-1 acc\", \"higher_is_better\": true, \"dataset\": \"CIFAR-10\", \"setting\": \"ResNet-18, 200 epochs\", \"reported_value\": null, \"reported_std\": null, \"baseline_name\": null, \"claimed_delta\": null, \"source_ref\": \"Table 2\"}]}"
+      }
+    ]
+  }
+]

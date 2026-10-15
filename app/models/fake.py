@@ -21,6 +21,7 @@ class FakeModelClient:
         self.root = root
         self.case = case
         self.calls: list[tuple[Role, str, str]] = []
+        self.requests: list[tuple[Role, list[Message]]] = []  # what each call was sent
         self._cursor: dict[tuple[Role, str, str], int] = defaultdict(int)
 
     def _next(self, role: Role, prompt: str | None) -> Completion:
@@ -58,6 +59,7 @@ class FakeModelClient:
         step: str | None = None,
         prompt: str | None = None,
     ) -> Completion:
+        self.requests.append((role, list(messages)))
         return self._next(role, prompt)
 
     async def structured(
@@ -70,6 +72,7 @@ class FakeModelClient:
         step: str | None = None,
         prompt: str | None = None,
     ) -> T:
+        self.requests.append((role, list(messages)))
         completion = self._next(role, prompt)
         if completion.tool_calls:
             return schema.model_validate_json(completion.tool_calls[0].arguments)
