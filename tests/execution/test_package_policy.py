@@ -178,3 +178,10 @@ async def test_specifiers_allow_plain_spaces_only_and_are_normalized(
         [PackageReq(name="einops", specifier=" >= 0.7 , < 1 ")], PolicyContext()
     )
     assert ok.accepted[0].specifier == ">=0.7,<1"
+
+
+def test_deeply_nested_repo_files_contribute_nothing() -> None:
+    deep_yaml = "dependencies: " + "[" * 5000 + "]" * 5000 + "\n"
+    deep_toml = "x = " + "[" * 5000 + "]" * 5000 + "\n"
+    assert parse_repo_requirements({"environment.yml": deep_yaml}) == set()
+    assert parse_repo_requirements({"pyproject.toml": deep_toml}) == set()

@@ -150,6 +150,9 @@ def _provision(
         {"hf_token_secret": "hf_abcdefghijklmnop"},
         {"repo": "not-a-dict"},
         {"datasets": ["not-a-dict"]},
+        {"cache_salt": ""},
+        {"trusted_overlays": {"not-hex": "x"}},
+        {"deadline_unix": "soon"},
     ],
 )
 def test_manifest_validation_rejects_unsafe_inputs(overrides: dict[str, Any]) -> None:
@@ -261,26 +264,134 @@ def test_stale_outputs_of_a_previous_attempt_are_removed(tmp_path: Path) -> None
     assert not (paths.staging / "data" / "old-dataset.tar.zst").exists()
 
 
+def _trusted(report: dict[str, Any]) -> dict[str, str]:
+    return {report["overlay_cache_key"]: report["overlay_sha256"]}
+
+
 def test_overlay_cache_hit_skips_install_and_is_verified(tmp_path: Path) -> None:
-    _provision(tmp_path)
+    first, _ = _provision(tmp_path)
     second = FakeRunner()
-    report, _ = _provision(tmp_path, second, name="2")
+    report, _ = _provision(tmp_path, second, name="2", trusted_overlays=_trusted(first))
     assert report["overlay_cache_hit"] is True
     assert not any(a[:3] == ["uv", "pip", "install"] for a, _, _ in second.calls)
-    # A corrupted cache entry is detected and rebuilt, never served.
+    # A replaced cache entry (and its sidecar) is detected and rebuilt, never served.
     entry = next((tmp_path / "cache" / "overlays").glob("*.tar.zst"))
-    entry.write_bytes(b"truncated")
+    entry.write_bytes(b"backdoored")
+    entry.with_name(entry.name.replace(".tar.zst", ".sha256")).write_text(
+        hashlib.sha256(b"backdoored").hexdigest()
+    )
     third = FakeRunner()
-    report3, _ = _provision(tmp_path, third, name="3")
+    report3, _ = _provision(tmp_path, third, name="3", trusted_overlays=_trusted(first))
     assert report3["overlay_cache_hit"] is False
     assert any(a[:3] == ["uv", "pip", "install"] for a, _, _ in third.calls)
     assert not list((tmp_path / "cache" / "overlays").glob(".tmp-*"))
 
 
-def test_cache_key_includes_the_salt(tmp_path: Path) -> None:
+def test_cache_entries_the_control_plane_does_not_know_are_not_served(tmp_path: Path) -> None:
     _provision(tmp_path)
-    report, _ = _provision(tmp_path, name="2", cache_salt="py3.12-other-image")
+    report, _ = _provision(tmp_path, name="2")  # nothing trusted
     assert report["overlay_cache_hit"] is False
+
+
+def test_cache_key_includes_the_salt_and_the_constraints(tmp_path: Path) -> None:
+    first, paths = _provision(tmp_path)
+    report, _ = _provision(
+        tmp_path, name="2", cache_salt="py3.12-other-image", trusted_overlays=_trusted(first)
+    )
+    assert report["overlay_cache_key"] != first["overlay_cache_key"]
+    paths.constraints.write_text("torch==2.5.0\n")
+    report3 = provision.provision(
+        provision.validate_manifest(manifest(trusted_overlays=_trusted(first))),
+        provision.Paths(
+            staging=tmp_path / "s3", cache=tmp_path / "cache", work=tmp_path / "w3",
+            constraints=paths.constraints,
+        ),
+        FakeRunner(), fake_fetch, fake_smoke, deadline_s=1080,
+    )  # fmt: skip
+    assert report3["overlay_cache_key"] != first["overlay_cache_key"]
+
+
+def test_image_provided_dependencies_are_not_judged(tmp_path: Path) -> None:
+    lock = LOCK + "setuptools==70.0 \\\n    --hash=sha256:d\n"
+    paths = _paths(tmp_path)
+    paths.constraints.write_text("torch==2.4.0\nsetuptools==70.0\nnvidia-cublas-cu12==12.1.3.1\n")
+    provision.provision(
+        provision.validate_manifest(manifest()), paths, FakeRunner(lock=lock), fake_fetch,
+        fake_smoke, deadline_s=1080,
+    )  # fmt: skip
+
+
+def test_missing_constraints_fail_closed(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    paths.constraints.unlink()
+    with pytest.raises(provision.ProvisionError, match="constraints"):
+        provision.provision(
+            provision.validate_manifest(manifest()), paths, FakeRunner(), fake_fetch,
+            fake_smoke, deadline_s=1080,
+        )  # fmt: skip
+
+
+def test_install_targets_the_runner_platform_and_archives_are_deterministic(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    _provision(tmp_path, runner)
+    install = next(a for a, _, _ in runner.calls if a[:3] == ["uv", "pip", "install"])
+    assert install[install.index("--python-version") + 1] == "3.12"
+    assert install[install.index("--python-platform") + 1] == "x86_64-manylinux_2_28"
+    for tar in (a for a, _, _ in runner.calls if a[0] == "tar"):
+        for flag in ("--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner"):
+            assert flag in tar
+
+
+def test_the_control_plane_deadline_is_enforced(tmp_path: Path) -> None:
+    with pytest.raises(provision.ProvisionError, match="deadline"):
+        _provision(tmp_path, deadline_unix=1.0)
+
+
+def test_command_timeouts_have_a_clear_message(tmp_path: Path) -> None:
+    class Slow(FakeRunner):
+        def __call__(self, argv: Sequence[str], **kwargs: Any) -> str:
+            if list(argv)[:3] == ["uv", "pip", "compile"]:
+                raise subprocess.TimeoutExpired(list(argv), 900)
+            return super().__call__(argv, **kwargs)
+
+    with pytest.raises(provision.ProvisionError, match="timed out while locking packages"):
+        _provision(tmp_path, Slow())
+
+
+def test_requirement_text_in_the_report_is_capped(tmp_path: Path) -> None:
+    class BigRepo(FakeRunner):
+        def __call__(self, argv: Sequence[str], **kwargs: Any) -> str:
+            out = super().__call__(argv, **kwargs)
+            if "clone" in argv:
+                dest = Path(list(argv)[-1])
+                for i in range(5):
+                    (dest / f"requirements-{i}.txt").write_text("é" * 60_000)
+            return out
+
+    report, paths = _provision(tmp_path, BigRepo())
+    assert sum(len(t) for t in report["requirement_files"].values()) <= 128 * 1024
+    assert len((paths.staging / "provision_report.json").read_bytes()) < 512 * 1024
+
+
+def test_raw_dataset_files_are_removed_after_packing(tmp_path: Path) -> None:
+    _, paths = _provision(tmp_path)
+    assert not list((paths.work / "data").rglob("*.parquet"))
+
+
+def test_split_files_match_whole_names_only() -> None:
+    names = [
+        "plain_text/train-00000-of-00001.parquet",
+        "plain_text/test-00000-of-00001.parquet",
+        "data/contest-00000.parquet",
+        "test/0000.parquet",
+        "README.md",
+    ]
+    assert provision.split_files(names, "test") == [
+        "plain_text/test-00000-of-00001.parquet",
+        "test/0000.parquet",
+    ]
 
 
 def test_sdist_only_packages_fail_with_a_clear_error(tmp_path: Path) -> None:

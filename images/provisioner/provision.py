@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -44,7 +45,8 @@ REPO_URL = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-
 GIT_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 HF_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?$")
 SPLIT = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-SALT = re.compile(r"^[A-Za-z0-9_.:+-]{1,200}$")
+SALT = re.compile(r"^[A-Za-z0-9_.:+-]{1,300}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 LOCK_NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", re.MULTILINE)
 MAX_PACKAGES = 30
 MAX_DATASETS = 3
@@ -54,6 +56,8 @@ MAX_SMOKE_BYTES = 50 * 2**20
 MAX_REPO_BYTES = 2**30
 MAX_REQUIREMENT_FILE = 64 * 1024
 MAX_REQUIREMENT_FILES = 10
+MAX_REQUIREMENT_CHARS = 128 * 1024  # all files together, in the report
+MAX_TRUSTED_OVERLAYS = 300
 COMMAND_TIMEOUT_S = 900
 DEFAULT_DEADLINE_S = 1080  # 18 of the 20 watchdog minutes: leave time to write the error file
 PYTHON_VERSION = "3.12"
@@ -92,6 +96,8 @@ class Manifest:
     cache_salt: str = ""
     denylist: frozenset[str] = frozenset()
     popular: frozenset[str] = frozenset()
+    trusted_overlays: dict[str, str] = field(default_factory=dict)  # cache key -> sha256
+    deadline_unix: float | None = None  # set by the control plane from the job's submission
 
 
 @dataclass(frozen=True)
@@ -189,9 +195,22 @@ def _validate(data: Any) -> Manifest:
             raise _fail("invalid smoke subset")
     if data.get("hf_token_secret") is not None:
         raise _fail("gated datasets are not supported: jobs never receive tokens")
-    salt = str(data.get("cache_salt", ""))
-    if salt and not SALT.fullmatch(salt):
+    salt = data.get("cache_salt")
+    if not isinstance(salt, str) or not SALT.fullmatch(salt):
         raise _fail("invalid cache salt")
+    trusted = data.get("trusted_overlays") or {}
+    if not isinstance(trusted, dict) or len(trusted) > MAX_TRUSTED_OVERLAYS:
+        raise _fail("invalid trusted overlays")
+    for key, digest in trusted.items():
+        if not (isinstance(key, str) and SHA256.fullmatch(key)):
+            raise _fail("invalid trusted overlays")
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)):
+            raise _fail("invalid trusted overlays")
+    deadline = data.get("deadline_unix")
+    if deadline is not None and (
+        isinstance(deadline, bool) or not isinstance(deadline, int | float)
+    ):
+        raise _fail("invalid deadline")
     policy = data.get("policy") or {}
     return Manifest(
         run_id=run_id,
@@ -204,6 +223,8 @@ def _validate(data: Any) -> Manifest:
         cache_salt=salt,
         denylist=frozenset(normalize(str(n)) for n in policy.get("denylist", [])),
         popular=frozenset(normalize(str(n)) for n in policy.get("popular", [])),
+        trusted_overlays=dict(trusted),
+        deadline_unix=None if deadline is None else float(deadline),
     )
 
 
@@ -236,13 +257,18 @@ def subprocess_runner(  # pragma: no cover - exercised in the image
 
 
 class Clock:
-    """Each command gets min(COMMAND_TIMEOUT_S, time left before the deadline)."""
+    """Each command gets min(COMMAND_TIMEOUT_S, time left before the deadline). The deadline
+    is wall-clock, set by the control plane from the job's submission (queueing and image pull
+    included), so the error file is written before the watchdog cancels the job."""
 
-    def __init__(self, deadline_s: float) -> None:
-        self._end = time.monotonic() + deadline_s
+    def __init__(self, deadline_unix: float) -> None:
+        self.end = deadline_unix
+
+    def left(self) -> float:
+        return self.end - time.time()
 
     def timeout(self) -> float:
-        left = self._end - time.monotonic()
+        left = self.left()
         if left <= 1:
             raise _fail("provisioning deadline reached")
         return min(COMMAND_TIMEOUT_S, left)
@@ -256,7 +282,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _explain(err: subprocess.CalledProcessError, what: str) -> ProvisionError:
+def _explain(err: subprocess.SubprocessError, what: str) -> ProvisionError:
+    if isinstance(err, subprocess.TimeoutExpired):
+        return _fail(f"timed out while {what}")
+    if not isinstance(err, subprocess.CalledProcessError):
+        return _fail(f"{what} failed")
     stderr = (err.stderr or "").lower()
     print(f"{what} stderr (tail):\n{(err.stderr or '')[-4000:]}", file=sys.stderr)  # no secrets
     if any(s in stderr for s in ("no wheel", "only-binary", "sdist", "no matching distribution")):
@@ -272,7 +302,22 @@ def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: C
     """Pack on local disk first, then copy once to the destination (FUSE mounts are slow)."""
     local = source.parent / f".{out.name}.local"
     runner(
-        ["tar", "-I", "zstd -T0", "--exclude=.cache", "-cf", str(local), "-C", str(source), "."],
+        [
+            "tar",
+            "-I",
+            "zstd -T0",
+            "--exclude=.cache",
+            "--sort=name",
+            "--mtime=@0",
+            "--owner=0",
+            "--group=0",
+            "--numeric-owner",
+            "-cf",
+            str(local),
+            "-C",
+            str(source),
+            ".",
+        ],
         env=env,
         timeout=clock.timeout(),
     )
@@ -298,11 +343,9 @@ def _check_transitive(manifest: Manifest, lock: str) -> None:
             raise _fail(f"dependency {name} looks like a typosquat of {sorted(close)[0]}")
 
 
-def _filter_lock(lock: str, constraints: Path) -> str:
+def _filter_lock(lock: str, constraints_text: str) -> str:
     """Drop lock entries the runner image already provides (pinned in its constraints)."""
-    provided = set()
-    if constraints.is_file():
-        provided = set(_lock_names(constraints.read_text(encoding="utf-8")))
+    provided = set(_lock_names(constraints_text))
     blocks = re.split(r"\n(?=[A-Za-z0-9])", lock.strip())
     keep = [
         b for b in blocks
@@ -326,6 +369,9 @@ def _publish_to_cache(overlay: Path, cached: Path, digest: str, run_id: str) -> 
 def lock_and_overlay(
     manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
 ) -> tuple[str, bool, str]:
+    if not paths.constraints.is_file():  # fail closed: never build a full ML stack overlay
+        raise _fail("runner constraints file missing from the provisioner image")
+    constraints_text = paths.constraints.read_text(encoding="utf-8")
     work = paths.work / "overlay"
     work.mkdir(parents=True, exist_ok=True)
     requirements_in = paths.work / "requirements.in"
@@ -341,36 +387,39 @@ def lock_and_overlay(
                 env=env,
                 timeout=clock.timeout(),
             )  # fmt: skip
-        except subprocess.CalledProcessError as err:
+        except subprocess.SubprocessError as err:
             raise _explain(err, "locking packages") from None
     else:
         lock.write_text("", encoding="utf-8")
     full_lock = lock.read_text(encoding="utf-8")
-    _check_transitive(manifest, full_lock)
+    install_text = _filter_lock(full_lock, constraints_text)
+    _check_transitive(manifest, install_text)  # what the image provides is trusted, not judged
     install_lock = paths.work / "lock.install.txt"
-    install_lock.write_text(_filter_lock(full_lock, paths.constraints), encoding="utf-8")
+    install_lock.write_text(install_text, encoding="utf-8")
 
-    salted = install_lock.read_text(encoding="utf-8") + "\n" + manifest.cache_salt
+    constraints_sha = hashlib.sha256(constraints_text.encode()).hexdigest()
+    salted = f"{install_text}\n{manifest.cache_salt}\n{constraints_sha}"
     key = hashlib.sha256(salted.encode()).hexdigest()
     cached = paths.cache / "overlays" / f"{key}.tar.zst"
-    sidecar = cached.with_name(f"{key}.sha256")
     overlay = paths.staging / "overlay.tar.zst"
-    if cached.is_file() and sidecar.is_file():
-        local = paths.work / "overlay-cached.tar.zst"
+    expected = manifest.trusted_overlays.get(key)
+    if expected is not None and cached.is_file():  # the digest comes from the control plane,
+        local = paths.work / "overlay-cached.tar.zst"  # never from the shared bucket
         shutil.copyfile(cached, local)
-        if _sha256(local) == sidecar.read_text(encoding="utf-8").strip():  # never serve a
-            shutil.copyfile(local, overlay)  # truncated or replaced entry
-            return key, True, _sha256(overlay)
+        if _sha256(local) == expected:
+            shutil.copyfile(local, overlay)
+            return key, True, expected
     if install_lock.read_text(encoding="utf-8").strip():
         try:
             runner(
                 ["uv", "pip", "install", "--no-config", "--index-url", PYPI_INDEX,
                  "--only-binary=:all:", "--require-hashes", "--no-deps",
+                 "--python-version", PYTHON_VERSION, "--python-platform", PYTHON_PLATFORM,
                  "-r", str(install_lock), "--target", str(work)],
                 env=env,
                 timeout=clock.timeout(),
             )  # fmt: skip
-        except subprocess.CalledProcessError as err:
+        except subprocess.SubprocessError as err:
             raise _explain(err, "installing packages") from None
     _pack(work, overlay, runner, env, clock)
     digest = _sha256(overlay)
@@ -402,21 +451,42 @@ def clone_repo(
         commit = runner(
             ["git", "-C", str(dest), "rev-parse", "HEAD"], env=env, timeout=clock.timeout()
         )
+    except subprocess.TimeoutExpired:
+        raise _fail("timed out while cloning the repository") from None
     except subprocess.CalledProcessError as err:
         raise _fail(f"cloning the repository failed (exit {err.returncode})") from None
     if _size(dest) > MAX_REPO_BYTES:
         raise _fail("the repository is larger than 1 GiB")
     files: dict[str, str] = {}
+    budget = MAX_REQUIREMENT_CHARS  # the whole report must stay well under 512 KiB
     for path in sorted(dest.glob("*")):
         if len(files) >= MAX_REQUIREMENT_FILES:
             break
         if path.is_symlink() or not path.is_file() or not REQUIREMENT_FILES.match(path.name):
             continue
         if path.stat().st_size <= MAX_REQUIREMENT_FILE:
-            files[path.name] = path.read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if len(text) > budget:
+                break
+            files[path.name] = text
+            budget -= len(text)
     _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
     resolved = commit.strip()
     return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
+
+
+def split_files(names: Sequence[str], split: str) -> list[str]:
+    """Parquet files of a split: a path segment named after it, or a file named
+    `<split>.parquet` / `<split>-*.parquet` (never a substring: `test` is not `contest`)."""
+    wanted = []
+    for name in names:
+        parts = name.split("/")
+        if not name.endswith(".parquet"):
+            continue
+        file = parts[-1]
+        if split in parts[:-1] or file == f"{split}.parquet" or file.startswith(f"{split}-"):
+            wanted.append(name)
+    return wanted
 
 
 def hf_fetch(  # pragma: no cover - runs in the image
@@ -427,10 +497,8 @@ def hf_fetch(  # pragma: no cover - runs in the image
 
     split_name = split or "train"
     info = HfApi().dataset_info(dataset_id, files_metadata=True)
-    wanted = [
-        s for s in info.siblings or []
-        if s.rfilename.endswith(".parquet") and split_name in s.rfilename
-    ]  # fmt: skip
+    by_name = {s.rfilename: s for s in info.siblings or []}
+    wanted = [by_name[n] for n in split_files(list(by_name), split_name)]
     if not wanted:
         raise _fail(f"dataset {dataset_id} has no parquet files for split {split_name}")
     total = sum(s.size or 0 for s in wanted)
@@ -455,9 +523,10 @@ def parquet_smoke(source: Path, dest: Path, rows: int) -> None:  # pragma: no co
     dest.mkdir(parents=True, exist_ok=True)
     tables, taken = [], 0
     for path in sorted(source.rglob("*.parquet")):
-        table = pq.read_table(path)
-        tables.append(table.slice(0, rows - taken))
-        taken += min(rows - taken, table.num_rows)
+        for batch in pq.ParquetFile(path).iter_batches(batch_size=rows - taken):
+            tables.append(pa.Table.from_batches([batch]))
+            taken += batch.num_rows
+            break  # one batch per file is enough: never load a whole shard
         if taken >= rows:
             break
     if not tables:
@@ -493,6 +562,8 @@ def fetch_datasets(
         if _size(dest) > MAX_SMOKE_BYTES:
             raise _fail("smoke subset over 50 MB: lower smoke_subset.rows")
         _pack(dest, paths.staging / "data" / "smoke.tar.zst", runner, env, clock)
+    for name in names:  # packed (and the smoke subset built): free the local disk
+        shutil.rmtree(paths.work / "data" / name, ignore_errors=True)
     return names
 
 
@@ -517,7 +588,11 @@ def provision(
     *,
     deadline_s: float = DEFAULT_DEADLINE_S,
 ) -> dict[str, Any]:
-    clock = Clock(deadline_s)
+    """`deadline_s` applies only when the manifest carries no control-plane deadline."""
+    clock = Clock(
+        manifest.deadline_unix if manifest.deadline_unix is not None else time.time() + deadline_s
+    )
+    clock.timeout()
     for directory in (paths.staging, paths.cache, paths.work, paths.work / "home"):
         directory.mkdir(parents=True, exist_ok=True)
     _clean_staging(paths.staging)
@@ -539,9 +614,21 @@ def provision(
         "smoke": manifest.smoke_dataset is not None,
     }
     (paths.staging / "provision_report.json").write_text(
-        json.dumps(report, indent=1), encoding="utf-8"
+        json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8"
     )
     return report
+
+
+def _arm_deadline(manifest: Manifest) -> None:  # pragma: no cover - POSIX, in the image
+    """In-process work (HF downloads, parquet, hashing) is interrupted at the deadline too."""
+    if manifest.deadline_unix is None or not hasattr(signal, "setitimer"):
+        return
+
+    def expired(signum: int, frame: object) -> None:
+        raise _fail("provisioning deadline reached")
+
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, max(manifest.deadline_unix - time.time(), 1.0))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -554,6 +641,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     paths = Paths(staging=Path(args.staging), cache=Path(args.cache), work=Path(args.work))
     try:
         manifest = validate_manifest(json.loads(Path(args.manifest).read_text(encoding="utf-8")))
+        _arm_deadline(manifest)
+        os.environ.update(build_env(paths))  # in-process HF downloads use local caches too
         provision(manifest, paths, subprocess_runner, hf_fetch, parquet_smoke)
     except Exception as err:  # any failure becomes a readable error file, never a bare crash
         message = (

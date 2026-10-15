@@ -8,6 +8,8 @@ from app.domain.paper import IngestedPaper, Section, Table
 
 MAX_DEPTH = 5
 MAX_FLATTEN_CHARS = 600_000  # ~ a long paper with appendices; arXiv sources are untrusted
+MAX_INPUTS = 500  # input/include resolutions per paper
+MAX_FLATTEN_WORK = 8_000_000  # source characters read, summed over every visit
 _INPUT = re.compile(r"\\(?:input|include)\s*\{([^}]*)\}")
 _COMMENT = re.compile(r"(?<!\\)%[^\n]*")
 _SECTION = re.compile(r"\\section\*?\s*\{")
@@ -62,13 +64,21 @@ def _resolve(name: str) -> str | None:
 
 def flatten(files: dict[str, bytes], main: str) -> str:
     """Inline \\input/\\include up to MAX_DEPTH levels; never reads outside the archive. The
-    output is capped at MAX_FLATTEN_CHARS: a file can input another one many times over."""
-    left = [MAX_FLATTEN_CHARS]
+    output is capped at MAX_FLATTEN_CHARS, and the work at MAX_INPUTS resolutions and
+    MAX_FLATTEN_WORK source characters read: a file can input another one many times over,
+    even one that expands to nothing."""
+    left = {"out": MAX_FLATTEN_CHARS, "inputs": MAX_INPUTS, "work": MAX_FLATTEN_WORK}
+    decoded: dict[str, str] = {}
+
+    def exhausted() -> bool:
+        return min(left.values()) <= 0
 
     def expand(name: str, depth: int) -> str:
-        text = _text(files[name])
-        if left[0] <= 0:
+        left["work"] -= len(files[name])  # charged before any work on the file
+        if exhausted():
             return "[input size limit]"
+        if name not in decoded:
+            decoded[name] = _text(files[name])
 
         def replace(match: re.Match[str]) -> str:
             target = _resolve(match.group(1))
@@ -78,13 +88,14 @@ def flatten(files: dict[str, bytes], main: str) -> str:
                 return "[input depth limit]"
             if target not in files:
                 return f"[missing input: {match.group(1).strip()}]"
-            if left[0] <= 0:
+            left["inputs"] -= 1
+            if exhausted():
                 return "[input size limit]"
             inlined = expand(target, depth + 1)
-            left[0] -= len(inlined)
+            left["out"] -= len(inlined)
             return inlined
 
-        return _INPUT.sub(replace, text)
+        return _INPUT.sub(replace, decoded[name])
 
     out = expand(main, 0)
     if len(out) > MAX_FLATTEN_CHARS:

@@ -211,3 +211,14 @@ async def test_cancel_wins_over_a_late_begin_or_transition(store: Store) -> None
     run = await store.get_run(RUN)
     assert run is not None and run.status is RunStatus.CANCELLED
     assert not await store.cancel_run(RUN)  # already terminal
+
+
+async def test_trusted_overlays_first_writer_wins_newest_first(store: Store) -> None:
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    assert await store.trusted_overlays() == {}
+    t0 = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    await store.trust_overlay("a" * 64, "1" * 64, RUN, at=t0)
+    await store.trust_overlay("a" * 64, "2" * 64, RUN, at=t0 + timedelta(hours=1))  # ignored
+    await store.trust_overlay("b" * 64, "3" * 64, RUN, at=t0 + timedelta(hours=2))
+    assert await store.trusted_overlays() == {"a" * 64: "1" * 64, "b" * 64: "3" * 64}
+    assert await store.trusted_overlays(limit=1) == {"b" * 64: "3" * 64}

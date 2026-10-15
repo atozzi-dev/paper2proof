@@ -1,5 +1,12 @@
 from app.ingestion.archive import extract_source
-from app.ingestion.latex import MAX_DEPTH, MAX_FLATTEN_CHARS, find_main, flatten, parse_latex
+from app.ingestion.latex import (
+    MAX_DEPTH,
+    MAX_FLATTEN_CHARS,
+    MAX_INPUTS,
+    find_main,
+    flatten,
+    parse_latex,
+)
 from tests.ingestion.helpers import canary_tar
 
 
@@ -65,3 +72,16 @@ def test_flatten_caps_the_output_of_a_fan_out() -> None:
     text = flatten(files, "f0.tex")
     assert len(text) <= MAX_FLATTEN_CHARS + 100
     assert "[input size limit]" in text
+
+
+def test_flatten_bounds_work_even_when_inputs_expand_to_nothing() -> None:
+    import time
+
+    fan = (r"\input{b} " * 3000).encode()
+    files = {"main.tex": fan, "b.tex": (r"\input{c} " * 3000).encode(), "c.tex": b"% only"}
+    started = time.monotonic()
+    text = flatten(files, "main.tex")
+    assert time.monotonic() - started < 2
+    assert "[input size limit]" in text
+    assert len(text) <= MAX_FLATTEN_CHARS + 100
+    assert MAX_INPUTS < 3000

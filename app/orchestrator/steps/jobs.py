@@ -76,7 +76,13 @@ async def run_job(
             await ctx.budget.commit(cost, 0)
             raise
     began = clock()
-    existing = await ctx.store.get_job(spec.name)
+    try:
+        existing = await ctx.store.get_job(spec.name)
+    except BaseException:
+        await ctx.budget.commit(cost, 0)
+        if minutes is not None:
+            await ctx.budget.commit(minutes, 0)
+        raise
     started = existing.created_at if existing is not None else began
 
     async def settle() -> None:

@@ -129,13 +129,26 @@ def _step(
     )
 
 
-def _writes_report(storage: FakeRunStorage) -> Any:
+KEY, SHA = "a" * 64, "b" * 64
+
+
+def _report(**overrides: Any) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "schema": "p2p.provision-report/v1",
+        "run_id": RUN,
+        "overlay_cache_key": KEY,
+        "overlay_cache_hit": False,
+        "overlay_sha256": SHA,
+        "requirement_files": {"requirements.txt": "torch\n"},
+    }
+    report.update(overrides)
+    return report
+
+
+def _writes_report(storage: FakeRunStorage, raw: bytes | None = None, **overrides: Any) -> Any:
     def on_submit(spec: JobSpec) -> None:
-        report = {
-            "schema": "p2p.provision-report/v1",
-            "requirement_files": {"requirements.txt": "torch\n"},
-        }
-        storage.objects[(RUN, "staging/provision_report.json")] = json.dumps(report).encode()
+        body = raw if raw is not None else json.dumps(_report(**overrides)).encode()
+        storage.objects[(RUN, "staging/provision_report.json")] = body
 
     return on_submit
 
@@ -281,8 +294,11 @@ async def test_manifest_carries_the_cache_salt_and_the_policy(store: Store, tmp_
     manifest = _manifest(ctx)
     salt = manifest["cache_salt"]
     assert EXEC_CFG.runner_image.split("@")[1] in salt  # the overlay matches one runner image
+    assert salt.count("sha256:") == 2  # runner and provisioner digests
     assert "3.12" in salt
-    assert re.fullmatch(r"[A-Za-z0-9_.:+-]{1,200}", salt)  # the provisioner's SALT pattern
+    assert re.fullmatch(r"[A-Za-z0-9_.:+-]{1,300}", salt)  # the provisioner's SALT pattern
+    # The provisioner stops itself 2 minutes before the 20-minute watchdog from submission.
+    assert manifest["deadline_unix"] == (NOW + timedelta(minutes=18)).timestamp()
     assert "pip" in manifest["policy"]["denylist"]
     assert "torch" in manifest["policy"]["popular"]
     assert len(json.dumps(manifest)) < 64 * 1024
@@ -374,3 +390,89 @@ async def test_a_refused_gpu_reservation_releases_the_cloud_one(
         )
     assert not ctx.budget._inflight
     assert not ctx.jobs.jobs  # type: ignore[attr-defined]
+
+
+async def test_overlays_are_trusted_only_through_the_control_plane(
+    store: Store, tmp_path: Path
+) -> None:
+    await store.create_run("r_01jb7z00000000000000000001", "0000.00002", created_by=None,
+                           claim_hint=None, budget={})  # fmt: skip
+    await store.trust_overlay("c" * 64, "d" * 64, "r_01jb7z00000000000000000001")
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert _manifest(ctx)["trusted_overlays"] == {"c" * 64: "d" * 64}
+    assert (await store.trusted_overlays())[KEY] == SHA  # built by this job: now trusted
+
+
+@pytest.mark.parametrize(
+    ("raw", "overrides"),
+    [
+        (b"", {}),
+        (b"[1, 2]", {}),
+        (b"[" * 100_000 + b"]" * 100_000, {}),
+        (None, {"run_id": "r_01jb7z00000000000000000009"}),
+        (None, {"schema": "other"}),
+        (None, {"overlay_sha256": "not-hex"}),
+        (b"x" * (600 * 1024), {}),
+    ],
+    ids=["empty", "list", "deep", "run-id", "schema", "sha", "oversize"],
+)
+async def test_a_succeeded_job_without_a_valid_report_fails(
+    store: Store, tmp_path: Path, raw: bytes | None, overrides: dict[str, Any]
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(storage, raw, **overrides)
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert await store.trusted_overlays() == {}
+
+
+async def test_staging_is_kept_when_the_backend_already_has_the_job(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_report(storage))
+    name = f"p2p-prov-{RUN[2:]}-1"
+    # Submitted before a crash, never recorded in the DB, already finished.
+    await jobs.submit(JobSpec(**{**_spec_fields(), "name": name}))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.next is StepName.SMOKE_TESTING  # its report was not deleted
+
+
+def _spec_fields() -> dict[str, Any]:
+    return {
+        "kind": JobKind.PROVISION,
+        "image_digest_ref": EXEC_CFG.provisioner_image,
+        "platform": "cpu-d3",
+        "preset": "4vcpu-16gb",
+        "disk_gib": 50,
+        "subnet_id": "vpcsubnet-provision",
+        "volumes": [],
+        "inject_files": {},
+        "env": {},
+        "preemptible": False,
+        "watchdog_s": 1200,
+    }
+
+
+async def test_a_failing_job_lookup_releases_the_reservations(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx, _ = await _setup(store, tmp_path, packages=[])
+
+    async def broken(name: str) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "get_job", broken)
+    spec = JobSpec(**{**_spec_fields(), "name": f"p2p-prov-{RUN[2:]}-1"})
+    clock = FakeClock()
+    with pytest.raises(RuntimeError):
+        await run_job(ctx, spec, usd_per_hour=0.1, poll_s=15, clock=clock, sleep=clock.sleep)
+    assert not ctx.budget._inflight

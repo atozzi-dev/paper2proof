@@ -293,6 +293,7 @@ def parse_repo_requirements(files: Mapping[str, str]) -> set[str]:
             ValueError,
             TypeError,
             AttributeError,
+            RecursionError,
             configparser.Error,
             yaml.YAMLError,
             tomllib.TOMLDecodeError,

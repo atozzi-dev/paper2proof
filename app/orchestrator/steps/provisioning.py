@@ -5,8 +5,10 @@ The manifest is injected (read-only, <= 64 KiB) instead of being written to the 
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Any
 
 from app.domain.discovery import Discovery
 from app.domain.errors import P2PError
@@ -30,6 +32,38 @@ SMOKE_ROWS = 512
 RUNNER_PYTHON = "3.12"  # what the runner image runs: overlays are only valid for that
 RUNNER_PLATFORM = "x86_64-manylinux_2_28"
 STAGING_OUTPUTS = ("staging/provision_error.json", "staging/provision_report.json")
+DEADLINE_MARGIN = timedelta(minutes=2)  # the provisioner writes its error file before the cancel
+MAX_REPORT_BYTES = 512 * 1024
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
+    """The provision report was written next to untrusted inputs (repo, datasets): strict
+    shape, or nothing. Pure, for the CPU pool."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != "p2p.provision-report/v1":
+        return None
+    if data.get("run_id") != run_id or not isinstance(data.get("overlay_cache_hit"), bool):
+        return None
+    for field in ("overlay_cache_key", "overlay_sha256"):
+        value = data.get(field)
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
+            return None
+    files = data.get("requirement_files", {})
+    if not isinstance(files, dict) or not all(isinstance(v, str) for v in files.values()):
+        return None
+    return data
+
+
+def _error_message(raw: bytes | None) -> str:
+    reason = "provisioning failed"
+    if raw:  # the provisioner's own message: jobs hold no secrets
+        with contextlib.suppress(ValueError, AttributeError, RecursionError):
+            reason = str(json.loads(raw).get("error", reason))[:500]
+    return reason
 
 
 class ProvisioningStep:
@@ -115,6 +149,11 @@ class ProvisioningStep:
         packages = await self._packages(ctx, plan, discovery)
         policy = self._policy.config
         runner_digest = self._config.runner_image.rsplit("@", 1)[1]
+        provisioner_digest = self._config.provisioner_image.rsplit("@", 1)[1]
+        name = job_name(JobKind.PROVISION, ctx.run_id, ctx.attempt)
+        existing = await ctx.store.get_job(name)
+        submitted = existing.created_at if existing is not None else self._clock()
+        deadline = submitted + timedelta(seconds=WATCHDOG_S) - DEADLINE_MARGIN
         manifest = {
             "schema": "p2p.provision/v1",
             "run_id": ctx.run_id,
@@ -125,13 +164,17 @@ class ProvisioningStep:
                 {"dataset": plan.datasets[0].id, "rows": SMOKE_ROWS} if plan.datasets else None
             ),
             "hf_token_secret": None,
-            "cache_salt": f"{runner_digest}+py{RUNNER_PYTHON}+{RUNNER_PLATFORM}",
+            "cache_salt": (
+                f"{runner_digest}+{provisioner_digest}+py{RUNNER_PYTHON}+{RUNNER_PLATFORM}"
+            ),
             "policy": {"denylist": sorted(policy.denylist), "popular": sorted(policy.popular)},
+            "trusted_overlays": await ctx.store.trusted_overlays(),
+            "deadline_unix": deadline.timestamp(),
         }
         bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
         await ctx.jobs.ensure_gateway_up()
-        name = job_name(JobKind.PROVISION, ctx.run_id, ctx.attempt)
-        if await ctx.store.get_job(name) is None:  # a fresh job: earlier outputs are stale
+        in_backend = any(h.name == name for h, _, _ in await ctx.jobs.list_jobs(name))
+        if existing is None and not in_backend:  # a fresh job: earlier outputs are stale
             for key in STAGING_OUTPUTS:
                 await self._storage.delete(ctx.run_id, key)
         spec = JobSpec(
@@ -164,23 +207,26 @@ class ProvisioningStep:
         if outcome.timed_out:
             raise P2PError(ErrorCode.TIMEOUT, "provisioning took longer than 20 minutes")
         if outcome.state is not JobState.SUCCEEDED:
-            error = await self._storage.get_bytes(
-                ctx.run_id, "staging/provision_error.json", max_bytes=8192
-            )
-            reason = "provisioning failed"
-            if error:  # the provisioner's own message: jobs hold no secrets
-                with contextlib.suppress(ValueError, AttributeError):
-                    reason = str(json.loads(error).get("error", reason))[:500]
-            raise P2PError(ErrorCode.PROVISION_FAILED, reason)
-        report = await self._storage.get_bytes(
-            ctx.run_id, "staging/provision_report.json", max_bytes=512 * 1024
-        )
-        key = f"runs/{ctx.run_id}/provision_report.json"
+            try:
+                error = await self._storage.get_bytes(
+                    ctx.run_id, "staging/provision_error.json", max_bytes=8192
+                )
+            except ValueError:
+                error = None
+            raise P2PError(ErrorCode.PROVISION_FAILED, _error_message(error))
         try:
-            parsed = json.loads(report) if report else {}
+            raw = await self._storage.get_bytes(
+                ctx.run_id, "staging/provision_report.json", max_bytes=MAX_REPORT_BYTES
+            )
         except ValueError:
-            parsed = {}
-        await asyncio.to_thread(
-            self._artifacts.put_json, key, parsed if isinstance(parsed, dict) else {}
-        )
+            raw = None
+        report = await ctx.run_cpu(parse_report, raw, ctx.run_id) if raw else None
+        if report is None:
+            raise P2PError(ErrorCode.PROVISION_FAILED, "the provision job left no valid report")
+        if not report["overlay_cache_hit"]:  # built by this job: trusted from now on
+            await ctx.store.trust_overlay(
+                report["overlay_cache_key"], report["overlay_sha256"], ctx.run_id
+            )
+        key = f"runs/{ctx.run_id}/provision_report.json"
+        await asyncio.to_thread(self._artifacts.put_json, key, report)
         return StepResult(next=StepName.SMOKE_TESTING, output_ref=key)

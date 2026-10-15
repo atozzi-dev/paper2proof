@@ -209,3 +209,15 @@ class DiscoveryCache(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256 of the query
     response: Mapped[dict[str, Any]]
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class OverlayDigest(Base):
+    """Overlay cache entries the control plane trusts: cache key -> sha256, recorded when the
+    provision job that built it succeeded. The shared cache bucket is never the authority."""
+
+    __tablename__ = "overlay_digests"
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)

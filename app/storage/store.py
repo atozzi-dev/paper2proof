@@ -29,6 +29,7 @@ from app.storage.tables import (
     LedgerDaily,
     LedgerEntry,
     ModelCallRow,
+    OverlayDigest,
     Run,
     StepRow,
     VerdictRow,
@@ -687,6 +688,29 @@ class Store:
             await s.execute(update(Run).where(Run.id == run_id).values(paper_sha256=sha256))
 
     # --- discovery cache (A-17) ---------------------------------------------------------
+
+    async def trust_overlay(
+        self, cache_key: str, sha256: str, run_id: str | None, *, at: datetime | None = None
+    ) -> None:
+        """First writer wins: a later run can never replace a trusted digest."""
+        async with self._session() as s, s.begin():
+            await s.execute(
+                sqlite_insert(OverlayDigest)
+                .values(
+                    cache_key=cache_key, sha256=sha256, run_id=run_id, created_at=at or utcnow()
+                )
+                .on_conflict_do_nothing(index_elements=["cache_key"])
+            )
+
+    async def trusted_overlays(self, limit: int = 300) -> dict[str, str]:
+        """The most recent trusted digests (they ride in the provision manifest, <= 64 KiB)."""
+        async with self._session() as s:
+            rows = await s.execute(
+                select(OverlayDigest.cache_key, OverlayDigest.sha256)
+                .order_by(OverlayDigest.created_at.desc())
+                .limit(limit)
+            )
+            return {key: digest for key, digest in rows}
 
     async def cache_get(
         self, provider: str, key: str, *, max_age: timedelta, now: datetime | None = None
