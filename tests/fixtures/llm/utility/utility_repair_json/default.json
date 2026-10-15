@@ -1,0 +1,4 @@
+[
+  {"content": "{\"metric\": \"top1_accuracy\", \"value\": 0.941}", "tool_calls": []},
+  {"content": null, "tool_calls": [{"id": "call_1", "name": "emit_result", "arguments": "{\"metric\": \"f1\", \"value\": 0.5}"}]}
+]

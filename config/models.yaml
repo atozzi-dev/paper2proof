@@ -7,6 +7,8 @@ provider:
   api_key_env: NEBIUS_API_KEY
   timeout_s: 120
   max_retries: 4
+  # How reasoning on/off is sent: chat_template_kwargs | system_flag | none. Set from spike S-2.
+  reasoning_toggle: chat_template_kwargs
 
 roles:
   reader:  { match: "nemotron-3-super",    max_output: 8000, temperature: 0.1, reasoning: "off" }
