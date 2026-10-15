@@ -16,11 +16,14 @@ EPRINT = "https://arxiv.org/e-print/"
 PDF = "https://arxiv.org/pdf/"
 MAX_DOWNLOAD = 60 * 1024 * 1024
 _ATOM = "{http://www.w3.org/2005/Atom}"
+_ARXIV = "{http://arxiv.org/schemas/atom}"
 
 
 class ArxivMetadata(BaseModel):
     arxiv_id: str
     title: str | None
+    abstract: str | None = None
+    comment: str | None = None  # authors often put "Code: https://github.com/..." here
 
 
 class RateLimiter:
@@ -90,8 +93,17 @@ class ArxivClient:
         if status != 200:
             return ArxivMetadata(arxiv_id=arxiv_id, title=None)
         entry = ElementTree.fromstring(body).find(f"{_ATOM}entry")
-        title = entry.findtext(f"{_ATOM}title") if entry is not None else None
-        return ArxivMetadata(arxiv_id=arxiv_id, title=" ".join(title.split()) if title else None)
+
+        def text(tag: str) -> str | None:
+            value = entry.findtext(tag) if entry is not None else None
+            return " ".join(value.split()) if value else None
+
+        return ArxivMetadata(
+            arxiv_id=arxiv_id,
+            title=text(f"{_ATOM}title"),
+            abstract=text(f"{_ATOM}summary"),
+            comment=text(f"{_ARXIV}comment"),
+        )
 
     async def source(self, arxiv_id: str) -> bytes:
         """The e-print (tar.gz, gzipped .tex or PDF); falls back to the PDF."""

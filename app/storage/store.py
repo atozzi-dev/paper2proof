@@ -22,6 +22,7 @@ from app.domain.models import (
 )
 from app.storage.tables import (
     ClaimRow,
+    DiscoveryCache,
     EventRow,
     InviteRow,
     JobRow,
@@ -659,3 +660,20 @@ class Store:
     async def set_paper_sha256(self, run_id: str, sha256: str) -> None:
         async with self._session() as s, s.begin():
             await s.execute(update(Run).where(Run.id == run_id).values(paper_sha256=sha256))
+
+    # --- discovery cache (A-17) ---------------------------------------------------------
+
+    async def cache_get(
+        self, provider: str, key: str, *, max_age: timedelta, now: datetime | None = None
+    ) -> dict[str, Any] | None:
+        async with self._session() as s:
+            row = await s.get(DiscoveryCache, (provider, key))
+            if row is None or (now or utcnow()) - row.created_at > max_age:
+                return None
+            return dict(row.response)
+
+    async def cache_put(self, provider: str, key: str, response: dict[str, Any]) -> None:
+        async with self._session() as s, s.begin():
+            await s.merge(
+                DiscoveryCache(provider=provider, key=key, response=response, created_at=utcnow())
+            )

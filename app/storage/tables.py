@@ -198,3 +198,14 @@ class LedgerEntry(Base):
     kind: Mapped[str] = mapped_column(String(16))
     amount: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class DiscoveryCache(Base):
+    """24 h cache of external discovery calls (HF, arXiv, Tavily), keyed by provider + query."""
+
+    __tablename__ = "discovery_cache"
+
+    provider: Mapped[str] = mapped_column(String(16), primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256 of the query
+    response: Mapped[dict[str, Any]]
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

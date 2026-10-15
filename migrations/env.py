@@ -6,7 +6,15 @@ from alembic import context
 from sqlalchemy import create_engine, make_url, pool
 
 from app.settings import get_settings
-from app.storage.tables import Base
+from app.storage.tables import Base, UTCDateTime
+
+
+def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
+    """Render our TypeDecorators as plain SQLAlchemy types: migrations never import app code."""
+    if type_ == "type" and isinstance(obj, UTCDateTime):
+        return "sa.DateTime()"
+    return False
+
 
 config = context.config
 target_metadata = Base.metadata
@@ -22,7 +30,12 @@ def _sync_url() -> str:
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=_sync_url(), target_metadata=target_metadata, render_as_batch=True)
+    context.configure(
+        url=_sync_url(),
+        target_metadata=target_metadata,
+        render_as_batch=True,
+        render_item=render_item,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -31,7 +44,10 @@ def run_migrations_online() -> None:
     engine = create_engine(_sync_url(), poolclass=pool.NullPool)
     with engine.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata, render_as_batch=True
+            connection=connection,
+            target_metadata=target_metadata,
+            render_as_batch=True,
+            render_item=render_item,
         )
         with context.begin_transaction():
             context.run_migrations()

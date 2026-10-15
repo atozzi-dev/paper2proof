@@ -1,0 +1,3 @@
+[
+  {"content": null, "tool_calls": [{"id": "r1", "name": "emit_result", "arguments": "{\"best_url\": \"https://github.com/authors/lora-official\", \"kind\": \"official\"}"}]}
+]
