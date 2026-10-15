@@ -26,14 +26,26 @@ async def ctx_at(
     the context of `step`, which is left RUNNING (attempt 1)."""
     await store.create_run(RUN, arxiv_id, created_by=None, claim_hint=claim_hint, budget={})
     chain = [*previous, (step, None)]
-    await store.begin_run(RUN, chain[0][0], 1)
-    for (name, ref), (next_name, _) in itertools.pairwise(chain):
-        await store.transition(RUN, name, 1, "SUCCEEDED", output_ref=ref, next_step=(next_name, 1))
+    seen: dict[StepName, int] = {}
+    attempts = []
+    for name, _ in chain:  # repeated steps get increasing attempts, like the FSM
+        seen[name] = seen.get(name, 0) + 1
+        attempts.append(seen[name])
+    await store.begin_run(RUN, chain[0][0], attempts[0])
+    for i, ((name, ref), (next_name, _)) in enumerate(itertools.pairwise(chain)):
+        await store.transition(
+            RUN,
+            name,
+            attempts[i],
+            "SUCCEEDED",
+            output_ref=ref,
+            next_step=(next_name, attempts[i + 1]),
+        )
     limits = load_budget_limits(ROOT / "config" / "budgets.yaml")
     return RunContext(
         run_id=RUN,
         step=step,
-        attempt=1,
+        attempt=attempts[-1],
         store=store,
         budget=Budget(store, limits, env="test"),
         limits=limits,
