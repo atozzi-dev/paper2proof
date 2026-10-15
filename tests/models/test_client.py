@@ -220,3 +220,29 @@ async def test_exhausted_retries_are_charged_per_attempt(
     charged = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
     assert charged > 0
     assert charged % 4 == 0  # 4 attempts x the input estimate
+
+
+@respx.mock
+async def test_tool_call_turns_are_sent_in_openai_format(client: TokenFactoryClient) -> None:
+    import json
+
+    from app.models.client import ToolCall
+
+    route = respx.post(f"{BASE}chat/completions").mock(return_value=completion("done"))
+    call = ToolCall(id="call_1", name="read_file", arguments='{"path": "workspace/a.py"}')
+    messages = [
+        *USER,
+        Message.tool_request(None, [call]),
+        Message(role="tool", tool_call_id="call_1", content="print(1)"),
+    ]
+    await client.complete(Role.PLANNER, messages)
+    sent = json.loads(route.calls[0].request.read())["messages"]
+    assistant = next(m for m in sent if m["role"] == "assistant")
+    assert assistant["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "workspace/a.py"}'},
+        }
+    ]
+    assert sent[-1] == {"role": "tool", "tool_call_id": "call_1", "content": "print(1)"}

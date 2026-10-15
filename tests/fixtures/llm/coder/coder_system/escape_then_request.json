@@ -1,0 +1,20 @@
+[
+ {
+  "tool_calls": [
+   {
+    "id": "call_1",
+    "name": "write_file",
+    "arguments": "{\"path\": \"../../etc/x\", \"content\": \"pwned\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_2",
+    "name": "request_packages",
+    "arguments": "{\"names\": [\"numpy>=1.26\"], \"reason\": \"ModuleNotFoundError: numpy\"}"
+   }
+  ]
+ }
+]

@@ -109,6 +109,23 @@ class Message(BaseModel):
     content: str | list[dict[str, object]] | None
     tool_call_id: str | None = None
     name: str | None = None
+    tool_calls: list[dict[str, object]] | None = None  # assistant turns that called tools
+
+    @classmethod
+    def tool_request(cls, content: str | None, calls: list["ToolCall"]) -> "Message":
+        """The assistant turn that made `calls`, echoed back in the next request."""
+        return cls(
+            role="assistant",
+            content=content,
+            tool_calls=[
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": c.arguments},
+                }
+                for c in calls
+            ],
+        )
 
 
 class ToolDef(BaseModel):
