@@ -29,7 +29,6 @@ def test_settings_defaults_to_test_env() -> None:
 
 
 def test_secrets_not_in_repr() -> None:
-    assert "x" not in repr(Settings(nebius_api_key="x"))
     secret = "tf-secret-value-0123456789"
     rendered = repr(Settings(nebius_api_key=secret, admin_token=secret, session_key=secret))
     assert secret not in rendered

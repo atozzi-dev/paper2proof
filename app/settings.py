@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     nebius_api_key: SecretStr | None = None
     tavily_api_key: SecretStr | None = None
     tf_project_id: str | None = None
+    smoke_executor: Literal["sandboxes", "job", "local"] = "job"  # "sandboxes" once S-3 passes
     db_url: str = "sqlite+aiosqlite:///./var/p2p.db"
     s3_endpoint: str | None = None
     s3_region: str = "eu-north1"
