@@ -1,0 +1,24 @@
+\section{Results}
+Table~\ref{tab:main} reports accuracy; Table~\ref{tab:ablation} the ablation.
+\begin{table}[t]
+\centering
+\caption{Test accuracy on digits (mean of 3 seeds).}
+\label{tab:main}
+\begin{tabular}{lc}
+\hline
+Model & Accuracy \\
+\hline
+Logistic regression & 96.1 \\
+k-NN (k=3) & 98.2 \\
+\hline
+\end{tabular}
+\end{table}
+\begin{table}[t]
+\caption{Ablation on the regularization strength.}
+\label{tab:ablation}
+\begin{tabular}{lc}
+C & Accuracy \\
+0.1 & 95.0 \\
+1.0 & 96.1 \\
+\end{tabular}
+\end{table}

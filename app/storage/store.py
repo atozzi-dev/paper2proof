@@ -56,6 +56,7 @@ class RunRecord(_Record):
     listed: bool
     approval: str | None
     verdict_summary: str | None
+    paper_sha256: str | None
     created_at: datetime
     finished_at: datetime | None
 
@@ -72,6 +73,7 @@ def _run_record(row: Run) -> RunRecord:
         listed=row.listed,
         approval=row.approval,
         verdict_summary=row.verdict_summary,
+        paper_sha256=row.paper_sha256,
         created_at=row.created_at,
         finished_at=row.finished_at,
     )
@@ -617,3 +619,7 @@ class Store:
                 return False
             row.used_today += 1
             return True
+
+    async def set_paper_sha256(self, run_id: str, sha256: str) -> None:
+        async with self._session() as s, s.begin():
+            await s.execute(update(Run).where(Run.id == run_id).values(paper_sha256=sha256))

@@ -1,0 +1,105 @@
+"""arXiv client: metadata (export API) and e-print source, politely rate limited."""
+
+import asyncio
+import re
+import time
+from collections.abc import Awaitable, Callable
+
+import httpx
+from defusedxml import ElementTree
+from pydantic import BaseModel
+
+ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+USER_AGENT = "paper2proof/0.1 (+https://github.com/atozzi-dev/paper2proof)"
+EXPORT_API = "https://export.arxiv.org/api/query"
+EPRINT = "https://arxiv.org/e-print/"
+PDF = "https://arxiv.org/pdf/"
+MAX_DOWNLOAD = 60 * 1024 * 1024
+_ATOM = "{http://www.w3.org/2005/Atom}"
+
+
+class ArxivMetadata(BaseModel):
+    arxiv_id: str
+    title: str | None
+
+
+class RateLimiter:
+    """At most one request per `interval` seconds across every caller sharing the instance."""
+
+    def __init__(
+        self,
+        interval: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._interval = interval
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = asyncio.Lock()
+        self._last: float | None = None
+
+    async def wait(self) -> None:
+        async with self._lock:
+            now = self._clock()
+            if self._last is not None and now - self._last < self._interval:
+                await self._sleep(self._interval - (now - self._last))
+            self._last = self._clock()
+
+
+SHARED_LIMITER = RateLimiter(3.0)  # arXiv asks for 1 request every 3 seconds
+
+
+def _check(arxiv_id: str) -> str:
+    if not ARXIV_ID.fullmatch(arxiv_id):  # invariant 11, again at the boundary
+        raise ValueError(f"not an arXiv ID: {arxiv_id!r}")
+    return arxiv_id
+
+
+class ArxivClient:
+    def __init__(
+        self,
+        http: httpx.AsyncClient | None = None,
+        *,
+        limiter: RateLimiter = SHARED_LIMITER,
+        max_bytes: int = MAX_DOWNLOAD,
+    ) -> None:
+        self._http = http
+        self._limiter = limiter
+        self._max_bytes = max_bytes
+
+    async def _get(self, url: str, params: dict[str, str] | None = None) -> tuple[int, bytes]:
+        await self._limiter.wait()
+        headers = {"User-Agent": USER_AGENT}
+        client = self._http or httpx.AsyncClient(timeout=60, follow_redirects=True)
+        try:
+            async with client.stream("GET", url, params=params, headers=headers) as response:
+                chunks, size = [], 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > self._max_bytes:
+                        raise ValueError("download too large")
+                    chunks.append(chunk)
+                return response.status_code, b"".join(chunks)
+        finally:
+            if self._http is None:
+                await client.aclose()
+
+    async def metadata(self, arxiv_id: str) -> ArxivMetadata:
+        status, body = await self._get(EXPORT_API, {"id_list": _check(arxiv_id)})
+        if status != 200:
+            return ArxivMetadata(arxiv_id=arxiv_id, title=None)
+        entry = ElementTree.fromstring(body).find(f"{_ATOM}entry")
+        title = entry.findtext(f"{_ATOM}title") if entry is not None else None
+        return ArxivMetadata(arxiv_id=arxiv_id, title=" ".join(title.split()) if title else None)
+
+    async def source(self, arxiv_id: str) -> bytes:
+        """The e-print (tar.gz, gzipped .tex or PDF); falls back to the PDF."""
+        _check(arxiv_id)
+        status, body = await self._get(EPRINT + arxiv_id)
+        if status == 200 and body:
+            return body
+        status, body = await self._get(PDF + arxiv_id)
+        if status != 200:
+            raise ValueError(f"arXiv returned HTTP {status} for {arxiv_id}")
+        return body

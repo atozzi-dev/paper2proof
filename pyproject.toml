@@ -8,13 +8,17 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.14",
+    "defusedxml>=0.7.1",
     "fastapi>=0.115",
     "httpx>=0.28",
     "itsdangerous>=2.2",
     "jsonschema>=4.23",
     "openai>=1.55,<2",
+    "pillow>=11.0",
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
+    "pypdf>=5.1",
+    "pypdfium2>=4.30",
     "pyyaml>=6.0.2,<7",
     "scipy>=1.14",
     "sqlalchemy[asyncio]>=2.0.36",
@@ -35,6 +39,7 @@ dev = [
     "ruff>=0.8",
     "scipy-stubs>=1.14",
     "shellcheck-py>=0.10.0.1",
+    "types-defusedxml>=0.7",
     "types-jsonschema>=4.23",
     "types-pyyaml>=6.0.12",
 ]
@@ -79,3 +84,7 @@ markers = [
     "live: calls real Token Factory / Tavily / Nebius APIs and costs money (ask first)",
     "docker: needs a local Docker daemon",
 ]
+
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "pypdfium2.*"]
+ignore_missing_imports = true  # no stubs or py.typed; used only in app/ingestion/raster.py
