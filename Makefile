@@ -46,8 +46,21 @@ images: ## Build api, runner, runner-cpu, provisioner images locally (tag $(IMAG
 	$(DOCKER) build --platform linux/amd64 -f images/runner/Dockerfile -t p2p-runner:$(IMAGE_TAG) .
 	bash scripts/check_image_size.sh $(IMAGE_TAG)
 
+TERRAFORM ?= terraform
+TFLINT ?= tflint
+CHECKOV ?= $(UV) tool run --from checkov==3.3.22 checkov
+TF_DIR := infra/terraform
+
+TF_ENVS := prod prod-iam
+
 tf-check: ## terraform fmt -check, validate, tflint, checkov
-	@echo "not implemented yet (A-03)"; exit 1
+	$(TERRAFORM) -chdir=$(TF_DIR) fmt -check -recursive -diff
+	for env in $(TF_ENVS); do \
+	  $(TERRAFORM) -chdir=$(TF_DIR)/envs/$$env init -backend=false -input=false -lockfile=readonly && \
+	  $(TERRAFORM) -chdir=$(TF_DIR)/envs/$$env validate || exit 1; \
+	done
+	$(TFLINT) --chdir=$(TF_DIR) --recursive --config=$(CURDIR)/.tflint.hcl
+	$(CHECKOV) --config-file $(TF_DIR)/.checkov.yaml
 
 eval: ## ReproBench-mini: costs money, ask first
 	@echo "not implemented yet (A-30)"; exit 1

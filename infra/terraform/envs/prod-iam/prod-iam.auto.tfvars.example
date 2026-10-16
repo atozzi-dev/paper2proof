@@ -1,0 +1,14 @@
+# Copy to prod-iam.auto.tfvars (gitignored) and fill in. IDs only: never put a secret in this file.
+
+tenant_id          = "tenant-..."
+control_project_id = "project-..." # p2p-control
+sandbox_project_id = "project-..." # p2p-sandbox
+signing_project_id = "project-..." # p2p-signing
+
+github_repo        = "atozzi-dev/paper2proof"
+github_environment = "prod"
+enable_github_oidc = true # false if spike S-7 fails
+
+# Keep in sync with envs/prod if the bucket names were overridden there (spike S-11).
+# state_bucket_name   = "p2p-state"
+# bundles_bucket_name = "p2p-bundles"
