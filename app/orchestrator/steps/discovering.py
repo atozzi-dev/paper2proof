@@ -3,6 +3,8 @@
 1. GitHub links written by the authors (arXiv comment/abstract, HF summary): official, no LLM.
 2. Otherwise Tavily search (basic, then advanced), extract on the top 3 URLs, Utility ranking.
 3. Tavily problems degrade discovery (warning DISCOVERY_DEGRADED); the run never fails here.
+4. Canary papers (allowlisted sha256) skip discovery entirely: their titles are public, so a
+   repository anyone could publish must never steer the Coder whose code runs locally.
 """
 
 import asyncio
@@ -40,8 +42,10 @@ class DiscoveringStep:
         models: ModelClient,
         artifacts: ArtifactStore,
         http: httpx.AsyncClient | None = None,
+        canaries: frozenset[str] = frozenset(),
     ) -> None:
         self._hf = HfPapers(store, http)
+        self._canaries = canaries
         self._arxiv = arxiv
         self._tavily = tavily
         self._models = models
@@ -101,6 +105,9 @@ class DiscoveringStep:
         run = await ctx.store.get_run(ctx.run_id)
         arxiv_id = run.arxiv_id if run else ""
         notes: list[str] = []
+        if run is not None and (run.paper_sha256 or "").lower() in self._canaries:
+            note = "canary paper: no repository or dataset discovery (self-contained experiment)"
+            return await self._done(ctx, Discovery(repo=None, datasets=[], notes=[note]))
         meta = await self._metadata(arxiv_id)
         hf_summary = await self._hf.summary(arxiv_id)
         datasets = [
@@ -123,7 +130,9 @@ class DiscoveringStep:
                 notes.append(f"{DEGRADED}: {reason}")
                 await ctx.emit(EventType.WARNING, {"code": DEGRADED, "message": reason})
 
-        discovery = Discovery(repo=repo, datasets=datasets, notes=notes)
+        return await self._done(ctx, Discovery(repo=repo, datasets=datasets, notes=notes))
+
+    async def _done(self, ctx: RunContext, discovery: Discovery) -> StepResult:
         key = f"runs/{ctx.run_id}/discovery.json"
         await asyncio.to_thread(self._artifacts.put_json, key, discovery.model_dump(mode="json"))
         return StepResult(next=StepName.PLANNING, output_ref=key)
