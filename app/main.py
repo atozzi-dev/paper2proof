@@ -508,6 +508,7 @@ def build_runtime(
         submit=orchestrator.submit,
         bundles=built.bundles,
         replication_ready=replication_ready(settings.p2p_env, os.environ),
+        web_dist=ROOT / "web" / "dist",
     )
     return Runtime(
         settings, store, budget, limits, built, lm, steps, orchestrator, state, http, cpu_pool,
@@ -544,12 +545,19 @@ def create(runtime: Runtime) -> FastAPI:
     return api
 
 
+def pool_start_method() -> str:
+    """Never fork a process that already runs threads (aiosqlite, asyncio): forkserver on
+    Linux (the endpoint) and macOS, spawn where forkserver doesn't exist (Windows)."""
+    methods = multiprocessing.get_all_start_methods()
+    return "forkserver" if "forkserver" in methods else "spawn"
+
+
 @lru_cache(maxsize=1)
 def _app() -> FastAPI:  # pragma: no cover - the uvicorn entrypoint (start.sh)
     settings = get_settings()
     drop_key_env()
-    # forkserver: never fork a process that already runs threads (aiosqlite, asyncio)
-    pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("forkserver"))
+    context = multiprocessing.get_context(pool_start_method())
+    pool = ProcessPoolExecutor(max_workers=2, mp_context=context)
     return create(build_runtime(settings, cpu_pool=pool))
 
 
