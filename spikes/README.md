@@ -21,7 +21,7 @@ Two shells are used:
 set -a; source .env; set +a
 
 # WSL only: install and log in to the Nebius CLI (browser login), then point it at a project
-curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+curl -sSL https://artifacts.nebius.cloud/cli/install.sh | bash
 exec -l "$SHELL"
 nebius profile create                                   # interactive
 nebius config set parent-id "$NEBIUS_SANDBOX_PROJECT_ID"
@@ -149,7 +149,7 @@ nebius iam federated-credentials create --parent-id "$NEBIUS_CONTROL_PROJECT_ID"
   --name gh-spike-oidc --subject-id "$SPIKE_SA_ID" \
   --oidc-provider-issuer-url https://token.actions.githubusercontent.com \
   --federated-subject-id "repo:atozzi-dev/paper2proof:ref:refs/heads/spike/oidc"   # note its id
-curl -fsSL https://storage.eu-north1.nebius.cloud/cli/install.sh | sha256sum      # -> installer sha256
+curl -fsSL https://artifacts.nebius.cloud/cli/install.sh | sha256sum      # -> installer sha256
 ```
 On GitHub set repository **variables** `NEBIUS_SPIKE_SA_ID` and `NEBIUS_CLI_INSTALLER_SHA256`, then:
 ```bash
