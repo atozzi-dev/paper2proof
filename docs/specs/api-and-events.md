@@ -23,7 +23,7 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | POST | `/api/runs/{id}/approve` | owner | — | `204` · `409` if not in AWAITING_APPROVAL |
 | POST | `/api/runs/{id}/reject` | owner | — | `204` |
 | POST | `/api/runs/{id}/cancel` | owner | — | `202` |
-| GET | `/api/runs/{id}/bundle` | same as run | — | `302` to a 5-minute presigned URL · `404` |
+| GET | `/api/runs/{id}/bundle` | same as run | — | `302` to a 5-minute presigned URL (`200` with the archive when the store can't presign: local store in dev) · `404` until built (`docs/specs/proof-bundle.md`) |
 | GET | `/api/gallery` | — | — | `[RunCard]` |
 | GET | `/api/stats` | — | — | eval numbers, aggregate spend, runs by verdict |
 | POST | `/admin/drain` | admin | `{"on": bool}` | `204` |
@@ -63,7 +63,7 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | `egress.blocked` | `{host, subnet}` (from gateway logs, best effort) |
 | `verdict.ready` | `{claim_id, verdict: Verdict, explanation_md}` |
 | `cost.update` | `{inference_usd, cloud_usd, total_usd}` |
-| `warning` | `{code, message}`, non-fatal. Codes: `DISCOVERY_DEGRADED` (Tavily or HF unavailable), `ABSOLUTE_AT_REDUCED_SCALE` (plan tests an ABSOLUTE claim at reduced scale), `PACKAGE_REJECTED` (a planned package failed the policy), `PACKAGES_REQUESTED` (the Coder asked for packages: back to PROVISIONING), `REPO_SNAPSHOT_UNAVAILABLE` (the Coder works without repository files), `JOB_PREEMPTED` (the GPU job was preempted: retried once on demand, or not when the budget does not allow it). New codes are added here first |
+| `warning` | `{code, message}`, non-fatal. Codes: `DISCOVERY_DEGRADED` (Tavily or HF unavailable), `ABSOLUTE_AT_REDUCED_SCALE` (plan tests an ABSOLUTE claim at reduced scale), `PACKAGE_REJECTED` (a planned package failed the policy), `PACKAGES_REQUESTED` (the Coder asked for packages: back to PROVISIONING), `REPO_SNAPSHOT_UNAVAILABLE` (the Coder works without repository files), `JOB_PREEMPTED` (the GPU job was preempted: retried once on demand, or not when the budget does not allow it), `BUNDLE_UNSIGNED` (the Proof Bundle was stored without a signature: KMS unavailable), `BUNDLE_FAILED` (no Proof Bundle could be built; the verdict stands). New codes are added here first |
 | `error` | `{code, message}` (no stack traces) |
 
 All payloads are pydantic models in `app/domain/events.py`. `schemas/events.schema.json` is generated from them (`uv run python scripts/export_schemas.py`); a contract test fails if it is stale. The frontend imports TypeScript types generated from the OpenAPI schema (`npm run gen:types`).
