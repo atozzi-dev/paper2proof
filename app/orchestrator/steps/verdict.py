@@ -22,6 +22,7 @@ from app.domain.models import (
 from app.models.client import Message, ModelClient, Role
 from app.models.prompt_files import load_prompt
 from app.models.untrusted import UNTRUSTED_NOTICE, wrap_untrusted
+from app.orchestrator.budget import BudgetExceeded, KillSwitchActive
 from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of
@@ -70,7 +71,7 @@ class VerdictStep:
             verdict_label=LABELS[verdict.kind],
             verdict_enum=", ".join(k.value for k in VerdictKind),
             verdict=verdict.model_dump_json(indent=1),
-            limitations=limits,
+            limitations=wrap_untrusted(limits, source="limitations", max_chars=6000),
             claim=wrap_untrusted(claim_json, source="paper", max_chars=4000),
             untrusted_notice=UNTRUSTED_NOTICE,
         )
@@ -82,7 +83,7 @@ class VerdictStep:
                 step=ctx.step.value,
                 prompt="judge_explain",
             )
-        except P2PError:
+        except (P2PError, BudgetExceeded, KillSwitchActive):
             return None  # the verdict never depends on the Judge being available
         return completion.content
 

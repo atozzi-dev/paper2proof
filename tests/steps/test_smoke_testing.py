@@ -1,5 +1,6 @@
 """SMOKE_TESTING: the Coder loop on scripted model turns and a fake smoke executor."""
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from app.domain.models import (
     StepName,
 )
 from app.execution.run_storage import FakeRunStorage
-from app.execution.smoke import FakeSmokeExecutor, SmokeResult
+from app.execution.smoke import FakeSmokeExecutor, SmokeResult, pack_workspace
 from app.models.fake import FakeModelClient
 from app.orchestrator.context import RunContext
 from app.orchestrator.steps.smoke_testing import SmokeTestingStep
@@ -123,7 +124,10 @@ async def test_a_planted_bug_is_fixed_and_finished(store: Store, tmp_path: Path)
     assert result.output_ref is not None
     final = artifacts.get_json(result.output_ref)
     assert final["entrypoint"] == "workspace/train.py"
-    assert storage.objects[(RUN, "staging/workspace/train.py")] == files["train.py"]
+    archive = storage.objects[(RUN, "staging/workspace.tar")]
+    assert archive == pack_workspace(files)  # exactly what the last smoke run tested
+    assert final["workspace_sha256"] == hashlib.sha256(archive).hexdigest()
+    assert not [k for _, k in storage.objects if k.startswith("staging/workspace/")]
     events = [e.payload for e in await store.events_after(RUN, 0)]
     assert any(isinstance(p, SandboxOutputPayload) and p.stream == "stderr" for p in events)
 
@@ -304,3 +308,21 @@ async def test_smoke_jobs_get_the_archive_digests_of_the_validated_report(
     assert archives.model_dump(mode="json") == {
         "overlay": "a" * 64, "repo": "b" * 64, "data": [{"name": "smoke", "sha256": "d" * 64}],
     }  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {"overlay_sha256": "a" * 64, "repo": True, "repo_sha256": None, "data_archives": []},
+        {"overlay_sha256": "a" * 64, "repo_sha256": None, "smoke": True, "data_archives": []},
+    ],
+    ids=["repo-without-digest", "smoke-without-archive"],
+)
+async def test_a_report_missing_a_digest_fails_closed(
+    store: Store, tmp_path: Path, report: dict[str, Any]
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, report=report)
+    step, _ = _step("escape_then_request", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
