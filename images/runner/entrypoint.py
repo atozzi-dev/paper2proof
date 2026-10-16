@@ -1,8 +1,9 @@
 """Runner entrypoint for EXEC jobs (docs/specs/execution-contracts.md §7). Standard library only.
 
 1. Read /etc/p2p/manifest.json and validate it (exit 30 on any contract problem).
-2. Extract overlay, repository and datasets to local disk under /work (no links, no escapes,
-   size and member caps).
+2. Extract the workspace, overlay, repository and datasets to local disk under /work (no
+   links, no escapes, size and member caps), each checked against its manifest digest: nothing
+   else on the shared bucket is run or imported.
 3. Run the experiment script once per seed, in its own process group, within the remaining
    budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); whatever the seed left
    behind is killed before the next one starts.
@@ -17,6 +18,7 @@ import argparse
 import collections
 import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -45,13 +47,15 @@ READ_LINE_CHARS = 65536
 LOG_CAP_CHARS = 20 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 40 * 2**30
 MAX_ARCHIVE_MEMBERS = 500_000
+MAX_WORKSPACE_BYTES = 16 * 1024 * 1024
+MAX_TAIL_BYTES = 1 << 20  # after the tar end marker (legitimate padding is a few KiB)
 ENTRYPOINT = re.compile(r"^workspace/[A-Za-z0-9_./-]+\.py$")
 RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 MANIFEST_KEYS = {
     "schema", "run_id", "attempt", "image_digest", "entrypoint", "args", "seeds", "budget_seconds",
     "paths", "claim_ref", "metric", "higher_is_better", "claim_type", "baseline_name", "scale",
-    "archives",
+    "archives", "workspace_sha256",
 }  # fmt: skip
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PATH_KEYS = {"overlay", "repo", "data_dir", "workspace", "cache", "results"}
@@ -157,6 +161,8 @@ def _validate(manifest: Any) -> dict[str, Any]:
             "archives.data.name",
         )
         need(isinstance(digest, str) and bool(SHA256.fullmatch(digest)), "archives.data.sha256")
+    workspace = m["workspace_sha256"]
+    need(isinstance(workspace, str) and bool(SHA256.fullmatch(workspace)), "workspace_sha256")
     return m
 
 
@@ -210,7 +216,11 @@ def tar_extract(
         extract_stream(
             proc.stdout, dest, max_bytes=MAX_ARCHIVE_BYTES, max_members=MAX_ARCHIVE_MEMBERS
         )
-        proc.stdout.read()  # drain: the digest must cover the whole file
+        drained = 0  # the digest must cover the whole file, but a tail is never kept
+        for chunk in iter(lambda: proc.stdout.read(1 << 16), b""):
+            drained += len(chunk)
+            if drained > MAX_TAIL_BYTES:
+                raise ContractError(f"{archive.name} has data after the end of its tar")
     except tarfile.TarError as err:
         proc.kill()
         shutil.rmtree(dest, ignore_errors=True)
@@ -229,6 +239,31 @@ def tar_extract(
     if digest.hexdigest() != sha256:
         shutil.rmtree(dest, ignore_errors=True)
         raise ContractError(f"{archive.name} does not match its manifest digest")
+
+
+def extract_workspace(archive: Path, dest: Path, digest: str) -> None:
+    """The Coder's workspace: a small plain tar read once, hashed, then extracted."""
+    if not archive.is_file() or archive.stat().st_size > MAX_WORKSPACE_BYTES:
+        raise ContractError("workspace archive missing or too large")
+    with archive.open("rb") as handle:
+        data = handle.read(MAX_WORKSPACE_BYTES + 1)
+    if len(data) > MAX_WORKSPACE_BYTES:
+        raise ContractError("workspace archive too large")
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ContractError("workspace archive does not match the manifest digest")
+    shutil.rmtree(dest, ignore_errors=True)
+    try:
+        extract_stream(io.BytesIO(data), dest, max_bytes=MAX_WORKSPACE_BYTES, max_members=1000)
+    except tarfile.TarError as err:
+        raise ContractError(f"unreadable workspace archive: {err}") from None
+
+
+def _clear(path: Path) -> None:
+    """Remove what an earlier job may have left at `path` (a link goes, not its target)."""
+    if path.is_symlink():
+        path.unlink()
+    else:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
@@ -455,10 +490,11 @@ def run(
         tmp.write_text(json.dumps(report, indent=1), encoding="utf-8")
         tmp.replace(results / "results.json")
 
-    workspace = Path(paths["workspace"])
+    workspace = work / "workspace"
     script = workspace / manifest["entrypoint"].removeprefix("workspace/")
     overlay, repo, data = work / "overlay", work / "repo", work / "data"
     try:
+        extract_workspace(Path(paths["workspace"]), workspace, manifest["workspace_sha256"])
         if not script.is_file():
             raise ContractError("entrypoint not found in the workspace")
         digests = manifest["archives"]
@@ -506,6 +542,7 @@ def run(
                 if remaining <= 0:
                     status = EXIT_BUDGET
                     break
+                _clear(seed_dir)  # only this seed's own output counts
                 argv = [
                     sys.executable, str(script), "--seed", str(seed), "--out", str(seed_dir),
                     *manifest["args"],
@@ -524,7 +561,7 @@ def run(
                 if relative and value is not None:
                     base = _read_metric(seed_dir / "metrics.json", f"baseline/{metric}")
                 baseline.append({"seed": seed, "value": base})
-                write_results(status)
+                write_results(EXIT_BUDGET)  # not done yet: a stopped job never shows an ending
                 if on_seed is not None:
                     on_seed(len(per_seed))
                 if timed_out:
