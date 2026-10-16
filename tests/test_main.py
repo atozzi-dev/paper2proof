@@ -20,7 +20,9 @@ from pydantic import SecretStr
 from app import main
 from app.bundle.sign import FakeSigner
 from app.domain.models import StepName
+from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.local_trusted import LocalTrustedRefused
 from app.execution.run_storage import FakeRunStorage
 from app.models.client import Role
 from app.models.fake import FakeModelClient
@@ -416,3 +418,22 @@ def test_the_cpu_pool_never_forks_a_threaded_process() -> None:
     method = main.pool_start_method()
     assert method in multiprocessing.get_all_start_methods()
     assert method != "fork"  # aiosqlite and asyncio threads are already running
+
+
+async def test_dev_runs_real_jobs_in_local_docker_when_asked(tmp_path: Path) -> None:
+    built = main.dev_adapters(_settings(tmp_path, p2p_job_backend="docker"))
+    assert isinstance(built.jobs, DevDockerBackend)
+    assert isinstance(built.storage, LocalRunStorage)
+    assert isinstance(main.dev_adapters(_settings(tmp_path)).jobs, FakeJobBackend)
+
+
+def test_the_local_docker_backend_is_never_used_in_prod(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, p2p_job_backend="docker")
+    with pytest.raises(main.ConfigError, match="P2P_JOB_BACKEND"):
+        main.build_runtime(settings.model_copy(update={"p2p_env": "prod"}))
+
+
+def test_the_local_docker_backend_refuses_the_test_environment(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, p2p_job_backend="docker", p2p_env="test")
+    with pytest.raises(LocalTrustedRefused):
+        main.dev_adapters(settings)

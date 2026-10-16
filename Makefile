@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup lint test licenses test-docker test-live dev images tf-check eval
+.PHONY: help setup lint test licenses test-docker test-live dev dev-images-env images tf-check eval
 
 UV ?= uv
 NPM ?= npm
@@ -44,6 +44,12 @@ dev: ## Migrations + uvicorn --reload on :8000 with P2P_ENV=dev and .env (local 
 	set -a; [ ! -f .env ] || . ./.env; set +a; export P2P_ENV=dev; \
 	$(UV) run alembic upgrade head && \
 	$(UV) run uvicorn app.main:app --reload --reload-dir app --port 8000
+
+dev-images-env: ## Print .env lines that point dev jobs (P2P_JOB_BACKEND=docker) at the local images by id
+	@echo "P2P_JOB_BACKEND=docker"
+	@echo "P2P_PROVISIONER_IMAGE=local/p2p-provisioner@$$($(DOCKER) image inspect --format '{{.Id}}' p2p-provisioner:$(IMAGE_TAG))"
+	@echo "P2P_RUNNER_CPU_IMAGE=local/p2p-runner-cpu@$$($(DOCKER) image inspect --format '{{.Id}}' p2p-runner-cpu:$(IMAGE_TAG))"
+	@echo "P2P_RUNNER_IMAGE=local/p2p-runner-cpu@$$($(DOCKER) image inspect --format '{{.Id}}' p2p-runner-cpu:$(IMAGE_TAG))"
 
 images: ## Build api, runner, runner-cpu, provisioner images locally (tag $(IMAGE_TAG)) + size check
 	$(DOCKER) build --platform linux/amd64 -f images/runner-cpu/Dockerfile -t p2p-runner-cpu:$(IMAGE_TAG) .
