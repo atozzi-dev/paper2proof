@@ -143,6 +143,13 @@ async def test_a_job_of_a_terminal_run_is_cancelled_at_once(world: World) -> Non
     assert world.backend.cancelled == [handle.name]
 
 
+async def test_a_fetch_job_of_a_terminal_run_is_cancelled_at_once(world: World) -> None:
+    await world.run(RUN, RunStatus.FAILED)
+    handle = add_job(world.backend, JobKind.FETCH, RUN, JobState.RUNNING, NOW)
+    await world.reaper.tick()
+    assert world.backend.cancelled == [handle.name]
+
+
 async def test_a_job_of_an_unknown_run_is_cancelled_at_once(world: World) -> None:
     handle = add_job(world.backend, JobKind.SMOKE, RUN2, JobState.STARTING, NOW)
     await world.reaper.tick()
@@ -461,6 +468,7 @@ def test_rates_cover_every_job_kind() -> None:
     rates = reaper_rates(load_cloud_prices(ROOT / "config" / "pricing.yaml"))
     assert set(rates) == {kind.value for kind in JobKind}
     assert rates["exec"] > rates["prov"] > 0
+    assert rates["fetch"] == rates["prov"]  # same image, platform and preset
 
 
 async def test_reaper_spend_and_actions_are_exported(
