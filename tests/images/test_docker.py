@@ -151,11 +151,10 @@ def test_a_provisioned_overlay_imports_in_the_cpu_runner(tmp_path: Path) -> None
     for d in (run / "staging", cache):
         d.mkdir(parents=True)
     manifest = {
-        "schema": "p2p.provision/v1", "run_id": "r_01jb7z00000000000000000000",
-        "packages": ["tabulate", "torchmetrics"], "repo": None, "datasets": [],
-        "smoke_subset": None,
-        "hf_token_secret": None, "cache_salt": "test", "policy": {"denylist": [], "popular": []},
-        "trusted_overlays": {}, "deadline_unix": 4102444800.0,
+        "schema": "p2p.provision/v2", "phase": "packages", "run_id": "r_01jb7z00000000000000000000",
+        "packages": ["tabulate", "torchmetrics"], "cache_salt": "test",
+        "policy": {"denylist": [], "popular": []}, "trusted_overlays": {},
+        "deadline_unix": 4102444800.0,
     }  # fmt: skip
     (tmp_path / "provision.json").write_text(json.dumps(manifest))
     done = _docker(
@@ -166,7 +165,9 @@ def test_a_provisioned_overlay_imports_in_the_cpu_runner(tmp_path: Path) -> None
         timeout=900,
     )  # fmt: skip
     assert done.returncode == 0, done.stderr[-3000:]
-    report = json.loads((run / "staging" / "provision_report.json").read_text())
+    report = json.loads((run / "staging" / "packages_report.json").read_text())
+    assert report["schema"] == "p2p.packages-report/v1" and report["overlay_cache_hit"] is False
+    assert (cache / "overlays" / f"{report['overlay_cache_key']}.tar.zst").is_file()
     overlay = run / "staging" / "overlay.tar.zst"
     assert hashlib.sha256(overlay.read_bytes()).hexdigest() == report["overlay_sha256"]
     script = (
@@ -182,6 +183,59 @@ def test_a_provisioned_overlay_imports_in_the_cpu_runner(tmp_path: Path) -> None
         " env={'PYTHONPATH': '/tmp/overlay'})\n"
     )
     _run("p2p-runner-cpu", "-c", script, entrypoint="python", mounts=("-v", f"{run}:/mnt/run:ro"))
+
+
+def _fetch_job(tmp_path: Path, *mounts: str) -> "subprocess.CompletedProcess[str]":
+    """The provisioner image in the fetch phase, offline, with nothing to fetch."""
+    _need("p2p-provisioner")
+    run = tmp_path / "run"
+    (run / "staging").mkdir(parents=True)
+    manifest = {
+        "schema": "p2p.provision/v2", "phase": "fetch", "run_id": "r_01jb7z00000000000000000000",
+        "repo": None, "datasets": [], "smoke_subset": None, "hf_token_secret": None,
+        "deadline_unix": 4102444800.0,
+    }  # fmt: skip
+    (tmp_path / "provision.json").write_text(json.dumps(manifest))
+    return _docker(
+        ["run", "--rm", "--network", "none", "--user", "0:0", "-v", f"{run}:/mnt/run", *mounts,
+         "-v", f"{tmp_path / 'provision.json'}:/etc/p2p/provision.json:ro",
+         f"p2p-provisioner:{TAG}"],
+        timeout=300,
+    )  # fmt: skip
+
+
+def test_the_fetch_phase_runs_without_the_cache(tmp_path: Path) -> None:
+    done = _fetch_job(tmp_path)
+    assert done.returncode == 0, done.stderr[-3000:]
+    report = json.loads((tmp_path / "run" / "staging" / "fetch_report.json").read_text())
+    assert report["schema"] == "p2p.fetch-report/v1" and report["repo"] is False
+    assert "overlay_sha256" not in report
+
+
+def test_the_fetch_phase_builds_a_smoke_subset_with_pyarrow() -> None:
+    # offline, as the image user: the parquet path the fetch job runs on downloaded files
+    script = (
+        "import sys, pathlib\n"
+        "sys.path.insert(0, '/opt/p2p')\n"
+        "import provision, pyarrow as pa, pyarrow.parquet as pq\n"
+        "src = pathlib.Path('/work/src'); src.mkdir()\n"
+        "pq.write_table(pa.table({'x': list(range(1000))}), src / 'train-0.parquet')\n"
+        "provision.parquet_smoke(src, pathlib.Path('/work/smoke'), 64)\n"
+        "print(pq.read_table('/work/smoke/smoke.parquet').num_rows)\n"
+    )
+    assert _run("p2p-provisioner", "-c", script, entrypoint="python").strip() == "64"
+
+
+def test_the_fetch_phase_refuses_a_mounted_cache(tmp_path: Path) -> None:
+    # defence in depth behind JobSpec: the job that parses untrusted bytes never sees the cache
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    done = _fetch_job(tmp_path, "-v", f"{cache}:/mnt/cache")
+    assert done.returncode == 1
+    error = json.loads((tmp_path / "run" / "staging" / "provision_error.json").read_text())
+    assert "cache" in error["error"]
+    assert not (tmp_path / "run" / "staging" / "fetch_report.json").exists()
+    assert not list(cache.iterdir())
 
 
 @pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner"])

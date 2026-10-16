@@ -5,9 +5,10 @@ Like LocalTrustedExecutor, this is the one exception to invariant 1: it refuses 
 `P2P_ENV=dev`, and refuses every job of a run whose paper's sha256 is not in
 `config/canary_allowlist.yaml`. Containers keep the job's isolation: non-root (10001), no
 capabilities, no new privileges, a read-only root with private scratch space, capped memory and
-logs, a host-side kill at the watchdog, no network except for the provisioner (which runs our
-code; locally its egress is not allowlisted as the gateway does in the cloud), and only the
-run's own directory and the cache mounted, the cache read-only except for the provisioner.
+logs, a host-side kill at the watchdog, no network except for the provision and fetch jobs
+(the provisioner image, our code; locally their egress is not allowlisted as the gateway does
+in the cloud), and only the run's own directory and the cache mounted: the cache read-only
+except for the provision job, never for the fetch job.
 """
 
 import asyncio
@@ -23,13 +24,13 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.execution.backend import CACHE_BUCKET, JobHandle, JobKind, JobSpec, JobState
+from app.execution.backend import CACHE_BUCKET, CACHE_MOUNT, JobHandle, JobKind, JobSpec, JobState
 from app.execution.local_trusted import DockerRunner, LocalTrustedRefused, PaperHash, docker_cli
 from app.execution.naming import bucket_name
 from app.execution.run_storage import MAX_READ_BYTES
 
 _DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})$")
-_JOB_NAME = re.compile(r"^p2p-(prov|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
+_JOB_NAME = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
 _MOUNT_PATH = re.compile(r"^/mnt/[a-z]{1,32}$")
 _INJECT_PATH = re.compile(r"^/etc/p2p/(?!\.\.?$)[a-z0-9._-]{1,64}$")
 _STATES = {
@@ -131,6 +132,10 @@ class DevDockerBackend:
             cache = volume.source == CACHE_BUCKET
             if not (cache or volume.source == bucket_name(run_id)):
                 raise ValueError(f"jobs may mount only their run's bucket and the cache: {volume}")
+            if cache and volume.mount_path != CACHE_MOUNT:  # the provisioner's phases rely on it
+                raise ValueError(f"the cache mounts only at {CACHE_MOUNT}")
+            if cache and spec.kind is JobKind.FETCH:
+                raise ValueError("the fetch job never mounts the cache")
             if cache and volume.mode == "rw" and spec.kind is not JobKind.PROVISION:
                 raise ValueError("only the provisioner may mount the cache writable")
             if not _MOUNT_PATH.fullmatch(volume.mount_path):
@@ -164,7 +169,7 @@ class DevDockerBackend:
             "--log-opt=max-size=10m", "--log-opt=max-file=2",
         ]  # fmt: skip
         mounts = [(job / "work", "/work", "rw"), (job / "home", "/home/p2p", "rw")]
-        if spec.kind is not JobKind.PROVISION:
+        if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):  # they download (PyPI, repo, HF)
             argv.append("--network=none")
         for volume in spec.volumes:
             cache = volume.source == CACHE_BUCKET

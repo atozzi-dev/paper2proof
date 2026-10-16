@@ -8,7 +8,7 @@ Source: architecture §7, §8, §9 (v0.2). Normative. Anything marked **[S-n]** 
 |---|---|---|---|
 | Who chooses the commands | Deterministic code only | Coder (LLM), constrained | Runner entrypoint (ours) calling the Coder's script |
 | Network | Allowlisted egress via the gateway (`provision` subnet) | **None** (Sandboxes `networking.enabled=false`) | Object Storage + Registry only (`exec` subnet) **[S-5]** |
-| Where | Serverless Job, CPU | Token Factory Sandboxes (fallback: Serverless Job CPU in `exec`) | Serverless Job, GPU |
+| Where | Serverless Jobs, CPU: a provision job, then a fetch job (§5) | Token Factory Sandboxes (fallback: Serverless Job CPU in `exec`) | Serverless Job, GPU |
 | Secrets | None (optional read-only HF token) | None | None |
 
 ## 2. Naming (deterministic, idempotent)
@@ -18,7 +18,8 @@ Source: architecture §7, §8, §9 (v0.2). Normative. Anything marked **[S-n]** 
 | Run ID | `r_` + ULID, lowercase (e.g. `r_01jb7z…`) | Used in the DB, events and bundles |
 | Run slug | `run_slug(run_id)` = the 26-char ULID part, lowercase, no `r_` | **Bucket and job names can't contain underscores**: always build them from the slug |
 | Per-run bucket | `p2p-run-<slug>` (34 chars) | **[S-11]** confirm length limits and uniqueness scope |
-| Provision job | `p2p-prov-<slug>-<attempt>` | |
+| Provision job | `p2p-prov-<slug>-<attempt>` | Packages only: the one job that writes `p2p-cache` |
+| Fetch job | `p2p-fetch-<slug>-<attempt>` | Repository and datasets; never mounts `p2p-cache` |
 | Exec job | `p2p-exec-<slug>-<attempt>` | |
 | CPU smoke job (fallback) | `p2p-smoke-<slug>-<iteration>` | |
 
@@ -34,8 +35,9 @@ staging/
   repo_files.json              # bounded text snapshot of the clone for the Coder's read_file
   data/<name>.tar.zst          # datasets as archives (never many small files)
   data/smoke.tar.zst           # ≤ 50 MB subset for smoke tests
-  provision_report.json        # digests and metadata; validated and copied by the control plane
-  provision_error.json         # the provisioner's own error message on failure
+  packages_report.json         # lock and overlay digests (provision job)
+  fetch_report.json            # repository and data digests and metadata (fetch job)
+  provision_error.json         # the provisioner's own error message on failure (either job)
   workspace.tar                # the Coder's workspace at `finish` (plain tar, the bytes of the
                                # last passing smoke run): sha256 in the exec manifest
 smoke/<iteration>/
@@ -49,10 +51,27 @@ results/<attempt>/
   seeds/<seed>/metrics.json    # produced by the experiment script
 ```
 
-Shared cache bucket `p2p-cache` (read-write only for PROVISION, read-only for smoke and exec):
-`overlays/<key>.tar.zst` with key = sha256(install lock + cache salt + constraints sha256). A hit
-is served only when the control plane trusts the digest (`overlay_digests` table, first writer
-wins, sent in the manifest as `trusted_overlays`); the bucket itself is never the authority.
+Shared cache bucket `p2p-cache` (read-write only for the provision job, never mounted by the
+fetch job, read-only for smoke and exec): `overlays/<key>.tar.zst` with key = sha256(install lock
++ cache salt + constraints sha256). A hit is served only when the control plane trusts the digest
+(`overlay_digests` table, first writer wins, sent in the manifest as `trusted_overlays`); the
+bucket itself is never the authority.
+
+A digest becomes trusted only from the report of a provision job, whose inputs are the package
+list and PyPI wheels (installed, never built or run). The repository clone and the parquet
+parsing for the smoke subset run later, in the fetch job, which has no cache mount: a dataset or
+repository that gets code execution there reaches its own run bucket only, never the cache or the
+trust table. The control plane reads `packages_report.json` and records the digest **before** it
+submits the fetch job, and no other job of the run is running while the provision job does
+(leftover smoke, fetch and exec jobs are stopped first), so nothing untrusted can write that
+report. The provision job publishes to the cache from its local archive, never from the run
+bucket. Old digests, recorded while one job did both, are dropped (migration 0006).
+
+This holds as long as jobs reach buckets only through their mounts: all jobs share one platform
+identity, so a container that could obtain object-storage credentials (to check in S-5/S-11)
+could write `p2p-cache` directly. The trust table would still hold (hits are served only for
+digests from provision-job reports, checked on local disk), but the cache could be corrupted
+(rebuilds, not poisoning). Per-kind job identities are the follow-up.
 
 Every file in this bucket can be written by an earlier smoke job (it mounts the bucket
 read-write until S-11 shows a read-only/prefix mount works), so the control plane reads it as
@@ -75,18 +94,20 @@ The provisioner installs with: `uv pip install --only-binary=:all: --require-has
 
 ## 5. Manifests
 
-The provision manifest is injected at `/etc/p2p/provision.json` (read-only, ≤ 64 KiB), not
-written to the bucket:
+PROVISIONING runs two jobs of the provisioner image, one after the other. Each gets its manifest
+injected at `/etc/p2p/provision.json` (read-only, ≤ 64 KiB), never written to the bucket, with a
+`phase` that selects what it does; a field of the other phase is rejected.
+
+The provision job (`phase: "packages"`, mounts the run bucket and `p2p-cache` read-write) locks,
+installs and packs the overlay and writes `lock.txt`, `overlay.tar.zst` and
+`packages_report.json`:
 
 ```json
 {
-  "schema": "p2p.provision/v1",
+  "schema": "p2p.provision/v2",
+  "phase": "packages",
   "run_id": "r_01jb7z...",
   "packages": ["timm==1.0.9", "einops"],
-  "repo": {"url": "https://github.com/org/repo", "ref": null},
-  "datasets": [{"kind": "hf", "id": "uoft-cs/cifar10", "split": "train", "max_bytes": 2000000000}],
-  "smoke_subset": {"dataset": "uoft-cs/cifar10", "rows": 512},
-  "hf_token_secret": null,
   "cache_salt": "sha256:<runner>+sha256:<provisioner>+py3.12+x86_64-manylinux_2_28",
   "policy": {"denylist": ["pip", "..."], "popular": ["numpy", "..."]},
   "trusted_overlays": {"<cache key>": "<sha256>"},
@@ -94,10 +115,44 @@ written to the bucket:
 }
 ```
 
-`deadline_unix` is 2 minutes before the 20-minute watchdog, counted from the job's submission
-(after the gateway is up); the provisioner exits with its error file at that time. `ref: null`
-means the default branch. Every resolved dependency (not only the requested names) passes the
-denylist and typosquat checks, except packages the runner image already provides.
+`packages_report.json`: `{schema: "p2p.packages-report/v1", run_id, lock_sha256,
+overlay_cache_key, overlay_cache_hit, overlay_sha256}`.
+
+The fetch job (`phase: "fetch"`, mounts the run bucket only; it refuses to start when a cache
+directory is present) clones the repository and downloads the datasets, and writes
+`repo.tar.zst`, `repo_files.json`, `data/*.tar.zst` and `fetch_report.json`:
+
+```json
+{
+  "schema": "p2p.provision/v2",
+  "phase": "fetch",
+  "run_id": "r_01jb7z...",
+  "repo": {"url": "https://github.com/org/repo", "ref": null},
+  "datasets": [{"kind": "hf", "id": "uoft-cs/cifar10", "split": "train", "max_bytes": 2000000000}],
+  "smoke_subset": {"dataset": "uoft-cs/cifar10", "rows": 512},
+  "hf_token_secret": null,
+  "deadline_unix": 1792000000.0
+}
+```
+
+`fetch_report.json`: `{schema: "p2p.fetch-report/v1", run_id, repo, repo_commit,
+requirement_files, repo_files_sha256, repo_sha256, datasets, data_archives, smoke}`.
+
+The control plane validates both reports (strict shape, whitelisted fields) and stores their
+union as the `p2p.provision-report/v1` artifact that later steps and the bundle read
+(`runs/<run_id>/provision_report.json`, the same fields as before the split). The repository and
+the datasets don't change between attempts: an attempt after a `request_packages` call runs a
+new provision job and reuses the stored fetch report (the runners check every archive digest).
+
+Both jobs share the 20-minute provisioning budget: `deadline_unix` is 2 minutes before the
+watchdog, counted from the provision job's submission (after the gateway is up), and the fetch
+job's watchdog is what is left of those 20 minutes; the provisioner exits with its error file at
+its deadline. The two jobs mean two cold starts (VM, image pull, mounts) in the same 20 minutes,
+not measured yet (S-4/S-12): a fetch job is submitted only with at least 5 minutes left before
+the deadline, otherwise the step times out without starting it. `ref: null` means the default
+branch. Every resolved dependency (not only the
+requested names) passes the denylist and typosquat checks, except packages the runner image
+already provides.
 
 The smoke manifest (`/etc/p2p/smoke.json`, CPU smoke jobs): `{schema: "p2p.smoke/v1", run_id,
 iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce, archives}`. `archives` (also in the exec
@@ -142,17 +197,17 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 
 ## 8. Job specs
 
-| Field | Provision | Exec | Smoke (fallback) |
-|---|---|---|---|
-| Image | `p2p-provisioner@sha256:…` | `p2p-runner@sha256:…` | `p2p-runner-cpu@sha256:…` |
-| Platform / preset | `cpu-d3` / `4vcpu-16gb` | `gpu-l40s-a` / `1gpu-8vcpu-32gb` (fallback `gpu-l40s-d` / `1gpu-16vcpu-96gb`) | `cpu-d3` / `4vcpu-16gb` |
-| Disk | 50Gi | 100Gi | 30Gi |
-| Timeout (platform) | 1h (minimum allowed) | 1h | 1h |
-| Our watchdog | 20 min (provisioner deadline 18 min) | `budget_seconds + 300` | `timeout_s + 180` s (setup margin, check with S-12) |
-| Subnet | `provision` | `exec` | `exec` |
-| Volumes | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:rw` | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:ro` | same as exec |
-| Preemptible | no | yes in dev/eval, **no** for demo recordings (`P2P_GPU_PREEMPTIBLE`) | no |
-| Restart policy | `never` | `never` | `never` |
+| Field | Provision | Fetch | Exec | Smoke (fallback) |
+|---|---|---|---|---|
+| Image | `p2p-provisioner@sha256:…` | `p2p-provisioner@sha256:…` | `p2p-runner@sha256:…` | `p2p-runner-cpu@sha256:…` |
+| Platform / preset | `cpu-d3` / `4vcpu-16gb` | `cpu-d3` / `4vcpu-16gb` | `gpu-l40s-a` / `1gpu-8vcpu-32gb` (fallback `gpu-l40s-d` / `1gpu-16vcpu-96gb`) | `cpu-d3` / `4vcpu-16gb` |
+| Disk | 50Gi | 50Gi | 100Gi | 30Gi |
+| Timeout (platform) | 1h (minimum allowed) | 1h | 1h | 1h |
+| Our watchdog | 20 min (provisioner deadline 18 min) | what is left of the provision job's 20 min (same deadline) | `budget_seconds + 300` | `timeout_s + 180` s (setup margin, check with S-12) |
+| Subnet | `provision` | `provision` | `exec` | `exec` |
+| Volumes | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:rw` | `p2p-run-…:/mnt/run:rw` only | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:ro` | same as exec |
+| Preemptible | no | no | yes in dev/eval, **no** for demo recordings (`P2P_GPU_PREEMPTIBLE`) | no |
+| Restart policy | `never` | `never` | `never` | `never` |
 
 Retries are decided by the orchestrator, never by the platform.
 
@@ -160,7 +215,7 @@ Retries are decided by the orchestrator, never by the platform.
 
 ```python
 # app/execution/backend.py
-class JobKind(StrEnum): PROVISION = "prov"; EXEC = "exec"; SMOKE = "smoke"
+class JobKind(StrEnum): PROVISION = "prov"; FETCH = "fetch"; EXEC = "exec"; SMOKE = "smoke"
 
 class JobSpec(BaseModel):
     name: str

@@ -5,13 +5,14 @@ from app.models.pricing import CloudPrices
 
 EXEC_PLATFORM, EXEC_PRESET = "gpu-l40s-a", "1gpu-8vcpu-32gb"  # execution-contracts §8
 PROVISION_PLATFORM, PROVISION_PRESET = "cpu-d3", "4vcpu-16gb"
-PROVISION_MINUTES = 20  # provisioning watchdog: the worst case we pay for
+PROVISION_MINUTES = 20  # provisioning watchdog (provision + fetch job): the worst case we pay
 
 
 def estimate_plan_cost(
     plan: Plan, cloud: CloudPrices, *, inference_so_far: float, preemptible: bool
 ) -> float:
-    """Inference already spent + GPU minutes of the plan + one provisioning job (on demand)."""
+    """Inference already spent + GPU minutes of the plan + the provisioning jobs (on demand;
+    one after the other, 20 minutes in all)."""
     gpu = (
         plan.gpu_minutes_est
         / 60

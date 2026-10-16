@@ -33,6 +33,7 @@ def test_names_are_deterministic_and_have_no_underscores() -> None:
     assert job_name(JobKind.EXEC, RUN, 2) == "p2p-exec-01jb7z00000000000000000000-2"
     assert job_name(JobKind.PROVISION, RUN, 1) == "p2p-prov-01jb7z00000000000000000000-1"
     assert job_name(JobKind.SMOKE, RUN, 7) == "p2p-smoke-01jb7z00000000000000000000-7"
+    assert job_name(JobKind.FETCH, RUN, 3) == "p2p-fetch-01jb7z00000000000000000000-3"
     assert bucket_name(RUN) == "p2p-run-01jb7z00000000000000000000"
     for name in (job_name(JobKind.EXEC, RUN, 99), bucket_name(RUN)):
         assert "_" not in name

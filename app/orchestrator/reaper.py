@@ -39,7 +39,7 @@ BUCKET_MAX_AGE = timedelta(hours=24)
 GATEWAY_IDLE_MINUTES = 30
 GATEWAY_STEPS = frozenset({StepName.PROVISIONING, StepName.SMOKE_TESTING, StepName.EXECUTING})
 METRIC = "p2p_reaper_actions_total"
-_OUR_JOB = re.compile(r"^p2p-(prov|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
+_OUR_JOB = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
 _RUN_BUCKET = re.compile(r"^p2p-run-([0-9a-z]{26})$")
 
 
@@ -47,6 +47,7 @@ def reaper_rates(cloud: CloudPrices) -> dict[str, float]:
     """On-demand USD/hour per job kind: an upper bound for time nobody measured."""
     return {
         JobKind.PROVISION.value: cloud.hourly(PROVISION_PLATFORM, PROVISION_PRESET),
+        JobKind.FETCH.value: cloud.hourly(PROVISION_PLATFORM, PROVISION_PRESET),
         JobKind.EXEC.value: cloud.hourly(EXEC_PLATFORM, EXEC_PRESET),
         JobKind.SMOKE.value: cloud.hourly(SMOKE_PLATFORM, SMOKE_PRESET),
     }

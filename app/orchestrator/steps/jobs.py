@@ -15,7 +15,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from app.domain.events import EventType
 from app.domain.models import RunStatus
-from app.execution.backend import JobHandle, JobSpec, JobState
+from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
 from app.execution.naming import bucket_name
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
@@ -27,6 +27,12 @@ STOP_WAIT_S = 300  # how long a cancelled job may take to stop
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def event_kind(kind: JobKind) -> str:
+    """The kind events carry (`JobKindName`, what the UI knows): the fetch job is part of
+    provisioning, and its name tells it apart."""
+    return JobKind.PROVISION.value if kind is JobKind.FETCH else kind.value
 
 
 @dataclass(frozen=True)
@@ -155,7 +161,7 @@ async def run_job(
     async def job_status(state: JobState) -> None:
         await ctx.emit(
             EventType.JOB_STATUS,
-            {"kind": spec.kind.value, "name": spec.name, "state": state.value},
+            {"kind": event_kind(spec.kind), "name": spec.name, "state": state.value},
         )
 
     handle: JobHandle | None = None

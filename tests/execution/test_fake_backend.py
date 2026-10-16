@@ -132,3 +132,32 @@ def test_provisioner_may_write_the_cache() -> None:
         ],
     )
     assert provision.volumes[1].mode == "rw"
+
+
+@pytest.mark.parametrize("mode", ["ro", "rw"])
+def test_the_fetch_job_never_mounts_the_cache(mode: str) -> None:
+    # it handles the untrusted repository and datasets: no path to the shared overlay cache
+    with pytest.raises(ValidationError):
+        spec(
+            name=job_name(JobKind.FETCH, RUN, 1),
+            kind=JobKind.FETCH,
+            volumes=[
+                VolumeMount(source=bucket_name(RUN), mount_path="/mnt/run", mode="rw"),
+                VolumeMount(source="p2p-cache", mount_path="/mnt/cache", mode=mode),
+            ],
+        )
+
+
+def test_the_fetch_job_writes_its_own_bucket() -> None:
+    fetch = spec(
+        name=job_name(JobKind.FETCH, RUN, 1),
+        kind=JobKind.FETCH,
+        volumes=[VolumeMount(source=bucket_name(RUN), mount_path="/mnt/run", mode="rw")],
+    )
+    assert fetch.name == f"p2p-fetch-{RUN[2:]}-1"
+
+
+def test_the_cache_mounts_only_at_its_path() -> None:
+    # the provisioner tells the phases apart by /mnt/cache: it can't be moved elsewhere
+    with pytest.raises(ValidationError):
+        spec(volumes=[VolumeMount(source="p2p-cache", mount_path="/mnt/elsewhere", mode="ro")])
