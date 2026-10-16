@@ -23,6 +23,7 @@ Usage: python provision.py [--manifest PATH] [--staging DIR] [--cache DIR] [--wo
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -332,6 +333,17 @@ def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: C
     """Pack on local disk first, then copy once to the destination (FUSE mounts are slow).
     Returns the sha256 of the local archive: never read back from the shared mount."""
     local = source.parent / f".{out.name}.local"
+    digest = _pack_local(source, local, runner, env, clock)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(local, out)
+    local.unlink(missing_ok=True)
+    return digest
+
+
+def _pack_local(
+    source: Path, local: Path, runner: Runner, env: dict[str, str], clock: Clock
+) -> str:
+    """A deterministic archive of `source` on local disk; returns its sha256."""
     runner(
         [
             "tar",
@@ -352,11 +364,7 @@ def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: C
         env=env,
         timeout=clock.timeout(),
     )
-    digest = _sha256(local)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(local, out)
-    local.unlink(missing_ok=True)
-    return digest
+    return _sha256(local)
 
 
 def _lock_names(lock: str) -> list[str]:
@@ -469,8 +477,13 @@ def lock_and_overlay(
             )  # fmt: skip
         except subprocess.SubprocessError as err:
             raise _explain(err, "installing packages") from None
-    digest = _pack(work, overlay, runner, env, clock)
-    _publish_to_cache(overlay, cached, digest, manifest.run_id)
+    # The cache gets the local archive, never the copy on the run bucket (other jobs of the
+    # run can write that one): then a forged report can only cause misses, never poisoning.
+    local = paths.work / ".overlay.tar.zst.local"
+    digest = _pack_local(work, local, runner, env, clock)
+    _publish_to_cache(local, cached, digest, manifest.run_id)
+    shutil.copyfile(local, overlay)
+    local.unlink(missing_ok=True)
     return key, False, digest
 
 
@@ -773,17 +786,26 @@ def provision(
     return report
 
 
+def write_error(staging: Path, message: str) -> None:
+    """The error file, written without following links: smoke and fetch jobs share the bucket
+    and may have planted `staging` or the file itself as a symlink (into the cache)."""
+    if staging.is_symlink():
+        staging.unlink()
+    staging.mkdir(parents=True, exist_ok=True)
+    path = staging / "provision_error.json"
+    path.unlink(missing_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags, 0o644), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"error": message}))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def deadline_expired(staging: Path) -> None:
     """Write the error and leave at once: raising would wait for in-process download threads
     (huggingface_hub joins its pool) until the watchdog cancels the job without a message."""
     try:
-        if staging.is_symlink():
-            staging.unlink()
-        staging.mkdir(parents=True, exist_ok=True)
-        with (staging / "provision_error.json").open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"error": "provisioning deadline reached"}))
-            handle.flush()
-            os.fsync(handle.fileno())
+        write_error(staging, "provisioning deadline reached")
         print("PROVISION FAILED: provisioning deadline reached", file=sys.stderr, flush=True)
     except OSError:
         pass  # a full or broken mount must not keep us waiting: the watchdog still reports it
@@ -826,10 +848,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if isinstance(err, ProvisionError)
             else f"provisioning failed: {type(err).__name__}"
         )
-        paths.staging.mkdir(parents=True, exist_ok=True)
-        (paths.staging / "provision_error.json").write_text(
-            json.dumps({"error": message}), encoding="utf-8"
-        )
+        with contextlib.suppress(OSError):  # the exit code and stderr still report it
+            write_error(paths.staging, message)
         print(f"PROVISION FAILED: {message}", file=sys.stderr)
         return 1
     print("PROVISION OK")

@@ -886,12 +886,58 @@ async def test_the_fetch_job_gets_what_is_left_of_the_budget(store: Store, tmp_p
     )
 
 
-async def test_no_fetch_job_once_the_budget_is_spent(store: Store, tmp_path: Path) -> None:
+@pytest.mark.parametrize("done_at_min", [13.5, 19.5])
+async def test_no_fetch_job_once_the_budget_is_spent(
+    store: Store, tmp_path: Path, done_at_min: float
+) -> None:
+    # 13.5 min: 4.5 min before the provisioner's deadline, too little for a cold start + work
     ctx, artifacts = await _setup(store, tmp_path, packages=[])
     storage, clock = FakeRunStorage(), FakeClock()
-    jobs = _SlowPackages(clock, 19 * 60 + 30, on_submit=_writes_report(storage))
+    jobs = _SlowPackages(clock, done_at_min * 60, on_submit=_writes_report(storage))
     ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
     with pytest.raises(P2PError) as err:
         await _step(store, artifacts, storage, clock).run(ctx)
     assert err.value.code is ErrorCode.TIMEOUT
     assert list(jobs.jobs) == [PROV]
+
+
+class _Stuck(FakeJobBackend):
+    """A leftover job that never stops when cancelled."""
+
+    async def cancel(self, handle: JobHandle) -> None:
+        self.cancelled.append(handle.name)
+
+
+@pytest.mark.parametrize("kind", [JobKind.SMOKE, JobKind.FETCH, JobKind.EXEC])
+async def test_a_leftover_job_that_does_not_stop_is_a_timeout(
+    store: Store, tmp_path: Path, kind: JobKind
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    jobs = _Stuck(JobState.RUNNING)
+    await jobs.submit(
+        JobSpec(**{**_spec_fields(), "kind": kind, "name": f"p2p-{kind}-{RUN[2:]}-1"})
+    )
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, FakeRunStorage(), FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.TIMEOUT
+    assert PROV not in jobs.jobs  # the provision job never ran next to it
+    assert await store.trusted_overlays() == {}
+
+
+@respx.mock
+async def test_a_planted_packages_report_is_deleted_before_a_new_provision_job(
+    store: Store, tmp_path: Path
+) -> None:
+    respx.get("https://pypi.org/pypi/einops/json").mock(return_value=_pypi())
+    ctx, artifacts = await _setup(store, tmp_path, packages=[], smoke_request=["einops"])
+    artifacts.put_json(f"runs/{RUN}/fetch_report.json", _fetch_report())
+    storage = FakeRunStorage()
+    forged = _report(overlay_cache_key="9" * 64, overlay_sha256="8" * 64)  # by a smoke job
+    storage.objects[(RUN, "staging/packages_report.json")] = json.dumps(forged).encode()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(JobState.FAILED)})
+    with pytest.raises(P2PError) as err:  # the new job wrote nothing
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert (RUN, "staging/packages_report.json") not in storage.objects
+    assert await store.trusted_overlays() == {}

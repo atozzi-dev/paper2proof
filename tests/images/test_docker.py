@@ -212,6 +212,20 @@ def test_the_fetch_phase_runs_without_the_cache(tmp_path: Path) -> None:
     assert "overlay_sha256" not in report
 
 
+def test_the_fetch_phase_builds_a_smoke_subset_with_pyarrow() -> None:
+    # offline, as the image user: the parquet path the fetch job runs on downloaded files
+    script = (
+        "import sys, pathlib\n"
+        "sys.path.insert(0, '/opt/p2p')\n"
+        "import provision, pyarrow as pa, pyarrow.parquet as pq\n"
+        "src = pathlib.Path('/work/src'); src.mkdir()\n"
+        "pq.write_table(pa.table({'x': list(range(1000))}), src / 'train-0.parquet')\n"
+        "provision.parquet_smoke(src, pathlib.Path('/work/smoke'), 64)\n"
+        "print(pq.read_table('/work/smoke/smoke.parquet').num_rows)\n"
+    )
+    assert _run("p2p-provisioner", "-c", script, entrypoint="python").strip() == "64"
+
+
 def test_the_fetch_phase_refuses_a_mounted_cache(tmp_path: Path) -> None:
     # defence in depth behind JobSpec: the job that parses untrusted bytes never sees the cache
     cache = tmp_path / "cache"

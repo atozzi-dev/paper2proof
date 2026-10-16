@@ -15,6 +15,7 @@ MAX_INJECT_FILES = 8
 MAX_INJECT_TOTAL = 256 * 1024
 INJECT_PREFIX = "/etc/p2p/"
 CACHE_BUCKET = "p2p-cache"
+CACHE_MOUNT = "/mnt/cache"
 # Jobs run untrusted code: they get an allowlisted environment and never credentials
 # (invariant 4). Names are allowlisted; names and values are also screened for secrets.
 _ENV_ALLOWED = frozenset(
@@ -129,6 +130,8 @@ class JobSpec(BaseModel):
         own_bucket = f"p2p-run-{slug}"
         for volume in self.volumes:
             if volume.source == CACHE_BUCKET:
+                if volume.mount_path != CACHE_MOUNT:  # the provisioner's phases rely on it
+                    raise ValueError(f"the cache mounts only at {CACHE_MOUNT}")
                 if self.kind is JobKind.FETCH:
                     raise ValueError("the fetch job never mounts the cache")
                 if volume.mode == "rw" and self.kind is not JobKind.PROVISION:

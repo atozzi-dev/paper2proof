@@ -728,3 +728,69 @@ def test_any_valid_package_list_becomes_the_same_toml_dependencies(packages: lis
     data = tomllib.loads(provision._lock_input(packages))
     assert data["project"]["dependencies"] == [*packages, "torch", "torchvision"]
     assert set(data["tool"]["uv"]["sources"]) == {"torch", "torchvision"}
+
+
+def test_the_cache_is_published_from_the_local_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the run bucket is shared with untrusted jobs: what lands in the cache never comes from it
+    publish = provision._publish_to_cache
+
+    def swapped_first(overlay: Path, cached: Path, digest: str, run_id: str) -> None:
+        staging = tmp_path / "staging" / "overlay.tar.zst"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_bytes(b"swapped by another job")
+        publish(overlay, cached, digest, run_id)
+
+    monkeypatch.setattr(provision, "_publish_to_cache", swapped_first)
+    report, paths = _provision(tmp_path)
+    entry = paths.cache / "overlays" / f"{report['overlay_cache_key']}.tar.zst"
+    assert hashlib.sha256(entry.read_bytes()).hexdigest() == report["overlay_sha256"]
+    staged = (paths.staging / "overlay.tar.zst").read_bytes()
+    assert hashlib.sha256(staged).hexdigest() == report["overlay_sha256"]
+    assert not list(paths.work.rglob("*.local"))  # the local archive is cleaned up
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_planted_report_and_error_symlinks_are_not_followed(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    paths.staging.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    for name in ("packages_report.json", "provision_error.json"):
+        (paths.staging / name).symlink_to(victim)
+    _provision(tmp_path)
+    assert victim.read_text() == "keep"
+    assert not (paths.staging / "packages_report.json").is_symlink()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_an_early_error_is_written_without_following_symlinks(tmp_path: Path) -> None:
+    # the job started after its deadline: the error is written before staging is cleaned
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    victim = tmp_path / "cached-overlay.tar.zst"
+    victim.write_bytes(b"overlay")
+    (staging / "provision_error.json").symlink_to(victim)
+    late = tmp_path / "manifest.json"
+    late.write_text(json.dumps(manifest(deadline_unix=1.0)))
+    argv = ["--manifest", str(late), "--staging", str(staging), "--cache", str(tmp_path / "c"),
+            "--work", str(tmp_path / "w")]  # fmt: skip
+    assert provision.main(argv) == 1
+    assert victim.read_bytes() == b"overlay"
+    assert "deadline" in json.loads((staging / "provision_error.json").read_text())["error"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_the_deadline_handler_does_not_follow_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provision.os, "_exit", lambda code: None)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"keep")
+    (staging / "provision_error.json").symlink_to(victim)
+    provision.deadline_expired(staging)
+    assert victim.read_bytes() == b"keep"
+    assert "deadline" in json.loads((staging / "provision_error.json").read_text())["error"]

@@ -32,7 +32,7 @@ from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
 
 WATCHDOG_S = 20 * 60  # both jobs together (execution-contracts §8)
-MIN_FETCH_S = 60  # less than this left of the budget: a timeout, not a job
+MIN_FETCH_WORK_S = 300  # a cold start plus some work before the deadline, or a timeout now
 SMOKE_ROWS = 512
 RUNNER_PYTHON = "3.12"  # what the runner image runs: overlays are only valid for that
 RUNNER_PLATFORM = "x86_64-manylinux_2_28"
@@ -226,8 +226,9 @@ class ProvisioningStep:
             )
         deadline = datetime.fromtimestamp(deadline_unix, UTC)
         fetch_key = f"runs/{ctx.run_id}/fetch_report.json"
-        # The repository and the datasets don't change between attempts (the plan doesn't).
-        fetched = await self._stored(fetch_key) if ctx.attempt > 1 else None
+        # The repository and the datasets don't change between attempts (the plan doesn't):
+        # a later attempt, or a resumed one, uses the copy stored by this step.
+        fetched = await self._stored(fetch_key)
         if fetched is None:
             fetched = await self._fetch(ctx, plan, discovery, bucket, deadline)
             if fetched is None:
@@ -262,11 +263,12 @@ class ProvisioningStep:
     ) -> dict[str, Any] | None:
         """The provision job: the overlay digest that may become trusted. Its report is read
         back from the run bucket, so no other job of the run may be running meanwhile: smoke
-        jobs were stopped, leftover fetch jobs are stopped here, and this run's fetch job is
-        submitted only after the digest is stored. None when the run was cancelled."""
-        fetch = f"p2p-fetch-{run_slug(ctx.run_id)}-"
-        if not await stop_jobs(ctx, fetch, poll_s=self._poll_s, sleep=self._sleep):
-            raise P2PError(ErrorCode.TIMEOUT, "an earlier fetch job did not stop")
+        jobs were stopped, leftover fetch and exec jobs are stopped here, and this run's fetch
+        job is submitted only after the digest is stored. None when the run was cancelled."""
+        for kind in (JobKind.FETCH, JobKind.EXEC):  # exec can't run yet: a cheap extra guard
+            prefix = f"p2p-{kind.value}-{run_slug(ctx.run_id)}-"
+            if not await stop_jobs(ctx, prefix, poll_s=self._poll_s, sleep=self._sleep):
+                raise P2PError(ErrorCode.TIMEOUT, f"an earlier {kind.value} job did not stop")
         policy = self._policy.config
         runner_digest = self._config.runner_image.rsplit("@", 1)[1]
         provisioner_digest = self._config.provisioner_image.rsplit("@", 1)[1]
@@ -315,7 +317,8 @@ class ProvisioningStep:
         name = job_name(JobKind.FETCH, ctx.run_id, ctx.attempt)
         submitted, fresh = await self._submitted(ctx, name)
         left_s = int((deadline + DEADLINE_MARGIN - submitted).total_seconds())
-        if fresh and left_s < MIN_FETCH_S:
+        if fresh and (deadline - submitted).total_seconds() < MIN_FETCH_WORK_S:
+            # never a billed cold start that can only end at its deadline
             raise P2PError(ErrorCode.TIMEOUT, "provisioning took longer than 20 minutes")
         manifest = {
             "schema": "p2p.provision/v2",

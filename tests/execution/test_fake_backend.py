@@ -155,3 +155,9 @@ def test_the_fetch_job_writes_its_own_bucket() -> None:
         volumes=[VolumeMount(source=bucket_name(RUN), mount_path="/mnt/run", mode="rw")],
     )
     assert fetch.name == f"p2p-fetch-{RUN[2:]}-1"
+
+
+def test_the_cache_mounts_only_at_its_path() -> None:
+    # the provisioner tells the phases apart by /mnt/cache: it can't be moved elsewhere
+    with pytest.raises(ValidationError):
+        spec(volumes=[VolumeMount(source="p2p-cache", mount_path="/mnt/elsewhere", mode="ro")])
