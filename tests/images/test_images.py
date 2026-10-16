@@ -239,3 +239,11 @@ def test_job_images_drop_setuid_bits(image: str) -> None:
 
 def test_the_api_build_never_builds_sdists() -> None:
     assert "UV_NO_BUILD=1" in (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+
+
+def test_the_api_image_starts_start_sh_under_tini() -> None:
+    text = (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert '\nENTRYPOINT ["/usr/bin/tini", "-g", "--"]\nCMD ["/opt/p2p/start.sh"]' in text
+    assert "COPY --chmod=0555 images/api/start.sh /opt/p2p/start.sh" in text
+    sweep = text.index("-perm /6000 -type f -exec chmod a-s {} +")
+    assert sweep > text.rindex("\nCOPY ")  # after the last file lands in the image
