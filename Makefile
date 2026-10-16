@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup lint test test-docker test-live dev images tf-check eval
+.PHONY: help setup lint test licenses test-docker test-live dev images tf-check eval
 
 UV ?= uv
 NPM ?= npm
@@ -29,6 +29,10 @@ endif
 test: ## pytest (no live tests) + vitest
 	$(UV) run pytest -m "not live and not docker" --cov=app/verdict --cov-fail-under=100
 	cd web && $(NPM) test
+
+licenses: ## License gate: no GPL/AGPL in shipped Python (runtime) or npm (non-dev) dependencies
+	$(UV) export --frozen --no-dev --no-hashes --no-emit-project --no-header --no-annotate \
+	  | $(UV) run python scripts/license_gate.py --python-requirements - --npm-lock web/package-lock.json
 
 test-docker: ## Tests on the built images (make images first; one test downloads from PyPI)
 	$(UV) run pytest -m docker tests/images
