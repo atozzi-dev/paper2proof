@@ -7,7 +7,9 @@ repos:
         language: fail
         entry: "Secret-bearing file staged; keep it out of the repo."
         files: '(^|/)\.env(\..+)?$|\.pem$|\.key$|credentials.*\.json$|\.tfstate(\.backup)?$|\.tfvars$'
-        exclude: '(^|/)\.env\.example$|\.tfvars\.example$'
+        # The Proof Bundle verification key is public (docs/specs/proof-bundle.md); a test
+        # checks it never holds a private key.
+        exclude: '(^|/)\.env\.example$|\.tfvars\.example$|^docs/bundle-public-key\.pem$'
       - id: detect-private-key
         name: detect private keys
         language: pygrep

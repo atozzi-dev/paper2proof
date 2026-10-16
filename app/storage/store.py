@@ -99,6 +99,32 @@ class JobRecord(_Record):
     status: str
     deadline: datetime | None
     created_at: datetime
+    gpu_seconds: float | None = None
+    cost_usd: float | None = None
+
+
+def _job_record(row: JobRow) -> JobRecord:
+    return JobRecord(
+        name=row.name,
+        kind=row.kind,
+        run_id=row.run_id,
+        nebius_job_id=row.nebius_job_id,
+        status=row.status,
+        deadline=row.deadline,
+        created_at=row.created_at,
+        gpu_seconds=row.gpu_seconds,
+        cost_usd=row.cost_usd,
+    )
+
+
+class ModelCallRecord(_Record):
+    step: str | None
+    role: str
+    model_id: str
+    prompt_version: str | None
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float | None
 
 
 class DailySpend(_Record):
@@ -312,17 +338,32 @@ class Store:
     async def get_job(self, name: str) -> JobRecord | None:
         async with self._session() as s:
             row = await s.scalar(select(JobRow).where(JobRow.name == name))
-            if row is None:
-                return None
-            return JobRecord(
-                name=row.name,
-                kind=row.kind,
-                run_id=row.run_id,
-                nebius_job_id=row.nebius_job_id,
-                status=row.status,
-                deadline=row.deadline,
-                created_at=row.created_at,
+            return None if row is None else _job_record(row)
+
+    async def list_jobs(self, run_id: str) -> list[JobRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(JobRow).where(JobRow.run_id == run_id).order_by(JobRow.id)
             )
+            return [_job_record(row) for row in rows]
+
+    async def list_model_calls(self, run_id: str) -> list[ModelCallRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(ModelCallRow).where(ModelCallRow.run_id == run_id).order_by(ModelCallRow.id)
+            )
+            return [
+                ModelCallRecord(
+                    step=row.step,
+                    role=row.role,
+                    model_id=row.model_id,
+                    prompt_version=row.prompt_version,
+                    tokens_in=row.tokens_in,
+                    tokens_out=row.tokens_out,
+                    cost_usd=row.cost_usd,
+                )
+                for row in rows
+            ]
 
     async def update_job(
         self,

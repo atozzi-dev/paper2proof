@@ -4,9 +4,11 @@ Judge only writes prose, which is discarded if it names any other verdict."""
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
+from app.bundle.build import BundleBuilder
 from app.domain.contracts import ExecManifest
 from app.domain.errors import P2PError
 from app.domain.events import EventType
@@ -33,6 +35,9 @@ from app.verdict.explanation import NOT_REPRODUCED_LABEL, contradicts, template_
 from app.verdict.limitations import limitations
 from app.verdict.results import Analysis
 
+log = logging.getLogger(__name__)
+BUNDLE_TIMEOUT_S = 180.0  # bucket reads and two KMS calls; the verdict is already out
+
 LABELS = {
     VerdictKind.REPRODUCED: "Reproduced",
     VerdictKind.REPRODUCED_AT_REDUCED_SCALE: "Reproduced at reduced scale",
@@ -53,10 +58,18 @@ class VerdictStep:
     name = StepName.VERDICT
 
     def __init__(
-        self, models: ModelClient, artifacts: ArtifactStore, *, config_path: Path = DEFAULT_PATH
+        self,
+        models: ModelClient,
+        artifacts: ArtifactStore,
+        *,
+        config_path: Path = DEFAULT_PATH,
+        bundler: BundleBuilder | None = None,
+        bundle_timeout_s: float = BUNDLE_TIMEOUT_S,
     ) -> None:
         self._models = models
         self._artifacts = artifacts
+        self._bundler = bundler
+        self._bundle_timeout_s = bundle_timeout_s
         self._config = load_verdict_config(config_path)
         self._config_sha = config_sha256(config_path)
 
@@ -86,6 +99,29 @@ class VerdictStep:
         except (P2PError, BudgetExceeded, KillSwitchActive):
             return None  # the verdict never depends on the Judge being available
         return completion.content
+
+    async def _bundle(self, ctx: RunContext) -> None:
+        """The Proof Bundle never decides anything, so it never fails the run: without one
+        the run still completes, with a warning (docs/specs/proof-bundle.md)."""
+        if self._bundler is None:
+            return
+        try:
+            outcome = await asyncio.wait_for(self._bundler.build(ctx), self._bundle_timeout_s)
+        except Exception as err:  # errors may quote bucket data: the type only, above DEBUG
+            log.warning(
+                "proof bundle not built: %s", type(err).__name__, extra={"run_id": ctx.run_id}
+            )
+            log.debug("proof bundle not built", exc_info=True, extra={"run_id": ctx.run_id})
+            await ctx.emit(
+                EventType.WARNING,
+                {"code": "BUNDLE_FAILED", "message": "the Proof Bundle could not be built"},
+            )
+            return
+        if not outcome.signed:
+            await ctx.emit(
+                EventType.WARNING,
+                {"code": "BUNDLE_UNSIGNED", "message": "the Proof Bundle is not signed"},
+            )
 
     async def run(self, ctx: RunContext) -> StepResult:
         stored = await self._json(await output_of(ctx, StepName.ANALYZING))
@@ -121,6 +157,20 @@ class VerdictStep:
             self._config_sha,
             explanation,
         )
+        await asyncio.to_thread(
+            self._artifacts.put_json,
+            f"runs/{ctx.run_id}/verdict.json",
+            {  # what the Proof Bundle records about the decision
+                "claim": claim.model_dump(mode="json"),
+                "attempt": manifest.attempt,
+                "verdict": verdict.model_dump(mode="json"),
+                "measurements": analysis.measurements.model_dump(mode="json"),
+                "config": self._config.model_dump(mode="json"),
+                "config_sha256": self._config_sha,
+                "limitations": limits,
+                "explanation_md": explanation,
+            },
+        )
         await ctx.emit(
             EventType.VERDICT_READY,
             {
@@ -129,4 +179,5 @@ class VerdictStep:
                 "explanation_md": explanation,
             },
         )
+        await self._bundle(ctx)
         return StepResult(next=RunStatus.COMPLETED)

@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 *.pem
+!docs/bundle-public-key.pem
 *.key
 *credentials*.json
 

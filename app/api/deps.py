@@ -9,6 +9,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel
 
 from app.api.ratelimit import RateLimiter
+from app.bundle.store import BundleStore
 from app.orchestrator.budget import Budget, BudgetLimits
 from app.settings import Settings
 from app.storage.store import RunRecord, Store
@@ -27,6 +28,7 @@ class AppState:
     budget: Budget
     limits: BudgetLimits
     submit: Callable[[str], Awaitable[object]]  # Orchestrator.submit
+    bundles: BundleStore | None = None  # None: bundles are not served (404)
     models_ready: bool = False
     replication_ready: bool = True  # set by the prod start script check (Litestream)
     draining: bool = False

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.types import Receive, Scope, Send
 
@@ -20,6 +20,7 @@ from app.api.deps import (
     visible_run,
 )
 from app.api.sse import event_stream, replay_stream
+from app.bundle.store import PRESIGN_TTL_S, download_name
 from app.domain.ids import new_run_id
 from app.domain.models import Claim, ErrorCode, RunStatus, StepName, Verdict
 
@@ -224,5 +225,25 @@ async def cancel(run_id: str, request: Request) -> Response:
 
 @router.get("/api/runs/{run_id}/bundle")
 async def bundle(run_id: str, request: Request) -> Response:
-    await visible_run(request, run_id)
-    raise HTTPException(404, "no bundle for this run yet")  # presigned redirect lands in A-26
+    """A short presigned URL when the store can make one; the archive itself from the local
+    dev store. 404 until the bundle is built (docs/specs/proof-bundle.md)."""
+    run = await visible_run(request, run_id)
+    bundles = get_state(request).bundles
+    if bundles is None:
+        raise HTTPException(404, "no bundle for this run yet")
+    url = await bundles.presigned_url(run.id, PRESIGN_TTL_S)
+    if url is not None:
+        if not await bundles.exists(run.id):  # a presigned URL never checks existence
+            raise HTTPException(404, "no bundle for this run yet")
+        return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
+    data = await bundles.get(run.id)
+    if data is None:
+        raise HTTPException(404, "no bundle for this run yet")
+    return Response(
+        data,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name(run.id)}"',
+            "Cache-Control": "no-store",
+        },
+    )
