@@ -1,0 +1,536 @@
+"""JobBackend on Nebius AI Cloud: Serverless Jobs, per-run buckets and the egress gateway VM, all
+in project p2p-sandbox with the sa-job-launcher identity (docs/specs/execution-contracts.md §8-§9).
+
+Every Nebius SDK call of the execution plane is in this module, behind small client protocols, so
+the fixes after the spikes stay here. Assumptions not yet verified are marked:
+[S-4] job API semantics, [S-5] gateway and subnets, [S-11] buckets and mounts.
+"""
+
+import asyncio
+import contextlib
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Protocol
+
+from nebius.aio.service_error import RequestError
+from nebius.api.nebius.ai.v1 import (
+    CancelJobRequest,
+    CreateJobRequest,
+    FollowsSpotPriceSpec,
+    GetJobByNameRequest,
+    GetJobRequest,
+    Job,
+    JobServiceClient,
+    JobStatus,
+    ListJobsRequest,
+    ListJobsResponse,
+    PricingModelSpec,
+)
+from nebius.api.nebius.ai.v1 import JobSpec as SdkJobSpec
+from nebius.api.nebius.common.v1 import ResourceMetadata
+from nebius.api.nebius.compute.v1 import (
+    DiskSpec,
+    GetInstanceRequest,
+    Instance,
+    InstanceServiceClient,
+    InstanceStatus,
+    StartInstanceRequest,
+    StopInstanceRequest,
+)
+from nebius.api.nebius.storage.v1 import (
+    Bucket,
+    BucketServiceClient,
+    BucketSpec,
+    BucketStatus,
+    CreateBucketRequest,
+    DeleteBucketRequest,
+    GetBucketByNameRequest,
+    ListBucketsRequest,
+    ListBucketsResponse,
+)
+from nebius.sdk import SDK
+from pydantic import SecretStr
+
+from app.execution.backend import JobHandle, JobSpec, JobState
+from app.execution.naming import bucket_name
+from app.execution.s3 import S3Client, S3RunStorage, empty_bucket, make_s3_client
+
+log = logging.getLogger(__name__)
+
+GIB = 1024**3
+PLATFORM_TIMEOUT = timedelta(hours=1)  # the minimum the platform allows (§8)
+RUN_BUCKET_PREFIX = "p2p-run-"
+JOB_PREFIX = "p2p-"
+RUN_BUCKET_MAX_BYTES = 200 * GIB  # caps what untrusted code can store in a run bucket [S-11]
+PAGE_SIZE = 100
+MAX_PAGES = 1000  # a listing that never ends is a bug, not a project
+
+
+class JobBackendError(RuntimeError):
+    """A Nebius request failed in a way the orchestrator can't recover by retrying."""
+
+
+class GatewayUnavailable(JobBackendError):
+    """The egress gateway VM could not be brought to RUNNING."""
+
+
+def _next_token(token: str, seen: set[str], what: str) -> str:
+    if token in seen or len(seen) >= MAX_PAGES:
+        raise JobBackendError(f"{what}: listing does not end (page token repeated or too many)")
+    seen.add(token)
+    return token
+
+
+# --- SDK seams: the subset of each service client this module uses --------------------------
+
+
+class Operation(Protocol):
+    @property
+    def resource_id(self) -> str: ...
+    def successful(self) -> bool: ...
+    def done(self) -> bool: ...
+    def wait(self) -> Awaitable[None]: ...
+
+
+class JobsClient(Protocol):
+    def get(self, request: GetJobRequest) -> Awaitable[Job]: ...
+    def get_by_name(self, request: GetJobByNameRequest) -> Awaitable[Job]: ...
+    def list(self, request: ListJobsRequest) -> Awaitable[ListJobsResponse]: ...
+    def create(self, request: CreateJobRequest) -> Awaitable[Operation]: ...
+    def cancel(self, request: CancelJobRequest) -> Awaitable[Operation]: ...
+
+
+class BucketsClient(Protocol):
+    def get_by_name(self, request: GetBucketByNameRequest) -> Awaitable[Bucket]: ...
+    def list(self, request: ListBucketsRequest) -> Awaitable[ListBucketsResponse]: ...
+    def create(self, request: CreateBucketRequest) -> Awaitable[Operation]: ...
+    def delete(self, request: DeleteBucketRequest) -> Awaitable[Operation]: ...
+
+
+class InstancesClient(Protocol):
+    def get(self, request: GetInstanceRequest) -> Awaitable[Instance]: ...
+    def start(self, request: StartInstanceRequest) -> Awaitable[Operation]: ...
+    def stop(self, request: StopInstanceRequest) -> Awaitable[Operation]: ...
+
+
+# gRPC status codes by name (grpc ships no type stubs).
+NOT_FOUND, ALREADY_EXISTS, FAILED_PRECONDITION = (
+    "NOT_FOUND",
+    "ALREADY_EXISTS",
+    "FAILED_PRECONDITION",
+)
+
+
+def _code(err: RequestError) -> str:
+    return str(err.status.code.name)
+
+
+def _aware(value: datetime | None) -> datetime:
+    if value is None:  # never seen in practice; "now" keeps the reaper from acting on it early
+        return datetime.now(UTC)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+# --- JobSpec translation ----------------------------------------------------------------------
+
+_STATES: dict[JobStatus.State, JobState] = {
+    JobStatus.State.PROVISIONING: JobState.PENDING,
+    JobStatus.State.IMAGE_PULLING: JobState.STARTING,
+    JobStatus.State.STARTING: JobState.STARTING,
+    JobStatus.State.RUNNING: JobState.RUNNING,
+    JobStatus.State.CANCELLING: JobState.RUNNING,  # still running until CANCELLED
+    JobStatus.State.COMPLETED: JobState.SUCCEEDED,
+    JobStatus.State.FAILED: JobState.FAILED,
+    JobStatus.State.ERROR: JobState.FAILED,
+    JobStatus.State.CANCELLED: JobState.CANCELLED,
+}  # [S-4] how a preempted job ends; DELETING and unknown values map to UNKNOWN (not terminal)
+
+
+def job_state(job: Job) -> JobState:
+    return _STATES.get(job.status.state, JobState.UNKNOWN)
+
+
+_MODES = {"ro": SdkJobSpec.VolumeMount.Mode.READ_ONLY, "rw": SdkJobSpec.VolumeMount.Mode.READ_WRITE}
+
+
+def to_sdk_job_spec(spec: JobSpec) -> SdkJobSpec:
+    """Every JobSpec field, and nothing that widens the job: no command or args override (the
+    image ENTRYPOINT is the runner), no public IP, ports, SSH keys or registry/S3 credentials,
+    no platform restarts (retries are the orchestrator's)."""
+    spec = JobSpec.model_validate(spec.model_dump())  # never trust a model_construct'ed spec
+    sdk = SdkJobSpec(
+        image=spec.image_digest_ref,  # pulled with the job identity, no registry login [S-5]
+        platform=spec.platform,
+        preset=spec.preset,
+        disk=SdkJobSpec.DiskSpec(
+            size_bytes=spec.disk_gib * GIB, type=DiskSpec.DiskType.NETWORK_SSD
+        ),  # [S-4] disk type
+        subnet_id=spec.subnet_id,
+        public_ip=False,
+        volumes=[
+            # Mounted by bucket name with the job's own identity [S-11].
+            SdkJobSpec.VolumeMount(
+                source=v.source, container_path=v.mount_path, mode=_MODES[v.mode]
+            )
+            for v in spec.volumes
+        ],
+        injected_files=[
+            SdkJobSpec.FileInjection(container_path=path, content=content)
+            for path, content in spec.inject_files.items()
+        ],
+        environment_variables=[
+            SdkJobSpec.EnvironmentVariable(name=name, value=value)
+            for name, value in spec.env.items()
+        ],
+        preemptible=spec.preemptible,
+        restart_attempts=0,  # restart policy "never" [S-4]
+        timeout=PLATFORM_TIMEOUT,
+    )
+    if spec.preemptible:  # the CLI pairs --preemptible with --follows-spot-price [S-4]
+        sdk.pricing_model = PricingModelSpec(follows_spot_price=FollowsSpotPriceSpec())
+    check_no_credentials(sdk)
+    return sdk
+
+
+def check_no_credentials(sdk: SdkJobSpec) -> None:
+    """Invariant 4 in code, not only in tests: no S3 key on a mount, no secret reference in the
+    environment, no registry credentials. If S-11 shows mounts need a key, it must be a
+    per-bucket key, never sa-job-launcher's (editor on the whole sandbox project)."""
+    registry = sdk.registry_credentials
+    if registry.username or registry.password or registry.mysterybox_secret_version:
+        raise ValueError("jobs never receive credentials: registry credentials set")
+    for volume in sdk.volumes:
+        if volume.s3_config is not None:  # allowlist: we never set it, whatever it may carry
+            raise ValueError(f"jobs never receive credentials: mount {volume.container_path}")
+    for variable in sdk.environment_variables:
+        if variable.mysterybox_secret.secret_id or variable.mysterybox_secret.version_id:
+            raise ValueError(f"jobs never receive credentials: env {variable.name}")
+
+
+# --- the backend ------------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class NebiusJobBackend:
+    def __init__(
+        self,
+        *,
+        jobs: JobsClient,
+        buckets: BucketsClient,
+        instances: InstancesClient,
+        s3: S3Client,
+        project_id: str,
+        gateway_instance_id: str | None,
+        clock: Callable[[], datetime] = _utcnow,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        create_wait_s: float = 30.0,
+        op_timeout_s: float = 300.0,
+        gateway_poll_s: float = 5.0,
+        gateway_timeout_s: float = 300.0,
+        gateway_settle_s: float = 30.0,
+    ) -> None:
+        self._jobs = jobs
+        self._buckets = buckets
+        self._instances = instances
+        self._s3 = s3
+        self._project = project_id
+        self._gateway = gateway_instance_id
+        self._clock = clock
+        self._sleep = sleep
+        self._create_wait_s = create_wait_s
+        self._op_timeout_s = op_timeout_s
+        self._gateway_poll_s = gateway_poll_s
+        self._gateway_timeout_s = gateway_timeout_s
+        self._gateway_settle_s = gateway_settle_s  # proxy and nftables up after boot [S-5]
+        self._gateway_lock = asyncio.Lock()
+        self._gateway_active_at = clock()  # after a restart, wait a full idle period
+
+    @classmethod
+    def from_sdk(
+        cls, sdk: SDK, s3: S3Client, *, project_id: str, gateway_instance_id: str | None
+    ) -> "NebiusJobBackend":
+        return cls(
+            jobs=JobServiceClient(sdk),
+            buckets=BucketServiceClient(sdk),
+            instances=InstanceServiceClient(sdk),
+            s3=s3,
+            project_id=project_id,
+            gateway_instance_id=gateway_instance_id,
+        )
+
+    async def _finish(self, op: Operation, what: str) -> None:
+        try:
+            await asyncio.wait_for(op.wait(), self._op_timeout_s)
+        except TimeoutError as err:
+            raise JobBackendError(f"{what}: operation still running") from err
+        if not op.successful():
+            raise JobBackendError(f"{what}: operation failed")
+
+    # --- jobs ---------------------------------------------------------------------------------
+
+    async def _job_by_name(self, name: str) -> Job | None:
+        try:
+            return await self._jobs.get_by_name(
+                GetJobByNameRequest(parent_id=self._project, name=name)
+            )
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return None
+            raise
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        existing = await self._job_by_name(spec.name)
+        if existing is not None:
+            return JobHandle(name=spec.name, nebius_id=existing.metadata.id)
+        request = CreateJobRequest(
+            metadata=ResourceMetadata(parent_id=self._project, name=spec.name),
+            spec=to_sdk_job_spec(spec),
+        )
+        try:
+            op = await self._jobs.create(request)
+        except RequestError as err:
+            if _code(err) != ALREADY_EXISTS:
+                raise
+            existing = await self._job_by_name(spec.name)  # a concurrent submit won
+            if existing is None:
+                raise JobBackendError(f"{spec.name}: exists but can't be read") from err
+            return JobHandle(name=spec.name, nebius_id=existing.metadata.id)
+        # [S-4] whether the create operation ends at creation or with the job: wait a little
+        # for an early failure, then go on with the id (status() polls the job itself).
+        try:
+            await asyncio.wait_for(op.wait(), self._create_wait_s)
+        except TimeoutError:
+            pass
+        else:
+            if not op.successful():
+                raise JobBackendError(f"{spec.name}: job creation failed")
+        job_id = op.resource_id
+        if not job_id:
+            found = await self._job_by_name(spec.name)
+            if found is None:
+                raise JobBackendError(f"{spec.name}: created but not found")
+            job_id = found.metadata.id
+        log.info("job submitted", extra={"job": spec.name, "nebius_id": job_id})
+        return JobHandle(name=spec.name, nebius_id=job_id)
+
+    async def status(self, handle: JobHandle) -> JobState:
+        try:
+            job = await self._jobs.get(GetJobRequest(id=handle.nebius_id))
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return JobState.UNKNOWN
+            raise
+        if job.metadata.name != handle.name:
+            raise JobBackendError(f"job {handle.nebius_id} does not match {handle.name}")
+        return job_state(job)
+
+    async def cancel(self, handle: JobHandle) -> None:
+        try:
+            op = await self._jobs.cancel(CancelJobRequest(id=handle.nebius_id))
+        except RequestError as err:
+            if _code(err) in (NOT_FOUND, FAILED_PRECONDITION):
+                return  # gone, or already finished
+            raise
+        with contextlib.suppress(TimeoutError):  # callers poll status() until it is terminal
+            await asyncio.wait_for(op.wait(), self._op_timeout_s)
+        log.info("job cancelled", extra={"job": handle.name})
+
+    async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]:
+        found: list[tuple[JobHandle, JobState, datetime]] = []
+        token, seen = "", set[str]()
+        while True:
+            page = await self._jobs.list(
+                ListJobsRequest(parent_id=self._project, page_size=PAGE_SIZE, page_token=token)
+            )
+            for job in page.items:
+                if job.metadata.name.startswith(prefix):
+                    handle = JobHandle(name=job.metadata.name, nebius_id=job.metadata.id)
+                    found.append((handle, job_state(job), _aware(job.metadata.created_at)))
+            token = page.next_page_token
+            if not token:
+                return found
+            _next_token(token, seen, "jobs")
+
+    # --- buckets ------------------------------------------------------------------------------
+
+    async def _bucket_by_name(self, name: str) -> Bucket | None:
+        try:
+            return await self._buckets.get_by_name(
+                GetBucketByNameRequest(parent_id=self._project, name=name)
+            )
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return None
+            raise
+
+    @staticmethod
+    def _usable(bucket: Bucket) -> str:
+        if bucket.status.state == BucketStatus.State.SCHEDULED_FOR_DELETION:
+            raise JobBackendError(f"bucket {bucket.metadata.name} is scheduled for deletion")
+        return bucket.metadata.name
+
+    async def ensure_run_bucket(self, run_id: str) -> str:
+        name = bucket_name(run_id)
+        existing = await self._bucket_by_name(name)
+        if existing is not None:
+            return self._usable(existing)
+        request = CreateBucketRequest(
+            metadata=ResourceMetadata(parent_id=self._project, name=name),
+            spec=BucketSpec(max_size_bytes=RUN_BUCKET_MAX_BYTES),
+        )
+        try:
+            op = await self._buckets.create(request)
+        except RequestError as err:
+            if _code(err) != ALREADY_EXISTS:
+                raise
+            existing = await self._bucket_by_name(name)
+            if existing is None:
+                raise JobBackendError(f"bucket {name}: exists but can't be read") from err
+            return self._usable(existing)
+        await self._finish(op, f"bucket {name}")
+        log.info("run bucket created", extra={"bucket": name})
+        return name
+
+    async def delete_run_bucket(self, run_id: str) -> None:
+        """Empty the bucket through S3, then delete it. Callers decide when this is allowed
+        (the reaper: run terminal, bundle stored, no job running)."""
+        name = bucket_name(run_id)
+        bucket = await self._bucket_by_name(name)
+        if bucket is None or bucket.status.state == BucketStatus.State.SCHEDULED_FOR_DELETION:
+            return
+        if not await empty_bucket(self._s3, name):
+            raise JobBackendError(f"bucket {name} is not empty yet: deletion resumes later")
+        try:
+            op = await self._buckets.delete(DeleteBucketRequest(id=bucket.metadata.id))
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return
+            raise
+        await self._finish(op, f"bucket {name} deletion")  # [S-11] soft delete and purge delay
+        log.info("run bucket deleted", extra={"bucket": name})
+
+    async def list_run_buckets(self) -> list[tuple[str, datetime]]:
+        found: list[tuple[str, datetime]] = []
+        token, seen = "", set[str]()
+        while True:
+            page = await self._buckets.list(
+                ListBucketsRequest(parent_id=self._project, page_size=PAGE_SIZE, page_token=token)
+            )
+            for bucket in page.items:
+                name = bucket.metadata.name
+                deleting = bucket.status.state == BucketStatus.State.SCHEDULED_FOR_DELETION
+                if name.startswith(RUN_BUCKET_PREFIX) and not deleting:
+                    found.append((name, _aware(bucket.metadata.created_at)))
+            token = page.next_page_token
+            if not token:
+                return found
+            _next_token(token, seen, "buckets")
+
+    # --- gateway ------------------------------------------------------------------------------
+
+    async def _gateway_state(self, instance_id: str) -> InstanceStatus.InstanceState:
+        instance = await self._instances.get(GetInstanceRequest(id=instance_id))
+        return instance.status.state
+
+    async def ensure_gateway_up(self) -> None:
+        """Start the gateway VM if it is stopped and wait until it runs. Fail-closed: jobs in the
+        provision/exec subnets have no egress without it [S-5]."""
+        if self._gateway is None:
+            return  # not managed on demand (always on)
+        async with self._gateway_lock:
+            self._gateway_active_at = self._clock()
+            deadline = self._clock() + timedelta(seconds=self._gateway_timeout_s)
+            started = False
+            vm = InstanceStatus.InstanceState
+            while True:
+                state = await self._gateway_state(self._gateway)
+                if state == vm.RUNNING:
+                    break
+                if state in (vm.ERROR, vm.DELETING, vm.UNSPECIFIED):
+                    raise GatewayUnavailable(f"gateway VM is {state.name}")
+                if state == vm.STOPPED and not started:
+                    await self._finish(
+                        await self._instances.start(StartInstanceRequest(id=self._gateway)),
+                        "gateway start",
+                    )
+                    started = True
+                    log.info("gateway VM starting")
+                    continue
+                if self._clock() >= deadline:
+                    raise GatewayUnavailable(f"gateway VM not RUNNING (still {state.name})")
+                await self._sleep(self._gateway_poll_s)
+            if started:  # RUNNING is the VM, not yet squid and nftables from cloud-init [S-5]
+                await self._sleep(self._gateway_settle_s)
+            self._gateway_active_at = self._clock()
+
+    async def gateway_idle_check(self, idle_minutes: int = 30) -> bool:
+        """Stop the gateway VM when no p2p job has been running and nobody asked for it for
+        `idle_minutes`. The caller (the reaper) also checks that no run is in a step that needs
+        it. True when it stopped the VM."""
+        if self._gateway is None:
+            return False
+        # Listed before the lock, so a slow listing never holds up ensure_gateway_up; one that
+        # runs meanwhile moves _gateway_active_at, which is read under the lock.
+        jobs = await self.list_jobs(JOB_PREFIX)
+        async with self._gateway_lock:
+            now = self._clock()
+            if any(not state.is_terminal for _, state, _ in jobs):
+                self._gateway_active_at = now
+                return False
+            if now - self._gateway_active_at < timedelta(minutes=idle_minutes):
+                return False
+            if await self._gateway_state(self._gateway) != InstanceStatus.InstanceState.RUNNING:
+                return False
+            await self._finish(
+                await self._instances.stop(StopInstanceRequest(id=self._gateway)), "gateway stop"
+            )
+            log.info("gateway VM stopped (idle)", extra={"idle_minutes": idle_minutes})
+            return True
+
+
+# --- composition --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NebiusExecution:
+    backend: NebiusJobBackend
+    storage: S3RunStorage
+
+
+def _endpoint_url(host: str) -> str:
+    return host if host.startswith(("https://", "http://")) else f"https://{host}"
+
+
+def build_nebius_execution(
+    *,
+    project_id: str,
+    s3_endpoint: str,
+    region: str,
+    s3_key_id: str,
+    s3_secret: SecretStr,
+    auth_key_file: Path,
+    gateway_instance_id: str | None,
+) -> NebiusExecution:
+    """The JobBackend and RunStorage of prod, with the sa-job-launcher identity: the Nebius SDK
+    authenticates with its authorized key file, S3 with its access key. Every value comes from
+    the composition root (settings); nothing is read from the environment here."""
+    required = {"project_id": project_id, "s3_endpoint": s3_endpoint, "s3_key_id": s3_key_id}
+    missing = [name for name, value in required.items() if not value]
+    if not s3_secret.get_secret_value():
+        missing.append("s3_secret")
+    if not str(auth_key_file) or str(auth_key_file) == "." or not auth_key_file.is_file():
+        missing.append("auth_key_file (an existing file)")
+    if missing:
+        raise ValueError(f"Nebius execution needs: {', '.join(missing)}")
+    s3 = make_s3_client(_endpoint_url(s3_endpoint), region, s3_key_id, s3_secret)
+    sdk = SDK(credentials_file_name=auth_key_file, user_agent_prefix="paper2proof")
+    backend = NebiusJobBackend.from_sdk(
+        sdk, s3, project_id=project_id, gateway_instance_id=gateway_instance_id
+    )
+    return NebiusExecution(backend=backend, storage=S3RunStorage(s3))
