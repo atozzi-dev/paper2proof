@@ -1,5 +1,6 @@
 """Persistence API used by the orchestrator, API and reaper. One writer process (the endpoint)."""
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
@@ -346,6 +347,41 @@ class Store:
                 select(JobRow).where(JobRow.run_id == run_id).order_by(JobRow.id)
             )
             return [_job_record(row) for row in rows]
+
+    async def unsettled_jobs(self) -> list[JobRecord]:
+        """Jobs whose final state and cost were never written (the reaper settles them)."""
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(JobRow)
+                .where(JobRow.status.not_in(TERMINAL_STEP_STATUSES))
+                .order_by(JobRow.id)
+            )
+            return [_job_record(row) for row in rows]
+
+    async def settle_job(
+        self,
+        name: str,
+        status: str,
+        *,
+        cost_usd: float,
+        gpu_seconds: float | None,
+        ledger: Sequence[tuple[str | None, date, str, float]],
+    ) -> bool:
+        """Write a job's final state and cost together with its ledger entries (run_id, day,
+        kind, amount), in one transaction and only once: a compare-and-set on the row's status,
+        False when it was settled already. The reaper's charge for unwatched jobs."""
+        async with self._session() as s, s.begin():
+            moved = await self._cas(
+                s,
+                update(JobRow)
+                .where(JobRow.name == name, JobRow.status.not_in(TERMINAL_STEP_STATUSES))
+                .values(status=status, cost_usd=cost_usd, gpu_seconds=gpu_seconds),
+            )
+            if not moved:
+                return False
+            for run_id, day, kind, amount in ledger:
+                s.add(LedgerEntry(run_id=run_id, day=day, kind=kind, amount=amount))
+            return True
 
     async def list_model_calls(self, run_id: str) -> list[ModelCallRecord]:
         async with self._session() as s:

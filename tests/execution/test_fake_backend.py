@@ -55,6 +55,23 @@ async def test_run_bucket_is_idempotent() -> None:
     assert backend.buckets == set()
 
 
+async def test_gateway_idle_check_reports_a_stop() -> None:
+    backend = FakeJobBackend()
+    await backend.ensure_gateway_up()
+    assert await backend.gateway_idle_check() is True
+    assert await backend.gateway_idle_check() is False
+
+
+async def test_list_run_buckets_reports_creation_time() -> None:
+    backend = FakeJobBackend()
+    name = await backend.ensure_run_bucket(RUN)
+    [(listed, created)] = await backend.list_run_buckets()
+    assert listed == name
+    assert created.tzinfo is not None
+    await backend.ensure_run_bucket(RUN)  # get-by-name: the creation time is kept
+    assert await backend.list_run_buckets() == [(name, created)]
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

@@ -36,6 +36,22 @@ Collected during development. Consolidated into the Devpost feedback field at su
 
 ## Terraform provider, CLI, SDK
 
+### 2026-10-16 — Python SDK can't be constructed on Windows without an undeclared package
+- **Context:** A-20, unit tests of the Serverless Jobs / Object Storage / Compute adapter built on `nebius` 0.6.24, on a Windows dev box.
+- **What happened:** `nebius.sdk.SDK(credentials_file_name=...)` raises at construction time, before any request: `RuntimeError: Install 'certifi-win32' to access Windows certificates` (`nebius/base/tls_certificates.py:46`). `certifi-win32` is not a declared dependency, not even as a Windows-only marker.
+- **Expected:** constructing the SDK works on every supported OS (falling back to `certifi`), or the dependency is declared with a `sys_platform == "win32"` marker and the requirement is in the SDK README.
+- **Impact:** ~10 min; the wiring test patches the `SDK` class (prod runs on Linux).
+- **Suggestion:** fall back to `certifi.where()` on Windows, or declare `certifi-win32; sys_platform == "win32"`.
+- **Severity:** minor
+
+### 2026-10-16 — SDK message types and service clients are easy to test against (praise)
+- **Context:** A-20, mocking the SDK without network access.
+- **What happened:** real message types (`Job`, `JobSpec`, `Bucket`, `Instance`, `ListJobsResponse`) build directly in tests; service clients (`JobServiceClient`, `BucketServiceClient`, `InstanceServiceClient`) satisfy small `typing.Protocol` seams under `mypy --strict`; `RequestError(RequestStatusExtended(code=NOT_FOUND, ...))` is easy to raise in fakes.
+- **Expected:** —
+- **Impact:** the adapter is fully unit-tested with fake clients that speak the real types.
+- **Suggestion:** document this testing pattern (fake client + real messages) in the SDK README.
+- **Severity:** praise
+
 ## Nemotron models (Nano, Super, Ultra, Nano Omni)
 
 ## NemoClaw / OpenShell

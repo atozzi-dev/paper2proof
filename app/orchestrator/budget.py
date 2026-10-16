@@ -193,11 +193,18 @@ class Budget:
                 reservation.run_id, reservation.day, reservation.kind.value, actual
             )
             if reservation.kind is SpendKind.CLOUD_USD:
-                spent = await self._store.ledger_total(
-                    SpendKind.CLOUD_USD.value, day=reservation.day
-                )
-                if spent >= self._limits.global_.cloud_usd_per_day - EPSILON:
-                    await self._store.set_kill_switch(reservation.day, True)
+                await self._trip_if_over(reservation.day)
+
+    async def enforce_daily_cloud_cap(self, day: date) -> None:
+        """Trip the kill switch when cloud spend written without a reservation (the reaper
+        settling a job nobody watched) reached the daily cap."""
+        async with self._lock:
+            await self._trip_if_over(day)
+
+    async def _trip_if_over(self, day: date) -> None:
+        spent = await self._store.ledger_total(SpendKind.CLOUD_USD.value, day=day)
+        if spent >= self._limits.global_.cloud_usd_per_day - EPSILON:
+            await self._store.set_kill_switch(day, True)
 
     async def run_spend(self, run_id: str, kind: SpendKind) -> float:
         return await self._store.ledger_total(kind.value, run_id=run_id)

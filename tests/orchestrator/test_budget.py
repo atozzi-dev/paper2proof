@@ -193,3 +193,15 @@ async def test_spend_is_attributed_to_the_utc_day(store: Store) -> None:
     budget = _budget(store, now=late_evening_utc_minus_2)
     reservation = await budget.check_and_reserve(RUN, SpendKind.CLOUD_USD, 1.0)
     assert reservation.day == date(2026, 10, 21)
+
+
+async def test_enforce_daily_cloud_cap_trips_the_kill_switch(store: Store) -> None:
+    """Spend written outside a reservation (the reaper settling a job) still trips the switch."""
+    await _runs(store)
+    budget = _budget(store)
+    await store.add_ledger_entry(RUN, NOW.date(), SpendKind.CLOUD_USD.value, 14.0)
+    await budget.enforce_daily_cloud_cap(NOW.date())
+    assert not await budget.kill_switch_active()
+    await store.add_ledger_entry(RUN, NOW.date(), SpendKind.CLOUD_USD.value, 2.0)
+    await budget.enforce_daily_cloud_cap(NOW.date())
+    assert await budget.kill_switch_active()

@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.14",
+    "boto3>=1.35,<2",
     "cryptography>=43",
     "defusedxml>=0.7.1",
     "fastapi>=0.115",
@@ -31,7 +32,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "actionlint-py>=1.7.4",
+    "boto3-stubs[s3]>=1.35",
     "hypothesis>=6.115",
+    "moto[s3]>=5.0",
     "mypy>=1.13",
     "pre-commit>=4.0",
     "pytest>=8.3",
