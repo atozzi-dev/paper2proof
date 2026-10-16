@@ -19,6 +19,11 @@ terraform {
   }
 }
 
+locals {
+  # Regional Object Storage endpoint (NEBIUS_STORAGE_HOST), allowlisted on the egress gateway.
+  storage_host = "storage.${var.region}.nebius.cloud"
+}
+
 provider "nebius" {
   default_labels = {
     app        = "paper2proof"
@@ -39,6 +44,22 @@ module "network_sandbox" {
   provision_cidr = var.provision_cidr
   exec_cidr      = var.exec_cidr
   gateway_cidr   = var.gateway_cidr
+}
+
+# The only egress of provision and exec (A-04). It carries the allocation their routes point at.
+module "egress_gateway" {
+  source = "../../modules/egress_gateway"
+
+  project_id            = var.sandbox_project_id
+  network_id            = module.network_sandbox.network_id
+  subnet_id             = module.network_sandbox.subnet_ids.gateway
+  private_allocation_id = module.network_sandbox.gateway_allocation_id
+  private_ip            = module.network_sandbox.gateway_private_ip
+  provision_cidr        = module.network_sandbox.subnet_cidrs.provision
+  exec_cidr             = module.network_sandbox.subnet_cidrs.exec
+  storage_host          = local.storage_host
+  registry_host         = module.registry_sandbox.host
+  allowlist_yaml        = file("${path.root}/../../../../config/allowlist.yaml")
 }
 
 module "storage" {
