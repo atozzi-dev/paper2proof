@@ -20,7 +20,11 @@ the Litestream replica on the `p2p-state` bucket.
 
 Required environment:
 - **Secrets**, from the Nebius secret named by `P2P_SECRET_NAME`: `NEBIUS_API_KEY`,
-  `TAVILY_API_KEY`, `SESSION_KEY`, `ADMIN_TOKEN`, `RUNTIME_S3_KEY_ID`, `RUNTIME_S3_SECRET`.
+  `TAVILY_API_KEY`, `SESSION_KEY`, `ADMIN_TOKEN`, `RUNTIME_S3_KEY_ID`, `RUNTIME_S3_SECRET`,
+  `RUNTIME_AUTH_KEY` (the authorized key JSON of sa-api-runtime: KMS signing),
+  `JOB_LAUNCHER_AUTH_KEY` (of sa-job-launcher: jobs, buckets, gateway), `JOB_LAUNCHER_S3_KEY_ID`,
+  `JOB_LAUNCHER_S3_SECRET`. The app writes the two authorized keys owner-only to
+  `/var/lib/p2p/keys` on the ephemeral container disk, because the Nebius SDK reads a file.
 - **Settings**, from `deploy/prod.env`, whose template is `deploy/prod.env.example`. Only those
   keys are accepted.
 
@@ -28,8 +32,10 @@ Required environment:
 really runs under litestream. It also reports the `commit` baked into the image at build time
 (`--build-arg BUILD_COMMIT`, also the `org.opencontainers.image.revision` label).
 
-`P2P_ENV=prod` refuses to start until the Nebius job backend and the S3 storage (A-20) are wired
-in, and without `P2P_BUNDLE_KEY_ID`.
+`P2P_ENV=prod` refuses to start when a setting or secret above is missing, with
+`SMOKE_EXECUTOR=local`, or when model routing fails. With everything in place it runs the Nebius
+job backend (sa-job-launcher), the S3 storage (sa-job-launcher for run buckets, sa-api-runtime
+for the control bucket), KMS bundle signing and one reaper task.
 
 ## Deploying
 
@@ -82,7 +88,8 @@ The script:
 9. Does the URL change after a recreate or a stop/start?
 10. Are endpoint names unique, and does `list` paginate? (The script refuses a listing with a
     next page.)
-11. Precondition: prod startup needs A-20 (the Nebius adapters).
+11. The SDK authorized keys from the env secrets: the app writes them to `/var/lib/p2p/keys`,
+    and the sa-job-launcher identity can list jobs from inside the endpoint.
 12. The real field names in `endpoint get` for the image (`spec.image`?), the URL
     (`status.public_endpoints`) and the state (`status.state`, value `STOPPED`?), so the
     rollback target, the URL and the stop wait can be relied on.

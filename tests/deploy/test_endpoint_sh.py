@@ -127,6 +127,8 @@ def test_a_new_endpoint_is_created_by_digest_with_secrets_by_name(tmp_path: Path
     assert "--env P2P_ENV=prod,S3_REGION=eu-north1,P2P_STATE_BUCKET=p2p-state" in create
     assert "P2P_DB_BOOTSTRAP" not in create
     assert "NEBIUS_API_KEY=p2p-secrets" in create and "ADMIN_TOKEN=p2p-secrets" in create
+    assert "JOB_LAUNCHER_AUTH_KEY=p2p-secrets" in create
+    assert "RUNTIME_AUTH_KEY=p2p-secrets" in create
     assert all("--parent-id project-control" in c for c in _nebius(calls, "list"))
     assert "ready at https://p2p-api.endpoints.example" in done.stdout
 

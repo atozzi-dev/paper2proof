@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     runtime_s3_secret: SecretStr | None = None
     p2p_control_bucket: str | None = None  # control-plane artifacts and Proof Bundles
     nebius_sandbox_project_id: str | None = None
+    # Job launching (sa-job-launcher): SDK authorized key (JSON, or a file in dev/WSL) and the
+    # S3 key for the per-run buckets
+    job_launcher_auth_key: SecretStr | None = None
+    job_launcher_auth_key_file: Path | None = None
+    job_launcher_s3_key_id: SecretStr | None = None
+    job_launcher_s3_secret: SecretStr | None = None
+    gateway_instance_id: str | None = None  # None: the gateway is always on (not managed)
+    # Bundle signing in KMS as sa-api-runtime: SDK authorized key (JSON, or a file)
+    runtime_auth_key: SecretStr | None = None
+    runtime_auth_key_file: Path | None = None
     # Execution plane (infra outputs and image digests from the deploy, required in prod;
     # checked by app.main.execution_config)
     p2p_provisioner_image: str | None = None

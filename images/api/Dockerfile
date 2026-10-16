@@ -32,6 +32,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     P2P_BUILD_COMMIT=$BUILD_COMMIT \
     P2P_ENV=prod \
     DB_URL=sqlite+aiosqlite:////var/lib/p2p/p2p.db \
+    P2P_VAR_DIR=/var/lib/p2p \
     PYTHONPATH=/srv/p2p \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin
 # the slim base has no useradd: the user is written directly

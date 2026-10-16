@@ -9,6 +9,7 @@ local and in-memory ones; prod needs the Nebius job backend and S3 storage (A-20
 to start without them.
 """
 
+import asyncio
 import logging
 import multiprocessing
 import os
@@ -23,10 +24,12 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI
+from pydantic import SecretStr
 
 from app.api.deps import AppState
 from app.api.main import create_app
 from app.bundle.build import Bundler
+from app.bundle.sign import NebiusKmsSigner, Signer
 from app.bundle.store import ArtifactBundleStore, BundleStore
 from app.discovery.tavily import TavilyClient
 from app.domain.errors import P2PError
@@ -34,6 +37,7 @@ from app.domain.models import ErrorCode, PackageReq, StepName
 from app.execution.backend import JobBackend
 from app.execution.config import ExecutionConfig
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.nebius_backend import build_nebius_execution
 from app.execution.package_policy import (
     PackagePolicy,
     PolicyContext,
@@ -41,6 +45,7 @@ from app.execution.package_policy import (
     load_policy_config,
 )
 from app.execution.run_storage import FakeRunStorage, RunStorage
+from app.execution.s3 import S3ArtifactStore
 from app.execution.smoke_factory import SmokeOptions, build_smoke_executor
 from app.ingestion.arxiv import ArxivClient
 from app.models.client import (
@@ -54,6 +59,7 @@ from app.models.pricing import Pricing, load_cloud_prices
 from app.models.router import RouterError, fetch_models, resolve_roles
 from app.orchestrator.budget import Budget, BudgetLimits, load_budget_limits
 from app.orchestrator.fsm import Orchestrator, Step
+from app.orchestrator.reaper import Reaper, reaper_rates
 from app.orchestrator.steps.analyzing import AnalyzingStep
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
 from app.orchestrator.steps.discovering import DiscoveringStep
@@ -86,6 +92,8 @@ class Adapters:
     storage: RunStorage
     artifacts: ArtifactStore
     bundles: BundleStore
+    signer: Signer | None = None  # None: bundles are left unsigned (BUNDLE_UNSIGNED)
+    reap: bool = False  # real jobs and buckets: the reaper runs
 
 
 def dev_adapters(settings: Settings) -> Adapters:
@@ -95,10 +103,84 @@ def dev_adapters(settings: Settings) -> Adapters:
     return Adapters(FakeJobBackend(), FakeRunStorage(), artifacts, ArtifactBundleStore(artifacts))
 
 
+def key_file(content: SecretStr | None, path: Path | None, target: Path) -> Path | None:
+    """An SDK authorized key as a file: the configured file, or the secret's content written
+    owner-only to the container's ephemeral disk (secrets arrive as environment variables)."""
+    if path is not None:
+        return path
+    if content is None or not content.get_secret_value():
+        return None
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content.get_secret_value())
+    return target
+
+
+def kms_signer(key: Path, key_id: str) -> Signer:  # pragma: no cover - needs the Nebius SDK
+    from nebius.sdk import SDK
+
+    return NebiusKmsSigner.from_sdk(
+        SDK(credentials_file_name=key, user_agent_prefix="paper2proof"), key_id
+    )
+
+
+def _secret(value: SecretStr | None) -> str:
+    return value.get_secret_value() if value is not None else ""
+
+
 def prod_adapters(settings: Settings) -> Adapters:
-    raise ConfigError(
-        "P2P_ENV=prod needs the Nebius job backend and the S3 run/artifact storage (A-20), "
-        "which are not wired yet"
+    """Nebius jobs and S3 storage. Each identity reaches only its own buckets: sa-job-launcher
+    the per-run buckets, sa-api-runtime the control bucket and the KMS signing key."""
+    keys = settings.p2p_var_dir / "keys"
+    launcher_key = key_file(
+        settings.job_launcher_auth_key, settings.job_launcher_auth_key_file, keys / "launcher.json"
+    )
+    runtime_key = key_file(
+        settings.runtime_auth_key, settings.runtime_auth_key_file, keys / "runtime.json"
+    )
+    required = {
+        "S3_ENDPOINT": settings.s3_endpoint,
+        "P2P_CONTROL_BUCKET": settings.p2p_control_bucket,
+        "NEBIUS_SANDBOX_PROJECT_ID": settings.nebius_sandbox_project_id,
+        "RUNTIME_S3_KEY_ID": _secret(settings.runtime_s3_key_id),
+        "RUNTIME_S3_SECRET": _secret(settings.runtime_s3_secret),
+        "JOB_LAUNCHER_S3_KEY_ID": _secret(settings.job_launcher_s3_key_id),
+        "JOB_LAUNCHER_S3_SECRET": _secret(settings.job_launcher_s3_secret),
+        "JOB_LAUNCHER_AUTH_KEY": launcher_key,
+        "RUNTIME_AUTH_KEY": runtime_key,
+        "P2P_BUNDLE_KEY_ID": settings.p2p_bundle_key_id,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ConfigError(f"P2P_ENV=prod needs {', '.join(missing)}")
+    assert settings.s3_endpoint and settings.p2p_control_bucket  # noqa: S101 (checked above)
+    assert launcher_key and runtime_key and settings.p2p_bundle_key_id  # noqa: S101
+    assert settings.job_launcher_s3_secret and settings.runtime_s3_secret  # noqa: S101
+    assert settings.nebius_sandbox_project_id  # noqa: S101
+    execution = build_nebius_execution(
+        project_id=settings.nebius_sandbox_project_id,
+        s3_endpoint=settings.s3_endpoint,
+        region=settings.s3_region,
+        s3_key_id=_secret(settings.job_launcher_s3_key_id),
+        s3_secret=settings.job_launcher_s3_secret,
+        auth_key_file=launcher_key,
+        gateway_instance_id=settings.gateway_instance_id,
+    )
+    artifacts = S3ArtifactStore.connect(
+        endpoint_url=settings.s3_endpoint,
+        region=settings.s3_region,
+        bucket=settings.p2p_control_bucket,
+        key_id=_secret(settings.runtime_s3_key_id),
+        secret=settings.runtime_s3_secret,
+    )
+    return Adapters(
+        execution.backend,
+        execution.storage,
+        artifacts,
+        ArtifactBundleStore(artifacts),
+        signer=kms_signer(runtime_key, settings.p2p_bundle_key_id),
+        reap=True,
     )
 
 
@@ -179,6 +261,10 @@ def known_secrets(settings: Settings) -> list[str]:
         settings.tavily_api_key,
         settings.runtime_s3_key_id,
         settings.runtime_s3_secret,
+        settings.job_launcher_s3_key_id,
+        settings.job_launcher_s3_secret,
+        settings.job_launcher_auth_key,
+        settings.runtime_auth_key,
         settings.session_key,
         settings.admin_token,
     ]
@@ -199,6 +285,13 @@ class Runtime:
     http: httpx.AsyncClient
     cpu_pool: ProcessPoolExecutor | None
     late: _LateModels
+    reaper: Reaper | None = None
+    _reaper_task: "asyncio.Task[None] | None" = None
+
+    def start_reaper(self) -> None:
+        """One reaper per deployment (one uvicorn worker), only with real jobs and buckets."""
+        if self.reaper is not None and self._reaper_task is None:
+            self._reaper_task = asyncio.create_task(self.reaper.run_forever(), name="reaper")
 
     async def route_models(self) -> None:
         """Resolve every role against GET /v1/models (prod: any failure stops the start)."""
@@ -228,6 +321,9 @@ class Runtime:
         self.state.models_ready = True
 
     async def close(self) -> None:
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            await asyncio.gather(self._reaper_task, return_exceptions=True)
         await self.orchestrator.shutdown()
         await self.http.aclose()
         if self.cpu_pool is not None:
@@ -278,7 +374,7 @@ def build_runtime(
         artifacts=artifacts,
         storage=storage,
         bundles=built.bundles,
-        signer=None,  # KMS signing (P2P_BUNDLE_KEY_ID) is wired with the Nebius adapters
+        signer=built.signer,
         runner_image=execution.runner_image,
         known_secrets=known_secrets(settings),
         public_key_pem=public_key,
@@ -345,6 +441,9 @@ def build_runtime(
     return Runtime(
         settings, store, budget, limits, built, lm, steps, orchestrator, state, http, cpu_pool,
         late,
+        Reaper(store, built.jobs, built.bundles, budget, rates=reaper_rates(cloud))
+        if built.reap
+        else None,
     )  # fmt: skip
 
 
@@ -357,6 +456,7 @@ def create(runtime: Runtime) -> FastAPI:
         try:
             await runtime.route_models()
             resumed = await runtime.orchestrator.resume_all()
+            runtime.start_reaper()
         except BaseException:
             await runtime.close()  # runs already resumed stop; nothing serves half-started
             raise

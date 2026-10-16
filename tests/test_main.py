@@ -1,9 +1,14 @@
 """The composition root (app/main.py, A-14): every step wired, fail-fast in prod, models
 resolved at startup, interrupted runs resumed."""
 
+import asyncio
+import dataclasses
 import json
+import os
+import stat
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,10 +17,14 @@ from alembic import command
 from pydantic import SecretStr
 
 from app import main
+from app.bundle.sign import FakeSigner
 from app.domain.models import StepName
+from app.execution.fake_backend import FakeJobBackend
+from app.execution.run_storage import FakeRunStorage
 from app.models.client import Role
 from app.models.fake import FakeModelClient
 from app.settings import Settings
+from app.storage.artifacts import LocalArtifactStore
 from tests.conftest import ROOT, alembic_config
 
 LLM = ROOT / "tests" / "fixtures" / "llm"
@@ -103,13 +112,15 @@ async def test_interrupted_runs_resume_at_startup(tmp_path: Path) -> None:
     assert resumed == ["r_01jb7z00000000000000000000"]
 
 
-def test_prod_needs_the_nebius_adapters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prod_needs_the_nebius_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEBIUS_API_KEY", "k" * 20)
     monkeypatch.setenv("SESSION_KEY", SECRET_A)
     monkeypatch.setenv("ADMIN_TOKEN", SECRET_B)
     settings = _settings(tmp_path, p2p_env="prod")
-    with pytest.raises(main.ConfigError, match="A-20"):
+    with pytest.raises(main.ConfigError) as err:
         main.build_runtime(settings)
+    for name in ("S3_ENDPOINT", "P2P_CONTROL_BUCKET", "JOB_LAUNCHER_S3_SECRET", "RUNTIME_AUTH_KEY"):
+        assert name in str(err.value)
 
 
 @pytest.mark.parametrize("missing", ["p2p_runner_image", "p2p_subnet_exec", "p2p_gpu_preemptible"])
@@ -227,3 +238,93 @@ async def test_a_failed_start_closes_the_runtime(tmp_path: Path) -> None:
         async with app.router.lifespan_context(app):
             pass
     assert closed == [True]
+
+
+PROD_STORAGE: dict[str, object] = {
+    "s3_endpoint": "https://storage.eu-north1.nebius.cloud",
+    "p2p_control_bucket": "p2p-bundles",
+    "nebius_sandbox_project_id": "project-sandbox",
+    "runtime_s3_key_id": SecretStr("runtime-key-id"),
+    "runtime_s3_secret": SecretStr("runtime-secret"),
+    "job_launcher_s3_key_id": SecretStr("launcher-key-id"),
+    "job_launcher_s3_secret": SecretStr("launcher-secret"),
+    "job_launcher_auth_key": SecretStr('{"launcher": "authorized key"}'),
+    "runtime_auth_key": SecretStr('{"runtime": "authorized key"}'),
+    "gateway_instance_id": "computeinstance-gw",
+}
+
+
+def test_prod_adapters_use_each_identity_for_its_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, dict[str, object]] = {}
+
+    def execution(**kwargs: object) -> object:
+        seen["execution"] = kwargs
+        key_file = Path(str(kwargs["auth_key_file"]))
+        seen["launcher_key"] = {"text": key_file.read_text(), "mode": key_file.stat().st_mode}
+        return SimpleNamespace(backend=FakeJobBackend(), storage=FakeRunStorage())
+
+    def artifacts(**kwargs: object) -> object:
+        seen["artifacts"] = kwargs
+        return LocalArtifactStore(tmp_path / "a")
+
+    def signer(key_file: Path, key_id: str) -> object:
+        seen["signer"] = {"text": key_file.read_text(), "key_id": key_id}
+        return FakeSigner()
+
+    monkeypatch.setattr(main, "build_nebius_execution", execution)
+    monkeypatch.setattr(main.S3ArtifactStore, "connect", artifacts)
+    monkeypatch.setattr(main, "kms_signer", signer)
+    settings = _prod(tmp_path, monkeypatch, **PROD_STORAGE)
+    adapters = main.prod_adapters(settings)
+
+    assert adapters.reap and adapters.signer is not None
+    launcher = seen["execution"]
+    assert (
+        launcher["project_id"] == "project-sandbox" and launcher["s3_key_id"] == "launcher-key-id"
+    )
+    assert launcher["gateway_instance_id"] == "computeinstance-gw"
+    assert seen["launcher_key"]["text"] == '{"launcher": "authorized key"}'
+    if os.name != "nt":  # POSIX modes (the container); Windows has none
+        assert stat.S_IMODE(int(seen["launcher_key"]["mode"])) & 0o077 == 0  # owner only
+    control = seen["artifacts"]
+    assert control["bucket"] == "p2p-bundles" and control["key_id"] == "runtime-key-id"
+    assert seen["signer"] == {"text": '{"runtime": "authorized key"}', "key_id": "kms-key"}
+
+
+def test_the_reaper_runs_only_with_real_adapters(tmp_path: Path) -> None:
+    started: list[str] = []
+
+    class Reaper:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def run_forever(self) -> None:
+            started.append("run")
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                started.append("stopped")
+
+    def adapters(settings: Settings) -> main.Adapters:
+        return dataclasses.replace(main.dev_adapters(settings), reap=True)
+
+    async def check() -> None:
+        original = main.Reaper
+        main.Reaper = Reaper  # type: ignore[misc,assignment]
+        try:
+            runtime = main.build_runtime(_settings(tmp_path), adapters=adapters)
+            app = main.create(runtime)
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(0)
+                assert started == ["run"]
+        finally:
+            main.Reaper = original  # type: ignore[misc]
+
+    asyncio.run(check())
+    assert started == ["run", "stopped"]
+
+
+def test_dev_has_no_reaper(runtime: main.Runtime) -> None:
+    assert runtime.reaper is None
