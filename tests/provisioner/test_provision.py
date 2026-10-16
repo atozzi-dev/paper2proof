@@ -174,6 +174,17 @@ def test_wheels_only_with_hashes_constrained_to_the_runner(tmp_path: Path) -> No
     assert compile_cmd[compile_cmd.index("--index-url") + 1] == "https://pypi.org/simple"
     for flag in ("--only-binary=:all:", "--require-hashes", "--no-deps", "--no-config"):
         assert flag in install_cmd
+    # The runner's torch is PyTorch's CUDA 12.6 build: packages that depend on torch must
+    # resolve it from that index (or the constraints have no solution), and nothing else may
+    # come from there. The install only fetches what the runner lacks: PyPI alone.
+    for cmd in (compile_cmd, install_cmd):
+        assert "--index-strategy" not in cmd and "--extra-index-url" not in cmd
+    project = Path(compile_cmd[-1])
+    assert project.name == "pyproject.toml"
+    text = project.read_text()
+    assert '"tabulate==0.9.0"' in text and '"torch"' in text
+    assert 'torch = { index = "pytorch-cu126" }' in text
+    assert 'url = "https://download.pytorch.org/whl/cu126"' in text and "explicit = true" in text
     # Packages already in the runner image are dropped from what gets installed.
     install_lock = Path(install_cmd[install_cmd.index("-r") + 1]).read_text()
     assert "tabulate==0.9.0" in install_lock
