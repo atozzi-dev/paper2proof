@@ -1,0 +1,10 @@
+# Buckets are private (architecture §10.3); bundles are shared through short-lived presigned URLs.
+metadata:
+  id: "CKV_P2P_4"
+  name: "Bucket policies never grant anonymous access"
+  category: "IAM"
+definition:
+  cond_type: "attribute"
+  resource_types: ["nebius_storage_v1_bucket"]
+  attribute: "bucket_policy.rules.*.anonymous"
+  operator: "not_exists"

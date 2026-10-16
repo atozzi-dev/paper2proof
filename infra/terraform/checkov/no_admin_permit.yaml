@@ -1,0 +1,12 @@
+# Least privilege (architecture §9.1): no service-account group gets the admin role.
+# storage.bucket-policy-editor is a sub-role of admin: it could rewrite any bucket policy.
+metadata:
+  id: "CKV_P2P_3"
+  name: "Access permits never grant admin or bucket-policy-editor"
+  category: "IAM"
+definition:
+  cond_type: "attribute"
+  resource_types: ["nebius_iam_v1_access_permit"]
+  attribute: "role"
+  operator: "not_within"
+  value: ["admin", "storage.bucket-policy-editor"]

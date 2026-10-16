@@ -1,0 +1,17 @@
+# checkov configuration for `make tf-check` (run from the repository root).
+# checkov ships no Nebius-specific checks, so the project invariants are encoded as custom
+# policies in infra/terraform/checkov/ (CKV_P2P_*); the secrets framework scans for leaked keys.
+framework:
+  - terraform
+  - secrets
+directory:
+  - infra/terraform
+external-checks-dir:
+  - infra/terraform/checkov
+compact: true
+quiet: true
+skip-path:
+  - \.terraform/
+# Documented skip list. Every entry must say why; empty so far: no built-in check produced a
+# false positive on the Nebius resources.
+skip-check: []
