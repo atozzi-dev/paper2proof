@@ -62,12 +62,15 @@ async def docker_cli(argv: Sequence[str], timeout_s: float) -> tuple[int, str, s
         )
         await proc.wait()
     except TimeoutError:
-        name = next(a.removeprefix("--name=") for a in argv if a.startswith("--name="))
-        killer = await asyncio.create_subprocess_exec("docker", "kill", name)
-        await killer.wait()
-        proc.kill()
-        await proc.wait()
-        return -1, "", f"smoke run timed out after {timeout_s:g} s"
+        name = next((a.removeprefix("--name=") for a in argv if a.startswith("--name=")), None)
+        try:
+            if name is not None:  # a container run: stop the container, not only the CLI
+                killer = await asyncio.create_subprocess_exec("docker", "kill", name)
+                await killer.wait()
+        finally:
+            proc.kill()
+            await proc.wait()
+        return -1, "", f"docker timed out after {timeout_s:g} s"
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
 

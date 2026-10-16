@@ -38,7 +38,9 @@ from app.domain.errors import P2PError
 from app.domain.models import ErrorCode, PackageReq, StepName
 from app.execution.backend import JobBackend
 from app.execution.config import ExecutionConfig
+from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.local_trusted import load_canaries
 from app.execution.nebius_backend import build_nebius_execution
 from app.execution.package_policy import (
     PackagePolicy,
@@ -99,10 +101,26 @@ class Adapters:
 
 
 def dev_adapters(settings: Settings) -> Adapters:
-    """Local files and in-memory fakes: nothing leaves the machine and no job runs (dev
-    runs stop at PROVISIONING until a local backend lands with A-25)."""
+    """Local files and in-memory fakes: nothing leaves the machine and no job runs. With
+    P2P_JOB_BACKEND=docker the real job images run in local docker, for canary papers only."""
     artifacts = LocalArtifactStore(settings.p2p_var_dir / "artifacts")
-    return Adapters(FakeJobBackend(), FakeRunStorage(), artifacts, ArtifactBundleStore(artifacts))
+    bundles = ArtifactBundleStore(artifacts)
+    if settings.p2p_job_backend != "docker":
+        return Adapters(FakeJobBackend(), FakeRunStorage(), artifacts, bundles)
+    store = Store(make_engine(settings.db_url))
+
+    async def paper_sha256(run_id: str) -> str | None:
+        run = await store.get_run(run_id)
+        return run.paper_sha256 if run else None
+
+    root = settings.p2p_var_dir / "jobs"
+    jobs = DevDockerBackend(
+        env=settings.p2p_env,
+        canaries=load_canaries(settings.config_dir / "canary_allowlist.yaml"),
+        paper_sha256=paper_sha256,
+        root=root,
+    )
+    return Adapters(jobs, LocalRunStorage(root), artifacts, bundles)
 
 
 def key_file(content: SecretStr | None, path: Path | None, target: Path) -> Path | None:
@@ -405,6 +423,8 @@ def build_runtime(
     cpu_pool: ProcessPoolExecutor | None = None,
 ) -> Runtime:
     prod = settings.p2p_env == "prod"
+    if prod and settings.p2p_job_backend != "fake":
+        raise ConfigError("P2P_JOB_BACKEND=docker is for dev canaries only, never in prod")
     built = (adapters or (prod_adapters if prod else dev_adapters))(settings)
     if prod and settings.smoke_executor == "local":
         raise ConfigError("SMOKE_EXECUTOR=local is for dev canaries only, never in prod")
