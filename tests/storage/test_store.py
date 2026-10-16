@@ -186,6 +186,26 @@ def test_migrations_upgrade_and_downgrade_on_an_empty_db(tmp_path: Path) -> None
     engine.dispose()
 
 
+def test_overlay_digests_from_the_single_provision_job_are_dropped(tmp_path: Path) -> None:
+    # recorded while the job that wrote the cache also parsed untrusted datasets (A-06)
+    db_path = tmp_path / "trust.db"
+    cfg = _alembic(db_path)
+    command.upgrade(cfg, "0005")
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO overlay_digests (cache_key, sha256, run_id, created_at)"
+                " VALUES (:k, :s, NULL, '2026-10-15 10:00:00')"
+            ),
+            {"k": "a" * 64, "s": "b" * 64},
+        )
+    command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM overlay_digests")).scalar() == 0
+    engine.dispose()
+
+
 def test_migration_matches_the_models(tmp_path: Path) -> None:
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext

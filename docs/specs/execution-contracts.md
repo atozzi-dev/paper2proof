@@ -63,7 +63,15 @@ parsing for the smoke subset run later, in the fetch job, which has no cache mou
 repository that gets code execution there reaches its own run bucket only, never the cache or the
 trust table. The control plane reads `packages_report.json` and records the digest **before** it
 submits the fetch job, and no other job of the run is running while the provision job does
-(leftover smoke and fetch jobs are stopped first), so nothing untrusted can write that report.
+(leftover smoke, fetch and exec jobs are stopped first), so nothing untrusted can write that
+report. The provision job publishes to the cache from its local archive, never from the run
+bucket. Old digests, recorded while one job did both, are dropped (migration 0006).
+
+This holds as long as jobs reach buckets only through their mounts: all jobs share one platform
+identity, so a container that could obtain object-storage credentials (to check in S-5/S-11)
+could write `p2p-cache` directly. The trust table would still hold (hits are served only for
+digests from provision-job reports, checked on local disk), but the cache could be corrupted
+(rebuilds, not poisoning). Per-kind job identities are the follow-up.
 
 Every file in this bucket can be written by an earlier smoke job (it mounts the bucket
 read-write until S-11 shows a read-only/prefix mount works), so the control plane reads it as
@@ -139,7 +147,10 @@ new provision job and reuses the stored fetch report (the runners check every ar
 Both jobs share the 20-minute provisioning budget: `deadline_unix` is 2 minutes before the
 watchdog, counted from the provision job's submission (after the gateway is up), and the fetch
 job's watchdog is what is left of those 20 minutes; the provisioner exits with its error file at
-its deadline. `ref: null` means the default branch. Every resolved dependency (not only the
+its deadline. The two jobs mean two cold starts (VM, image pull, mounts) in the same 20 minutes,
+not measured yet (S-4/S-12): a fetch job is submitted only with at least 5 minutes left before
+the deadline, otherwise the step times out without starting it. `ref: null` means the default
+branch. Every resolved dependency (not only the
 requested names) passes the denylist and typosquat checks, except packages the runner image
 already provides.
 
