@@ -1,12 +1,15 @@
 """FastAPI application factory. Wiring of real services happens in app/main.py (A-14)."""
 
 import logging
+from pathlib import PurePath
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Scope
 
 from app.api import admin, auth, gallery, runs
 from app.api.deps import AppState, get_state
@@ -62,4 +65,21 @@ def create_app(state: AppState) -> FastAPI:
     app.include_router(runs.router)
     app.include_router(gallery.router)
     app.include_router(admin.router)
+    dist = getattr(state, "web_dist", None)  # openapi_export builds the app without a state
+    if dist is not None and (dist / "index.html").is_file():
+        app.mount("/", WebFiles(directory=dist, html=True), name="web")  # after every route
     return app
+
+
+class WebFiles(StaticFiles):
+    """The built UI. Hashed assets never change (cached for good); index.html always
+    revalidates, so a deploy is visible at once. The CSP comes from SecurityHeadersMiddleware."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        first = PurePath(path).parts[:1]  # an OS path (backslashes on Windows)
+        immutable = first == ("assets",) and response.status_code == 200
+        response.headers["cache-control"] = (
+            "public, max-age=31536000, immutable" if immutable else "no-cache"
+        )
+        return response
