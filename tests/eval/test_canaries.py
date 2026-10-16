@@ -81,7 +81,8 @@ def _script(experiment: Path, cwd: Path, *args: str) -> Ran:
 @pytest.fixture(scope="module")
 def scripts(tmp_path_factory: pytest.TempPathFactory) -> dict[tuple[str, str], Ran]:
     """Every canary through its CLI: a smoke run and a run missing --seed/--out, concurrently
-    (each interpreter spends seconds importing scikit-learn)."""
+    (each interpreter spends seconds importing scikit-learn). At most 4 at a time: each one maps
+    the BLAS libraries, and more exhaust the commit charge of a small Windows box."""
     root = tmp_path_factory.mktemp("canary-scripts")
     jobs = {
         (c.name, "smoke"): (
@@ -97,7 +98,7 @@ def scripts(tmp_path_factory: pytest.TempPathFactory) -> dict[tuple[str, str], R
     } | {
         (c.name, "no-args"): (c.experiment, root / c.name / "no-args", "--smoke") for c in CANARIES
     }
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+    with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as pool:
         futures = {key: pool.submit(_script, *job) for key, job in jobs.items()}
         return {key: future.result() for key, future in futures.items()}
 
