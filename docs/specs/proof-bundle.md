@@ -12,8 +12,8 @@ came out, the deterministic verdict and what it cost. Anyone holding the public 
   `bundles/<run_id>/proof-bundle.tar.gz` and served by `GET /api/runs/{id}/bundle`.
 - gzip (not zstd as in architecture §10.4): verifiers need nothing outside the Python standard
   library and `cryptography`, or plain `tar` + `openssl`.
-- Deterministic: members sorted by path, regular files only, mode `0644`, uid/gid `0`, mtime
-  `0`, gzip header mtime `0`. Every member is under the top directory `bundle/`.
+- Deterministic: members sorted by path, regular files only, mode `0644` (`0755` for
+  `reproduce.sh`), uid/gid `0`, mtime `0`, gzip header mtime `0`. Every member is under the top directory `bundle/`.
 
 ## 2. Layout
 
@@ -57,7 +57,7 @@ the bundle is still built.
   "judged_attempt": 1,
   "config_sha256": "<sha256 of config/verdict.yaml used by decide()>",
   "models": {"planner": ["<model id>"], "judge": ["<model id>"]},
-  "prompts": {"judge_explain": "<version>"},
+  "prompts": {"judge_explain": {"version": "1", "sha256": "<hex of the prompt file>"}},
   "images": {"runner": "<registry>/p2p-runner@sha256:<hex>"},
   "files": {"claims.json": {"sha256": "<hex>", "bytes": 1234, "origin": "control_plane"}},
   "omitted": [{"path": "results/1/stderr.log", "reason": "too_large"}],
@@ -65,9 +65,11 @@ the bundle is still built.
 }
 ```
 
-- `models` and `prompts` come from the run's recorded model calls (what was actually used).
-- `origin` is `control_plane` (written by our code from validated data) or `run_bucket` (read
-  back from the per-run bucket, written next to untrusted code: evidence, not authority).
+- `models` comes from the run's recorded model calls (what was actually used); `prompts` lists
+  every prompt file of the Paper2Proof build that made the bundle (with `paper2proof.commit`).
+- `origin` is `control_plane` (written by our code from validated data), `run_bucket` (read
+  back from the per-run bucket, written next to untrusted code: evidence, not authority) or
+  `model` (`explanation.md`: the Judge's prose plus the code-written Limitations; display only).
 - Omission reasons: `missing`, `too_large`, `invalid` (not the expected format),
   `digest_mismatch`, `secret_pattern`.
 - `MANIFEST.json` itself is never listed in `files`; `SIGNATURE` is never listed either.
@@ -86,9 +88,17 @@ the bundle is still built.
 
 The signature is Nebius KMS `AsymmetricCryptoService.SignHash` over the 32-byte
 sha256 of the exact `MANIFEST.json` bytes, with the asymmetric key `p2p-bundle-signing`
-(`ecdsa_nist_p256_sha_256`). The control plane checks every signature against the public key
-before storing it. If KMS is unavailable the bundle is stored without `SIGNATURE` (cut list
+(`ecdsa_nist_p256_sha_256`). The control plane checks every signature against the published key
+(`docs/bundle-public-key.pem`, or the KMS public key when none is configured) before storing it;
+the KMS responses must name the requested key. If KMS is unavailable the bundle is stored without `SIGNATURE` (cut list
 item 2) and the run gets a `BUNDLE_UNSIGNED` warning.
+
+KMS tool (human-run, uses the `nebius` CLI profile's credentials):
+`uv run python -m app.bundle.sign public-key --key-id <id> > docs/bundle-public-key.pem` and
+`uv run python -m app.bundle.sign sign <bundle> --run-id <id> --key-id <id> -o <signed bundle>`.
+It signs only an unsigned bundle of that run whose files match its `MANIFEST.json`, checks the
+signature against `docs/bundle-public-key.pem` and asks for confirmation: sign only bundles
+fetched from `p2p-bundles`, never one received from someone else.
 
 Manual check: `jq -r .signature bundle/SIGNATURE | base64 -d > sig.der && openssl dgst -sha256
 -verify docs/bundle-public-key.pem -signature sig.der bundle/MANIFEST.json`, then
@@ -115,17 +125,21 @@ with one `FAIL <path>: <problem>` line per problem, `2` on usage errors. It chec
   and `data/<name>.tar.zst`. They are not in the bundle (size); within 24 h of the run they are
   in `p2p-run-<slug>/staging/`. The script checks each one against the digest in the exec
   manifest and stops on a mismatch.
-- It copies `code/workspace.tar` next to them, mounts the directory at `/mnt/run`, the exec
-  manifest at `/etc/p2p/manifest.json` (read-only) and an empty `/mnt/cache`, and runs
-  `docker run --rm --gpus all --network none <runner>@sha256:…`.
+- It runs code written by a model and code from the paper's repository: it warns, asks for
+  confirmation (`P2P_REPRODUCE_YES=1` skips it) and must only run on an isolated, disposable
+  machine, never a developer or control-plane host (invariant 1).
+- It copies `code/workspace.tar` next to them, mounts the directory at `/mnt/run/staging`
+  (read-only), `results/` at `/mnt/run/results`, the exec manifest at `/etc/p2p/manifest.json`
+  (read-only) and a tmpfs at `/mnt/cache`, and runs `docker run --rm --gpus all --network none
+  --cap-drop ALL --security-opt no-new-privileges --pids-limit 4096 <runner>@sha256:…`.
 - Results land in `<staging dir>/results/<attempt>/results.json`.
 
 ## 7. Content rules
 
 - Never the paper PDF or LaTeX: only its sha256 and metadata.
 - No secrets (invariant 4). Every file is scanned before packing for key-shaped strings
-  (`tvly-…`, `Bearer <token>`, private key blocks, `hf_…`, `AKIA…`, `sk-…`) and for the
-  control plane's own secret values. Matches in text files are replaced with `[REDACTED]`
+  (`tvly-…`, `Bearer <token>`, private key blocks, `hf_…`, `AKIA…`, `sk-…`, GitHub, Slack and
+  Google keys, JWTs) and for the control plane's own secret values (as is and JSON-escaped). Matches in text files are replaced with `[REDACTED]`
   (the path goes in `redacted`); a match inside `code/workspace.tar` omits it
   (`secret_pattern`), since its digest must stay the one the job ran.
 - Everything read from the run bucket is size-capped (`results.json` and `env.json` 256 KiB,
