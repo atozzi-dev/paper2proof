@@ -43,6 +43,7 @@ EXEC_CFG = ExecutionConfig(
     runner_cpu_image=DIGEST.format("p2p-runner-cpu"),
     subnet_provision="vpcsubnet-provision",
     subnet_exec="vpcsubnet-exec",
+    preemptible_gpu=False,
 )
 PLAN_KEY = f"runs/{RUN}/plan.json"
 DISCOVERY_KEY = f"runs/{RUN}/discovery.json"
@@ -223,6 +224,43 @@ async def test_watchdog_cancels_a_stuck_job(store: Store, tmp_path: Path) -> Non
     assert err.value.code is ErrorCode.TIMEOUT
     assert jobs.cancelled == [f"p2p-prov-{RUN[2:]}-1"]
     assert clock.t >= 20 * 60
+
+
+async def test_the_provisioner_deadline_is_a_timeout(store: Store, tmp_path: Path) -> None:
+    # the provisioner exits with its error file at its 18-minute deadline: that's a TIMEOUT
+    # on the control plane's clock, not a provisioning failure
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    clock = FakeClock()
+    storage = FakeRunStorage()
+
+    class Deadline(FakeJobBackend):
+        async def status(self, handle: JobHandle) -> JobState:
+            return JobState.RUNNING if clock.t < 18 * 60 else JobState.FAILED
+
+    def error(spec: JobSpec) -> None:
+        storage.objects[(RUN, "staging/provision_error.json")] = b'{"error": "deadline reached"}'
+
+    ctx = RunContext(**{**ctx.__dict__, "jobs": Deadline(on_submit=error)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, clock).run(ctx)
+    assert err.value.code is ErrorCode.TIMEOUT
+    assert "deadline reached" in err.value.message
+
+
+async def test_an_early_failure_is_still_a_provisioning_failure(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    clock = FakeClock()
+
+    class Early(FakeJobBackend):
+        async def status(self, handle: JobHandle) -> JobState:
+            return JobState.RUNNING if clock.t < 17 * 60 else JobState.FAILED
+
+    ctx = RunContext(**{**ctx.__dict__, "jobs": Early()})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, FakeRunStorage(), clock).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
 
 
 async def test_cancelling_the_run_cancels_the_job(store: Store, tmp_path: Path) -> None:
@@ -570,3 +608,32 @@ async def test_archive_digests_are_kept_and_validated(store: Store, tmp_path: Pa
         {"name": "uoft-cs__cifar10", "sha256": "f" * 64},
         {"name": "smoke", "sha256": "1" * 64},
     ]
+
+
+async def test_leftover_smoke_jobs_are_stopped_before_provisioning(
+    store: Store, tmp_path: Path
+) -> None:
+    # back from SMOKE_TESTING after a restart: a smoke job may still be writing the bucket
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    order: list[str] = []
+    jobs = FakeJobBackend(JobState.RUNNING)
+    smoke = JobSpec(**{**_spec_fields(), "kind": JobKind.SMOKE, "name": f"p2p-smoke-{RUN[2:]}-4"})
+    await jobs.submit(smoke)
+    original = jobs.cancel
+
+    async def cancel(handle: JobHandle) -> None:
+        order.append(f"cancel {handle.name}")
+        await original(handle)
+
+    jobs.cancel = cancel  # type: ignore[method-assign]
+    jobs.final_state = JobState.SUCCEEDED
+
+    def submitted(spec: JobSpec) -> None:
+        order.append(f"submit {spec.name}")
+        _writes_report(storage)(spec)
+
+    jobs.on_submit = submitted
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert order == [f"cancel p2p-smoke-{RUN[2:]}-4", f"submit p2p-prov-{RUN[2:]}-1"]

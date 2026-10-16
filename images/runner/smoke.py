@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import collections
-import hashlib
 import json
 import math
 import os
@@ -38,7 +37,7 @@ from entrypoint import (
     ContractError,
     LiveLog,
     Terminated,
-    extract_stream,
+    extract_workspace,
     run_seed,
     tar_extract,
 )
@@ -50,7 +49,6 @@ MAX_TIMEOUT_S = 240
 TAIL_BYTES = 48 * 1024  # per stream, as encoded in result.json (< 256 KiB in total)
 METRICS = "out/metrics.json"
 NONCE = re.compile(r"^[0-9a-f]{32}$")
-MAX_WORKSPACE_BYTES = 16 * 1024 * 1024
 
 
 class SmokeContractError(Exception):
@@ -137,21 +135,6 @@ def _encoded_tail(text: str, limit: int = TAIL_BYTES) -> str:
     return text
 
 
-def _extract_workspace(archive: Path, dest: Path, digest: str) -> None:
-    if not archive.is_file() or archive.stat().st_size > MAX_WORKSPACE_BYTES:
-        raise ContractError("workspace archive missing or too large")
-    with archive.open("rb") as handle:
-        data = handle.read(MAX_WORKSPACE_BYTES + 1)
-    if len(data) > MAX_WORKSPACE_BYTES:
-        raise ContractError("workspace archive too large")
-    if hashlib.sha256(data).hexdigest() != digest:
-        raise ContractError("workspace archive does not match the manifest digest")
-    import io
-
-    shutil.rmtree(dest, ignore_errors=True)
-    extract_stream(io.BytesIO(data), dest, max_bytes=MAX_WORKSPACE_BYTES, max_members=1000)
-
-
 def _read_metrics(path: Path) -> dict[str, float] | None:
     """Flat, finite, numeric top-level values only (the control plane filters them again):
     nested or huge values would bloat result.json past what the control plane reads."""
@@ -219,7 +202,7 @@ def run(
             if not (staging / "data" / "smoke.tar.zst").is_file():
                 raise ContractError("smoke data archive missing")
             extract(staging / "data" / "smoke.tar.zst", data / "smoke", entry["sha256"])
-        _extract_workspace(out_dir / "workspace.tar", workspace, manifest["workspace_sha256"])
+        extract_workspace(out_dir / "workspace.tar", workspace, manifest["workspace_sha256"])
         (work / "home").mkdir(parents=True, exist_ok=True)
     except (ContractError, OSError, subprocess.SubprocessError, Terminated) as err:
         reason = "terminated" if isinstance(err, Terminated) else str(err)[:500]

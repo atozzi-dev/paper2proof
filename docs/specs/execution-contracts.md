@@ -36,7 +36,8 @@ staging/
   data/smoke.tar.zst           # ≤ 50 MB subset for smoke tests
   provision_report.json        # digests and metadata; validated and copied by the control plane
   provision_error.json         # the provisioner's own error message on failure
-  workspace/                   # code written by the Coder (written by the orchestrator at finish)
+  workspace.tar                # the Coder's workspace at `finish` (plain tar, the bytes of the
+                               # last passing smoke run): sha256 in the exec manifest
 smoke/<iteration>/
   workspace.tar                # the Coder's workspace, sha256 in the injected smoke manifest
   result.json                  # exit code, output tails, metrics, the manifest's nonce
@@ -125,8 +126,8 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 ## 7. Runner entrypoint (`images/runner/entrypoint.py`)
 
 1. Read `/etc/p2p/manifest.json`; validate against the schema; exit 30 on failure.
-2. Extract `overlay.tar.zst`, `repo.tar.zst` and `data/*.tar.zst` to local disk under `/work` (not on the mount).
-3. For each seed in `manifest.seeds`, run the script with `timeout --signal=TERM --kill-after=30s <remaining_budget>`; write `seeds/<seed>/metrics.json`.
+2. Extract the workspace archive (`paths.workspace`, checked against `workspace_sha256`), `overlay.tar.zst`, `repo.tar.zst` and exactly the `archives.data` entries to local disk under `/work` (not on the mount), hashing the bytes read; nothing else from the bucket is executed or imported.
+3. For each seed in `manifest.seeds`, run the script from the extracted workspace in its own process group within the remaining budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); `seeds/<seed>/` is emptied first, then the script writes `seeds/<seed>/metrics.json`. Until the last seed, `results.json` reports `budget_timeout` (a job stopped from outside never looks completed).
 4. Aggregate into `results.json` (`per_seed`, `baseline.per_seed`, `scale`, `wall_clock_s`, `gpu`, `exit_reason`). `higher_is_better` and `baseline.name` are copied from the manifest. Both `per_seed` lists hold `{seed, value}` objects so the control plane can align them by seed; a failed seed has `ok: false` and `value: null`.
 5. Flush `live.log` every 10 s, mirroring the last 200 lines of stdout/stderr.
 6. Exit codes: `0` completed · `10` experiment error (at least one seed failed) · `20` budget timeout · `30` contract error.

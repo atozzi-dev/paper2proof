@@ -53,19 +53,42 @@ if a.mode == "nan":
     metrics["top1_accuracy"] = float("nan")
 if a.mode == "huge":
     metrics = {"top1_accuracy": 10 ** 400, "baseline/top1_accuracy": 0.8}
+if a.mode == "silent":
+    raise SystemExit(0)  # exits 0 without writing metrics.json
 if a.mode == "typed":
     metrics = {"top1_accuracy": [True, "0.93", 0.9][a.seed], "baseline/top1_accuracy": 0.8}
 json.dump(metrics, open(os.path.join(a.out, "metrics.json"), "w"))
 """
 
 
+def _workspace_tar(files: dict[str, str]) -> bytes:
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, text in sorted(files.items()):
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
 def _setup(
-    tmp_path: Path, *, mode: str = "ok", budget: int = 600, **overrides: Any
+    tmp_path: Path,
+    *,
+    mode: str = "ok",
+    budget: int = 600,
+    files: dict[str, str] | None = None,
+    **overrides: Any,
 ) -> tuple[Path, Path]:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True)
+    import hashlib
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "overlay.tar.zst").write_bytes(b"")  # extracted by the fake `extract`
-    (workspace / "train.py").write_text(SCRIPT)
+    workspace = _workspace_tar(files or {"train.py": SCRIPT})
+    (tmp_path / "workspace.tar").write_bytes(workspace)
     results = tmp_path / "results"
     manifest = {
         "schema": "p2p.manifest/v1",
@@ -80,7 +103,7 @@ def _setup(
             "overlay": str(tmp_path / "overlay.tar.zst"),
             "repo": None,
             "data_dir": str(tmp_path / "data"),
-            "workspace": str(workspace),
+            "workspace": str(tmp_path / "workspace.tar"),
             "cache": str(tmp_path / "cache"),
             "results": str(results),
         },
@@ -91,6 +114,7 @@ def _setup(
         "baseline_name": "resnet18",
         "scale": {"full": False, "fraction_of_data": 0.1, "epochs": 2, "paper_epochs": 200},
         "archives": {"overlay": "a" * 64, "repo": None, "data": []},
+        "workspace_sha256": hashlib.sha256(workspace).hexdigest(),
     }
     manifest.update(overrides)
     path = tmp_path / "manifest.json"
@@ -256,6 +280,45 @@ def test_results_are_written_after_every_seed(tmp_path: Path) -> None:
     assert seen == [1, 2, 3]
 
 
+def test_results_say_budget_timeout_until_the_last_seed(tmp_path: Path) -> None:
+    # a job stopped from outside (preemption, SIGKILL) must never look completed
+    manifest, results = _setup(tmp_path)
+    reasons: list[str] = []
+
+    def on_seed(done: int) -> None:
+        reasons.append(_results(results)["exit_reason"])
+
+    assert _run(manifest, tmp_path, on_seed=on_seed) == 0
+    assert reasons == ["budget_timeout", "budget_timeout", "budget_timeout"]
+    assert _results(results)["exit_reason"] == "completed"
+
+
+def test_the_workspace_runs_from_its_verified_archive(tmp_path: Path) -> None:
+    helper = "VALUE = 0.5\n"
+    script = SCRIPT.replace("import argparse,", "import helper, argparse,")
+    manifest, _ = _setup(tmp_path, files={"train.py": script, "helper.py": helper})
+    assert _run(manifest, tmp_path) == 0
+    assert (tmp_path / "work" / "workspace" / "helper.py").read_text() == helper
+
+
+def test_a_workspace_archive_that_does_not_match_is_a_contract_error(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path)
+    (tmp_path / "workspace.tar").write_bytes(
+        _workspace_tar({"train.py": SCRIPT, "sitecustomize.py": "raise SystemExit(7)"})
+    )
+    assert _run(manifest, tmp_path) == 30
+    assert _results(results)["exit_reason"] == "contract_error"
+
+
+def test_metrics_planted_before_a_seed_are_ignored(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="silent")
+    planted = results / "seeds" / "0"
+    planted.mkdir(parents=True)
+    (planted / "metrics.json").write_text('{"top1_accuracy": 0.99}')
+    assert _run(manifest, tmp_path) == 10
+    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+
+
 def test_termination_writes_partial_results(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path)
 
@@ -278,9 +341,7 @@ child = "import time; time.sleep(3); open({str(marker)!r}, 'w').write('x')"
 subprocess.Popen([sys.executable, "-c", child])
 time.sleep(30)
 """
-    workspace = tmp_path / "workspace"
-    manifest, _ = _setup(tmp_path, mode="slow")
-    (workspace / "train.py").write_text(spawner)
+    manifest, _ = _setup(tmp_path, mode="slow", files={"train.py": spawner})
     assert _run(manifest, tmp_path, budget_override_s=1.0, kill_grace_s=0.5) == 20
     time.sleep(4)
     assert not marker.exists()
@@ -394,6 +455,17 @@ def test_extraction_verifies_the_digest_of_what_it_read(tmp_path: Path) -> None:
     assert not (tmp_path / "bad").exists()
 
 
+def test_a_huge_tail_after_the_tar_is_rejected_without_reading_it_all(tmp_path: Path) -> None:
+    import hashlib
+
+    archive = tmp_path / "a.tar.zst"
+    archive.write_bytes(_tar_bytes() + b"\0" * (3 << 20))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    with pytest.raises(entrypoint.ContractError, match="after the end"):
+        entrypoint.tar_extract(archive, tmp_path / "tail", digest, decompress=PASSTHROUGH)
+    assert not (tmp_path / "tail").exists()
+
+
 @pytest.mark.parametrize("args", [["--seed", "5"], ["--sm"], ["--out=/tmp/x"]])
 def test_runner_owned_flags_in_args_are_contract_errors(tmp_path: Path, args: list[str]) -> None:
     manifest, _ = _setup(tmp_path, args=args)
@@ -420,3 +492,41 @@ def test_short_and_file_forms_of_runner_flags_are_rejected(tmp_path: Path, args:
 def test_negative_numbers_are_ordinary_arguments(tmp_path: Path) -> None:
     manifest, _ = _setup(tmp_path, args=["--mode", "ok", "--lr-exp", "-3"])
     assert _run(manifest, tmp_path) != 30
+
+
+def test_intermediate_results_never_report_an_ending(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="fail")
+    reasons: list[str] = []
+
+    def on_seed(done: int) -> None:
+        reasons.append(_results(results)["exit_reason"])
+
+    assert _run(manifest, tmp_path, on_seed=on_seed) == 10
+    assert reasons == ["budget_timeout"] * 3
+    assert _results(results)["exit_reason"] == "experiment_error"
+
+
+def test_an_unreadable_workspace_archive_is_a_contract_error(tmp_path: Path) -> None:
+    import hashlib
+
+    manifest, results = _setup(tmp_path)
+    junk = b"not a tar" * 100
+    (tmp_path / "workspace.tar").write_bytes(junk)
+    data = json.loads(manifest.read_text())
+    data["workspace_sha256"] = hashlib.sha256(junk).hexdigest()
+    manifest.write_text(json.dumps(data))
+    assert _run(manifest, tmp_path) == 30
+    assert _results(results)["exit_reason"] == "contract_error"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_a_planted_seed_symlink_is_removed(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="silent")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "metrics.json").write_text('{"top1_accuracy": 0.99}')
+    (results / "seeds").mkdir(parents=True)
+    (results / "seeds" / "0").symlink_to(elsewhere, target_is_directory=True)
+    assert _run(manifest, tmp_path) == 10
+    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+    assert (elsewhere / "metrics.json").exists()  # the link went, not what it pointed to

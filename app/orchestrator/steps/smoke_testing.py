@@ -28,6 +28,7 @@ from app.execution.smoke import (
     SmokeExecutor,
     SmokeResult,
     SmokeUnavailable,
+    pack_with_digest,
     pack_workspace,
     validate_argv,
     validate_path,
@@ -51,7 +52,7 @@ from app.orchestrator.coder_tools import (
 )
 from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
-from app.orchestrator.steps.common import output_of
+from app.orchestrator.steps.common import output_of, selected_claim
 from app.storage.artifacts import ArtifactStore
 
 SMOKE_TIMEOUT_S = 150
@@ -143,13 +144,6 @@ class SmokeTestingStep:
     async def _put(self, key: str, value: dict[str, Any]) -> None:
         await asyncio.to_thread(self._artifacts.put_json, key, value)
 
-    async def _claim(self, ctx: RunContext, plan: Plan) -> tuple[Claim, ClaimType]:
-        claims = {c.id: c for c, _ in await ctx.store.get_claims(ctx.run_id)}
-        for claim_id in plan.claim_ids:
-            if claim_id in claims:
-                return claims[claim_id], plan.claim_types.get(claim_id, claims[claim_id].claim_type)
-        raise P2PError(ErrorCode.INTERNAL_ERROR, "the plan has no stored claim")
-
     async def _repo(self, ctx: RunContext) -> dict[str, str]:
         report = await self._json(await output_of(ctx, StepName.PROVISIONING))
         expected = report.get("repo_files_sha256") if isinstance(report, dict) else None
@@ -182,8 +176,9 @@ class SmokeTestingStep:
             for a in report.get("data_archives") or []
             if isinstance(a, dict) and a.get("name") == "smoke"
         ]
+        failed = P2PError(ErrorCode.PROVISION_FAILED, "the provision report has no valid digests")
         try:
-            return ArchiveDigests.model_validate(
+            archives = ArchiveDigests.model_validate(
                 {
                     "overlay": report.get("overlay_sha256"),
                     "repo": report.get("repo_sha256"),
@@ -191,9 +186,12 @@ class SmokeTestingStep:
                 }
             )
         except ValidationError:
-            raise P2PError(
-                ErrorCode.PROVISION_FAILED, "the provision report has no valid digests"
-            ) from None
+            raise failed from None
+        if report.get("repo") is True and archives.repo is None:
+            raise failed  # fail closed: never a smoke run silently without the repository
+        if report.get("smoke") is True and not archives.data:
+            raise failed
+        return archives
 
     async def _state(self, ctx: RunContext) -> _State:
         try:
@@ -288,7 +286,7 @@ class SmokeTestingStep:
         plan = Plan.model_validate(
             (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
         )
-        claim, kind = await self._claim(ctx, plan)
+        claim, kind = await selected_claim(ctx, plan)
         state = await self._state(ctx)
         ws = Workspace.from_snapshot(state.files, await self._repo(ctx))
         max_runs = ctx.limits.per_run.fix_iterations
@@ -497,8 +495,10 @@ class SmokeTestingStep:
             validate_argv(["python", script, *args.args])
         except SmokeContractError as err:
             raise ToolError(str(err)) from None
-        for path, data in ws.files.items():  # the exec job's workspace (execution-contracts §3)
-            await self._storage.put_bytes(ctx.run_id, f"staging/workspace/{path}", data)
+        # The exec job's workspace: the very archive the last smoke run tested, by digest
+        # (execution-contracts §3); never loose files that other jobs could add to.
+        archive, digest = await ctx.run_cpu(pack_with_digest, ws.files)
+        await self._storage.put_bytes(ctx.run_id, "staging/workspace.tar", archive)
         key = f"runs/{ctx.run_id}/smoke_result.json"
         await self._put(
             key,
@@ -507,6 +507,7 @@ class SmokeTestingStep:
                 "args": list(args.args),
                 "smoke_metrics": metrics,
                 "files": sorted(ws.files),
+                "workspace_sha256": digest,
                 "smoke_runs": state.smoke_runs,
             },
         )

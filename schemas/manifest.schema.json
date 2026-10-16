@@ -35,7 +35,8 @@
     "claim_type",
     "baseline_name",
     "scale",
-    "archives"
+    "archives",
+    "workspace_sha256"
   ],
   "properties": {
     "schema": {
@@ -109,7 +110,8 @@
           "type": "string"
         },
         "workspace": {
-          "type": "string"
+          "type": "string",
+          "description": "the workspace archive (tar), extracted by the runner to local disk"
         },
         "cache": {
           "type": "string"
@@ -218,6 +220,11 @@
           }
         }
       }
+    },
+    "workspace_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of paths.workspace (a plain tar of the Coder's workspace, the bytes of the last passing smoke run)"
     }
   }
 }

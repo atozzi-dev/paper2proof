@@ -30,6 +30,7 @@ CFG = ExecutionConfig(
     runner_cpu_image=DIGEST.format("p2p-runner-cpu"),
     subnet_provision="vpcsubnet-provision",
     subnet_exec="vpcsubnet-exec",
+    preemptible_gpu=False,
 )
 NOW = datetime(2026, 10, 20, tzinfo=UTC)
 ARGV = ["python", "train.py", "--out", "out", "--smoke"]
@@ -234,6 +235,59 @@ async def test_a_smoke_job_still_running_after_a_restart_is_cancelled(store: Sto
     await smoke.run(env, ARGV, {}, 60)
     assert jobs.cancelled == [f"p2p-smoke-{RUN[2:]}-1"]
     assert f"p2p-smoke-{RUN[2:]}-2" in jobs.jobs
+
+
+class SlowToStop(FakeJobBackend):
+    """A cancelled job keeps running for `polls` status calls (the platform stops it later)."""
+
+    def __init__(self, polls: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.polls = polls
+        self.log: list[str] = []
+
+    async def submit(self, spec: JobSpec) -> Any:
+        self.log.append(f"submit {spec.name}")
+        return await super().submit(spec)
+
+    async def status(self, handle: Any) -> JobState:
+        if handle.name in self.cancelled:
+            if self.polls > 0:
+                self.polls -= 1
+                return JobState.RUNNING
+            return JobState.CANCELLED
+        return await super().status(handle)
+
+
+def _orphan() -> JobSpec:
+    return JobSpec(
+        name=f"p2p-smoke-{RUN[2:]}-1", kind=JobKind.SMOKE, image_digest_ref=CFG.runner_cpu_image,
+        platform="cpu-d3", preset="4vcpu-16gb", disk_gib=30, subnet_id="vpcsubnet-exec",
+        volumes=[], inject_files={}, env={}, preemptible=False, watchdog_s=300,
+    )  # fmt: skip
+
+
+async def test_the_next_smoke_job_waits_until_the_orphan_has_stopped(store: Store) -> None:
+    storage = FakeRunStorage()
+    jobs = SlowToStop(2, final_state=JobState.RUNNING)
+    smoke, _ = await _executor(store, jobs, storage)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    await jobs.submit(_orphan())
+    jobs.final_state = JobState.SUCCEEDED
+    jobs.on_submit = _writes_result(storage)
+    await smoke.run(env, ARGV, {}, 60)
+    assert jobs.polls == 0  # polled until it stopped, then the new job started
+    assert jobs.log[-1] == f"submit p2p-smoke-{RUN[2:]}-2"
+
+
+async def test_an_orphan_that_never_stops_blocks_the_smoke_run(store: Store) -> None:
+    storage = FakeRunStorage()
+    jobs = SlowToStop(10_000, final_state=JobState.RUNNING)
+    smoke, _ = await _executor(store, jobs, storage)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    await jobs.submit(_orphan())
+    with pytest.raises(SmokeUnavailable, match="still stopping"):
+        await smoke.run(env, ARGV, {}, 60)
+    assert f"p2p-smoke-{RUN[2:]}-2" not in jobs.jobs
 
 
 async def test_the_watchdog_leaves_room_for_setup(store: Store) -> None:

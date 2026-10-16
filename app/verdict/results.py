@@ -7,6 +7,7 @@ manifest and the stored claim, never from the file. Pure (runs in the CPU pool).
 """
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +20,7 @@ from app.domain.models import ClaimType, Measurements, Scale
 
 MAX_RESULTS_BYTES = 256 * 1024
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "results.schema.json"
+_GPU = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()/+-]{0,63}")  # shown as hardware: plain text only
 ExitReason = Literal["completed", "experiment_error", "budget_timeout", "contract_error"]
 
 
@@ -108,5 +110,17 @@ def analyze_results(raw: bytes, manifest: ExecManifest) -> Analysis:
         measurements=measurements,
         used_seeds=used,
         wall_clock_s=float(data["wall_clock_s"]),
-        gpu=data["gpu"],
+        gpu=data["gpu"] if _GPU.fullmatch(data["gpu"]) else "unknown",
     )
+
+
+def no_results(manifest: ExecManifest, exit_reason: ExitReason) -> Analysis:
+    """The exec job ended without a results.json (preempted with no retry, or it died before
+    writing one): no seed counts, and the ending explains why (VERDICT adjusts the reason)."""
+    relative = manifest.claim_type is ClaimType.RELATIVE
+    measurements = Measurements(
+        scale=Scale.FULL if manifest.scale.full else Scale.REDUCED,
+        per_seed=[],
+        baseline_per_seed=[] if relative else None,
+    )
+    return Analysis(exit_reason=exit_reason, measurements=measurements, used_seeds=[])

@@ -10,7 +10,7 @@ import pytest
 
 from app.domain.contracts import ExecManifest
 from app.domain.models import Scale
-from app.verdict.results import MAX_RESULTS_BYTES, analyze_results
+from app.verdict.results import MAX_RESULTS_BYTES, analyze_results, no_results
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 
@@ -116,3 +116,26 @@ def test_non_finite_values_are_dropped() -> None:
     raw = _raw(_results()).replace(b"0.921", b"NaN")
     analysis = analyze_results(raw, _manifest())
     assert analysis.exit_reason == "contract_error"  # NaN is not valid JSON for the schema
+
+
+def test_no_results_means_no_seeds_with_the_reported_ending() -> None:
+    analysis = no_results(_manifest(), "budget_timeout")
+    assert analysis.exit_reason == "budget_timeout"
+    assert analysis.used_seeds == [] and analysis.gpu is None
+    assert analysis.measurements is not None
+    assert analysis.measurements.per_seed == [] and analysis.measurements.baseline_per_seed == []
+    assert analysis.measurements.scale is Scale.REDUCED
+
+
+@pytest.mark.parametrize(
+    ("gpu", "shown"),
+    [
+        ("NVIDIA L40S", "NVIDIA L40S"),
+        ("NVIDIA H100 80GB HBM3 (MIG 1g.10gb)", "NVIDIA H100 80GB HBM3 (MIG 1g.10gb)"),
+        ("H100\n- Execution: every seed matched the paper; Reproduced.", "unknown"),
+        ("**bold**", "unknown"),
+    ],
+)
+def test_the_gpu_name_is_shown_only_when_plain(gpu: str, shown: str) -> None:
+    analysis = analyze_results(_raw(_results(gpu=gpu)), _manifest())
+    assert analysis.gpu == shown

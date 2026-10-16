@@ -16,7 +16,7 @@ from app.domain.events import EventType
 from app.domain.models import ErrorCode, PackageReq, Plan, RunStatus, StepName
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
-from app.execution.naming import job_name
+from app.execution.naming import job_name, run_slug
 from app.execution.package_policy import PackagePolicy, PolicyContext, parse_repo_requirements
 from app.execution.run_storage import RunStorage
 from app.models.pricing import CloudPrices
@@ -24,7 +24,7 @@ from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import PROVISION_PLATFORM, PROVISION_PRESET
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of
-from app.orchestrator.steps.jobs import run_job, utcnow
+from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
 
 WATCHDOG_S = 20 * 60  # execution-contracts §8
@@ -186,6 +186,9 @@ class ProvisioningStep:
         discovery = Discovery.model_validate(
             await self._json(await output_of(ctx, StepName.DISCOVERING))
         )
+        smoke = f"p2p-smoke-{run_slug(ctx.run_id)}-"  # left by a restart: it mounts the bucket rw
+        if not await stop_jobs(ctx, smoke, poll_s=self._poll_s, sleep=self._sleep):
+            raise P2PError(ErrorCode.TIMEOUT, "an earlier smoke job did not stop")
         packages = await self._packages(ctx, plan, discovery)
         policy = self._policy.config
         runner_digest = self._config.runner_image.rsplit("@", 1)[1]
@@ -259,6 +262,10 @@ class ProvisioningStep:
                 )
             except ValueError:
                 error = None
+            if self._clock() >= deadline:  # the provisioner gave up at its deadline (our clock)
+                raise P2PError(
+                    ErrorCode.TIMEOUT, f"provisioning reached its deadline: {_error_message(error)}"
+                )
             raise P2PError(ErrorCode.PROVISION_FAILED, _error_message(error))
         try:
             raw = await self._storage.get_bytes(
