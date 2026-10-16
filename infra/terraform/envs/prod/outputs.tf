@@ -12,7 +12,9 @@ output "env" {
     REGISTRY_CONTROL          = module.registry_control.url
     REGISTRY_SANDBOX          = module.registry_sandbox.url
     NEBIUS_REGISTRY_HOST      = module.registry_control.host
-    NEBIUS_STORAGE_HOST       = "storage.${var.region}.nebius.cloud"
+    NEBIUS_STORAGE_HOST       = local.storage_host
+    GATEWAY_INSTANCE_ID       = module.egress_gateway.instance_id
+    GATEWAY_NAME              = module.egress_gateway.name
   }
 }
 
@@ -25,6 +27,8 @@ output "network_sandbox" {
     route_table_ids       = module.network_sandbox.route_table_ids
     gateway_allocation_id = module.network_sandbox.gateway_allocation_id
     gateway_private_ip    = module.network_sandbox.gateway_private_ip
+    gateway_instance_id   = module.egress_gateway.instance_id
+    gateway_sg_id         = module.egress_gateway.security_group_id
   }
 }
 

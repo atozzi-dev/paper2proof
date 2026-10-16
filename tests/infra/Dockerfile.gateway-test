@@ -1,0 +1,10 @@
+# Test image for the egress gateway configuration (A-04): the gateway's packages on the gateway's
+# OS (Ubuntu 24.04), used by tests/infra/test_gateway_config.py (`pytest -m docker`) to run
+# `squid -k parse`, `nft -c -f`, `cloud-init schema` and the gateway's own scripts.
+# Not a runtime image: it is never pushed.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        squid-openssl nftables python3-yaml openssl cloud-init \
+    && rm -rf /var/lib/apt/lists/*

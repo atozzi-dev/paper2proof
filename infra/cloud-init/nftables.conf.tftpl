@@ -1,0 +1,74 @@
+#!/usr/sbin/nft -f
+# Packet policy of the egress gateway (architecture §8.2, appendix A.2). Rendered by Terraform
+# (modules/egress_gateway) and loaded by nftables.service before Squid starts.
+#
+# Fail-closed by construction:
+#   - The gateway never forwards (net.ipv4.ip_forward = 0, forward policy drop). Job traffic either
+#     lands on the local Squid through a redirect or is logged and dropped: there is no path from
+#     provision or exec to the internet that does not go through Squid's SNI allowlist.
+#   - exec may only reach the addresses its allowlisted hosts resolve to (set exec_dst4, refreshed
+#     by p2p-exec-pin.timer, 15-minute timeouts). The set is empty at boot, so exec has no egress
+#     until it is filled; Squid starts only after the first refresh.
+#     This closes the SNI-spoofing gap of `host_verify_strict off` for the subnet that runs
+#     untrusted code. Hosts depend on spike S-5 (image pull and bucket mount paths).
+#   - Without this ruleset (nftables failed) nothing is redirected and, with forwarding off, every
+#     job packet addressed to the internet is dropped by the kernel.
+
+flush ruleset
+
+define provision = ${provision_cidr}
+define exec = ${exec_cidr}
+define gateway = ${gateway_ip}
+
+table inet p2p {
+	set exec_dst4 {
+		type ipv4_addr
+		flags timeout
+		comment "IPv4 addresses of the exec allowlist, refreshed by p2p-exec-pin"
+	}
+
+	chain nat_prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		ip saddr $provision tcp dport 443 redirect to :3129
+		ip saddr $provision tcp dport 80 redirect to :3128
+		ip saddr $exec ip daddr @exec_dst4 tcp dport 443 redirect to :3129
+		ip saddr $exec ip daddr @exec_dst4 tcp dport 80 redirect to :3128
+	}
+
+	# After NAT: whatever a job sent that was not redirected to Squid and is not addressed to the
+	# gateway itself is bound for a foreign host. Log it (rate-limited) and drop it here, so
+	# denials show up in journald.
+	chain deny_unredirected {
+		type filter hook prerouting priority dstnat + 10; policy accept;
+		ip saddr { $provision, $exec } ct status dnat accept
+		ip saddr { $provision, $exec } ip daddr != $gateway ct state new limit rate 20/second burst 100 packets log prefix "p2p-egress-deny " level info
+		ip saddr { $provision, $exec } ip daddr != $gateway counter drop
+	}
+
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+		# Squid's intercept ports take only redirected connections, never direct ones.
+		ip saddr { $provision, $exec } tcp dport { 3128, 3129 } ct status dnat accept
+		ip saddr { $provision, $exec } icmp type echo-request limit rate 10/second accept
+		# DHCP lease renewals (never from a job subnet) and IPv6 neighbour discovery.
+		ip saddr != { $provision, $exec } udp sport 67 udp dport 68 accept
+		meta l4proto ipv6-icmp accept
+		ct state new limit rate 10/second burst 50 packets log prefix "p2p-input-deny " level info
+		counter
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		limit rate 10/second burst 50 packets log prefix "p2p-forward-deny " level info
+		counter
+	}
+
+	# The gateway's own traffic (Squid upstream, apt, DNS, the monitoring agent) is trusted; the
+	# security group sg-egress-gw limits it to tcp/80 and tcp/443 outside 169.254.0.0/16.
+	chain output {
+		type filter hook output priority filter; policy accept;
+	}
+}
