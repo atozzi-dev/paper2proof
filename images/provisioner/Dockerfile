@@ -21,13 +21,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini zstd git \
  && rm -rf /var/lib/apt/lists/* \
- && groupadd --gid 10001 p2p \
- && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin p2p \
+ && echo 'p2p:x:10001:' >> /etc/group \
+ && echo 'p2p:x:10001:10001:p2p:/home/p2p:/usr/sbin/nologin' >> /etc/passwd \
+ && install -d -o 10001 -g 10001 -m 0750 /home/p2p \
  && install -d -o 10001 -g 10001 /work \
  && find / -xdev -perm /6000 -type f -exec chmod a-s {} +  # no setuid path to root
 # uv is the provisioner's package tool at run time (lock + install --target, wheels only)
 COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /usr/local/bin/uv
 COPY --from=build /opt/venv /opt/venv
+# uv leaves a world-writable lock file in the venv: nothing in it may be writable by p2p
+RUN rm -f /opt/venv/.lock
 COPY --from=build --chmod=0444 /tmp/build/runner-constraints.txt /opt/p2p/runner-constraints.txt
 COPY --chmod=0444 images/provisioner/provision.py /opt/p2p/
 USER 10001:10001

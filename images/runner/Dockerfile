@@ -26,11 +26,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini zstd \
  && rm -rf /var/lib/apt/lists/* \
- && groupadd --gid 10001 p2p \
- && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin p2p \
+ && echo 'p2p:x:10001:' >> /etc/group \
+ && echo 'p2p:x:10001:10001:p2p:/home/p2p:/usr/sbin/nologin' >> /etc/passwd \
+ && install -d -o 10001 -g 10001 -m 0750 /home/p2p \
  && install -d -o 10001 -g 10001 /work \
  && find / -xdev -perm /6000 -type f -exec chmod a-s {} +  # no setuid path to root
 COPY --from=build /opt/venv /opt/venv
+# uv leaves a world-writable lock file in the venv: nothing in it may be writable by p2p
+RUN rm -f /opt/venv/.lock
 COPY --from=build --chmod=0444 /tmp/build/runner-constraints.txt /opt/p2p/runner-constraints.txt
 COPY --chmod=0444 images/runner/entrypoint.py images/runner/smoke.py /opt/p2p/
 USER 10001:10001
