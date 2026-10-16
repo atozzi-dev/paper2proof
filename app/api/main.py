@@ -55,7 +55,8 @@ def create_app(state: AppState) -> FastAPI:
         except Exception:
             db_ok = False
         checks = {"db": db_ok, "models": state.models_ready, "replication": state.replication_ready}
-        return JSONResponse({"checks": checks}, status_code=200 if all(checks.values()) else 503)
+        body = {"checks": checks, "commit": state.settings.p2p_build_commit}  # deploy checks it
+        return JSONResponse(body, status_code=200 if all(checks.values()) else 503)
 
     app.include_router(auth.router)
     app.include_router(runs.router)

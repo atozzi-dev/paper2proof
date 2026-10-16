@@ -1,0 +1,385 @@
+"""Composition root (A-14): builds every service from Settings and serves the API.
+
+`uvicorn app.main:app` (images/api/start.sh) builds the runtime at import (settings fail fast)
+and does the slow part in the lifespan: model routing against GET /v1/models (fail-fast in
+prod, invariant 5), then resuming every run that was interrupted by a restart.
+
+Adapters (job backend, run storage, artifact store) differ by environment: dev and test use
+local and in-memory ones; prod needs the Nebius job backend and S3 storage (A-20) and refuses
+to start without them.
+"""
+
+import logging
+import multiprocessing
+import os
+from collections.abc import AsyncIterator, Callable, Mapping
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import timedelta
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import FastAPI
+
+from app.api.deps import AppState
+from app.api.main import create_app
+from app.bundle.build import Bundler
+from app.bundle.store import ArtifactBundleStore, BundleStore
+from app.discovery.tavily import TavilyClient
+from app.domain.errors import P2PError
+from app.domain.models import ErrorCode, PackageReq, StepName
+from app.execution.backend import JobBackend
+from app.execution.config import ExecutionConfig
+from app.execution.fake_backend import FakeJobBackend
+from app.execution.package_policy import (
+    PackagePolicy,
+    PolicyContext,
+    PyPIClient,
+    load_policy_config,
+)
+from app.execution.run_storage import FakeRunStorage, RunStorage
+from app.execution.smoke_factory import SmokeOptions, build_smoke_executor
+from app.ingestion.arxiv import ArxivClient
+from app.models.client import (
+    Completion,
+    ModelClient,
+    StoreCallRecorder,
+    TokenFactoryClient,
+    load_models_config,
+)
+from app.models.pricing import Pricing, load_cloud_prices
+from app.models.router import RouterError, fetch_models, resolve_roles
+from app.orchestrator.budget import Budget, BudgetLimits, load_budget_limits
+from app.orchestrator.fsm import Orchestrator, Step
+from app.orchestrator.steps.analyzing import AnalyzingStep
+from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
+from app.orchestrator.steps.discovering import DiscoveringStep
+from app.orchestrator.steps.executing import ExecutingStep
+from app.orchestrator.steps.extracting_claims import ExtractingClaimsStep
+from app.orchestrator.steps.ingesting import IngestingStep
+from app.orchestrator.steps.planning import PlanningStep
+from app.orchestrator.steps.provisioning import ProvisioningStep
+from app.orchestrator.steps.smoke_testing import SmokeTestingStep
+from app.orchestrator.steps.verdict import VerdictStep
+from app.settings import Settings, get_settings
+from app.storage.artifacts import ArtifactStore, LocalArtifactStore
+from app.storage.db import make_engine
+from app.storage.store import Store
+
+__all__ = ["ConfigError", "RouterError", "Runtime", "build_runtime", "create"]
+log = logging.getLogger(__name__)
+ROOT = Path(__file__).resolve().parents[1]
+PLACEHOLDER = "local/{}@sha256:" + "0" * 64  # dev/test only: no job ever runs these
+PUBLIC_KEY = ROOT / "docs" / "bundle-public-key.pem"
+
+
+class ConfigError(RuntimeError):
+    """The environment can't run this configuration: the app refuses to start."""
+
+
+@dataclass
+class Adapters:
+    jobs: JobBackend
+    storage: RunStorage
+    artifacts: ArtifactStore
+    bundles: BundleStore
+
+
+def dev_adapters(settings: Settings) -> Adapters:
+    """Local files and in-memory fakes: nothing leaves the machine and no job runs (dev
+    runs stop at PROVISIONING until a local backend lands with A-25)."""
+    artifacts = LocalArtifactStore(settings.p2p_var_dir / "artifacts")
+    return Adapters(FakeJobBackend(), FakeRunStorage(), artifacts, ArtifactBundleStore(artifacts))
+
+
+def prod_adapters(settings: Settings) -> Adapters:
+    raise ConfigError(
+        "P2P_ENV=prod needs the Nebius job backend and the S3 run/artifact storage (A-20), "
+        "which are not wired yet"
+    )
+
+
+class UnavailableModels:
+    """Stands in until the models are routed (dev without an API key): every call fails with
+    MODEL_UNAVAILABLE, so a run fails clearly instead of hanging."""
+
+    async def complete(self, *args: object, **kwargs: object) -> Completion:
+        raise P2PError(ErrorCode.MODEL_UNAVAILABLE, "models are not routed (no NEBIUS_API_KEY?)")
+
+    async def structured(self, *args: object, **kwargs: object) -> Any:
+        raise P2PError(ErrorCode.MODEL_UNAVAILABLE, "models are not routed (no NEBIUS_API_KEY?)")
+
+
+class _LateModels:
+    """The steps' model client: the real one replaces the stand-in once the lifespan has
+    routed the models (steps are built before that)."""
+
+    def __init__(self, client: ModelClient) -> None:
+        self.client = client
+
+    async def complete(self, *args: Any, **kwargs: Any) -> Completion:
+        return await self.client.complete(*args, **kwargs)
+
+    async def structured(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.client.structured(*args, **kwargs)
+
+
+def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
+    """Images and subnets of the execution plane: required in prod, placeholders elsewhere."""
+    values = {  # ExecutionConfig field -> (environment variable, value)
+        "provisioner_image": ("P2P_PROVISIONER_IMAGE", settings.p2p_provisioner_image),
+        "runner_image": ("P2P_RUNNER_IMAGE", settings.p2p_runner_image),
+        "runner_cpu_image": ("P2P_RUNNER_CPU_IMAGE", settings.p2p_runner_cpu_image),
+        "subnet_provision": ("P2P_SUBNET_PROVISION", settings.p2p_subnet_provision),
+        "subnet_exec": ("P2P_SUBNET_EXEC", settings.p2p_subnet_exec),
+        "preemptible_gpu": ("P2P_GPU_PREEMPTIBLE", settings.p2p_gpu_preemptible),
+    }
+    missing = [env for env, value in values.values() if value is None]
+    if prod and missing:
+        raise ConfigError(f"P2P_ENV=prod needs {', '.join(missing)}")
+    defaults: dict[str, object] = {
+        "provisioner_image": PLACEHOLDER.format("p2p-provisioner"),
+        "runner_image": PLACEHOLDER.format("p2p-runner"),
+        "runner_cpu_image": PLACEHOLDER.format("p2p-runner-cpu"),
+        "subnet_provision": "local-provision",
+        "subnet_exec": "local-exec",
+        "preemptible_gpu": True,
+    }
+    return ExecutionConfig.model_validate(
+        {k: defaults[k] if v is None else v for k, (_, v) in values.items()}
+    )
+
+
+def _parent_name() -> str | None:
+    """The parent process's name (Linux): start.sh execs uvicorn as litestream's child."""
+    try:
+        return Path(f"/proc/{os.getppid()}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def replication_ready(
+    env: str, environ: Mapping[str, str], *, parent: Callable[[], str | None] = _parent_name
+) -> bool:
+    """In prod the database is only safe under `litestream replicate`: start.sh says so and
+    the parent process must really be litestream (an environment variable alone could be set
+    by anyone writing the endpoint's env)."""
+    if env != "prod":
+        return True
+    return environ.get("P2P_REPLICATION") == "litestream" and parent() == "litestream"
+
+
+def known_secrets(settings: Settings) -> list[str]:
+    """Every configured secret value: the Proof Bundle redacts them (invariant 4)."""
+    values = [
+        settings.nebius_api_key,
+        settings.tavily_api_key,
+        settings.runtime_s3_key_id,
+        settings.runtime_s3_secret,
+        settings.session_key,
+        settings.admin_token,
+    ]
+    return [v.get_secret_value() for v in values if v is not None and v.get_secret_value()]
+
+
+@dataclass
+class Runtime:
+    settings: Settings
+    store: Store
+    budget: Budget
+    limits: BudgetLimits
+    adapters: Adapters
+    models: ModelClient
+    steps: Mapping[StepName, Step]
+    orchestrator: Orchestrator
+    state: AppState
+    http: httpx.AsyncClient
+    cpu_pool: ProcessPoolExecutor | None
+    late: _LateModels
+
+    async def route_models(self) -> None:
+        """Resolve every role against GET /v1/models (prod: any failure stops the start)."""
+        key = self.settings.nebius_api_key
+        if key is None or not key.get_secret_value():
+            log.warning("no NEBIUS_API_KEY: model calls fail with MODEL_UNAVAILABLE")
+            return
+        config = load_models_config(self.settings.config_dir / "models.yaml")
+        try:
+            listed = await fetch_models(self.http, config.provider.base_url, key)
+            resolved = resolve_roles(listed, config)
+        except (RouterError, httpx.HTTPError):
+            if self.settings.p2p_env == "prod":
+                raise
+            log.exception("model routing failed: model calls fail with MODEL_UNAVAILABLE")
+            return
+        self.late.client = TokenFactoryClient(
+            config,
+            resolved,
+            Pricing.load(self.settings.config_dir / "pricing.yaml"),
+            self.budget,
+            StoreCallRecorder(self.store),
+            api_key=key,
+            http_client=self.http,
+        )
+        self.models = self.late.client
+        self.state.models_ready = True
+
+    async def close(self) -> None:
+        await self.orchestrator.shutdown()
+        await self.http.aclose()
+        if self.cpu_pool is not None:
+            self.cpu_pool.shutdown(wait=False, cancel_futures=True)
+        await self.store.engine.dispose()
+
+
+def build_runtime(
+    settings: Settings,
+    *,
+    adapters: Callable[[Settings], Adapters] | None = None,
+    models: ModelClient | None = None,
+    cpu_pool: ProcessPoolExecutor | None = None,
+) -> Runtime:
+    prod = settings.p2p_env == "prod"
+    built = (adapters or (prod_adapters if prod else dev_adapters))(settings)
+    if prod and settings.smoke_executor == "local":
+        raise ConfigError("SMOKE_EXECUTOR=local is for dev canaries only, never in prod")
+    if prod and not settings.p2p_bundle_key_id:
+        raise ConfigError("P2P_ENV=prod needs P2P_BUNDLE_KEY_ID: Proof Bundles are signed")
+    config_dir = settings.config_dir
+    store = Store(make_engine(settings.db_url))
+    limits = load_budget_limits(config_dir / "budgets.yaml")
+    budget = Budget(store, limits, env=settings.p2p_env)
+    cloud = load_cloud_prices(config_dir / "pricing.yaml")
+    execution = execution_config(settings, prod=prod)
+    http = httpx.AsyncClient(timeout=30, follow_redirects=False)
+    late = _LateModels(models or UnavailableModels())
+    lm: ModelClient = late  # delegates the ModelClient protocol
+    artifacts, storage = built.artifacts, built.storage
+    tavily = TavilyClient(settings.tavily_api_key, http)
+    policy = PackagePolicy(load_policy_config(config_dir), PyPIClient(store, http))
+
+    async def package_check(packages: list[PackageReq]) -> list[PackageReq]:
+        return (await policy.validate(packages, PolicyContext())).accepted
+
+    smoke_options = SmokeOptions(
+        kind=settings.smoke_executor,
+        env=settings.p2p_env,
+        api_key=settings.nebius_api_key,
+        project_id=settings.tf_project_id,
+        sandbox_images=config_dir / "sandbox_images.yaml",
+        canary_allowlist=config_dir / "canary_allowlist.yaml",
+        work_root=settings.p2p_var_dir / "smoke",
+    )
+    public_key = PUBLIC_KEY.read_bytes() if PUBLIC_KEY.is_file() else None
+    bundler = Bundler(
+        artifacts=artifacts,
+        storage=storage,
+        bundles=built.bundles,
+        signer=None,  # KMS signing (P2P_BUNDLE_KEY_ID) is wired with the Nebius adapters
+        runner_image=execution.runner_image,
+        known_secrets=known_secrets(settings),
+        public_key_pem=public_key,
+        commit=settings.p2p_build_commit,
+    )
+    steps: dict[StepName, Step] = {
+        StepName.INGESTING: IngestingStep(ArxivClient(http), artifacts),
+        StepName.EXTRACTING_CLAIMS: ExtractingClaimsStep(lm, artifacts),
+        StepName.DISCOVERING: DiscoveringStep(
+            store=store,
+            arxiv=ArxivClient(http),
+            tavily=tavily,
+            models=lm,
+            artifacts=artifacts,
+            http=http,
+        ),
+        StepName.PLANNING: PlanningStep(
+            lm,
+            artifacts,
+            cloud,
+            preemptible=execution.preemptible_gpu,
+            package_check=package_check,
+        ),
+        StepName.AWAITING_APPROVAL: AwaitingApprovalStep(
+            timeout=timedelta(minutes=limits.approval.approval_timeout_min)
+        ),
+        StepName.PROVISIONING: ProvisioningStep(
+            policy=policy, storage=storage, artifacts=artifacts, config=execution, cloud=cloud
+        ),
+        StepName.SMOKE_TESTING: SmokeTestingStep(
+            lm,
+            artifacts,
+            storage,
+            lambda ctx, archives: build_smoke_executor(
+                smoke_options,
+                ctx,
+                archives=archives,
+                storage=storage,
+                config=execution,
+                cloud=cloud,
+            ),
+            tavily=tavily,
+        ),
+        StepName.EXECUTING: ExecutingStep(
+            artifacts=artifacts, storage=storage, config=execution, cloud=cloud
+        ),
+        StepName.ANALYZING: AnalyzingStep(artifacts, storage, lm),
+        StepName.VERDICT: VerdictStep(
+            lm, artifacts, config_path=config_dir / "verdict.yaml", bundler=bundler
+        ),
+    }
+    orchestrator = Orchestrator(
+        store, budget, steps, limits=limits, jobs=built.jobs, cpu_pool=cpu_pool
+    )
+    state = AppState(
+        settings=settings,
+        store=store,
+        budget=budget,
+        limits=limits,
+        submit=orchestrator.submit,
+        bundles=built.bundles,
+        replication_ready=replication_ready(settings.p2p_env, os.environ),
+    )
+    return Runtime(
+        settings, store, budget, limits, built, lm, steps, orchestrator, state, http, cpu_pool,
+        late,
+    )  # fmt: skip
+
+
+def create(runtime: Runtime) -> FastAPI:
+    """The FastAPI app over a runtime; its lifespan routes models and resumes runs."""
+    api = create_app(runtime.state)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            await runtime.route_models()
+            resumed = await runtime.orchestrator.resume_all()
+        except BaseException:
+            await runtime.close()  # runs already resumed stop; nothing serves half-started
+            raise
+        log.info("started", extra={"resumed_runs": len(resumed)})
+        try:
+            yield
+        finally:
+            runtime.state.draining = True
+            await runtime.close()
+
+    api.router.lifespan_context = lifespan
+    return api
+
+
+@lru_cache(maxsize=1)
+def _app() -> FastAPI:  # pragma: no cover - the uvicorn entrypoint (start.sh)
+    settings = get_settings()
+    # forkserver: never fork a process that already runs threads (aiosqlite, asyncio)
+    pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("forkserver"))
+    return create(build_runtime(settings, cpu_pool=pool))
+
+
+def __getattr__(name: str) -> FastAPI:  # pragma: no cover - lazy: importing app.main is free
+    if name == "app":
+        return _app()
+    raise AttributeError(name)

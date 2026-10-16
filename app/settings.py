@@ -37,6 +37,22 @@ class Settings(BaseSettings):
     session_key: SecretStr = Field(default_factory=_ephemeral_secret)
     admin_token: SecretStr = Field(default_factory=_ephemeral_secret)
     config_dir: Path = Path("config")
+    p2p_var_dir: Path = Path("var")  # dev/test: local artifacts and smoke work dirs
+    # S3 credentials of sa-api-runtime (control-plane buckets); loaded by deploy/secrets.sh
+    runtime_s3_key_id: SecretStr | None = None
+    runtime_s3_secret: SecretStr | None = None
+    p2p_control_bucket: str | None = None  # control-plane artifacts and Proof Bundles
+    nebius_sandbox_project_id: str | None = None
+    # Execution plane (infra outputs and image digests from the deploy, required in prod;
+    # checked by app.main.execution_config)
+    p2p_provisioner_image: str | None = None
+    p2p_runner_image: str | None = None
+    p2p_runner_cpu_image: str | None = None
+    p2p_subnet_provision: str | None = None
+    p2p_subnet_exec: str | None = None
+    p2p_gpu_preemptible: bool | None = None  # explicit in prod: never preemptible for demos
+    p2p_bundle_key_id: str | None = None  # KMS key that signs Proof Bundles
+    p2p_build_commit: str | None = None  # recorded in Proof Bundles
 
     def model_post_init(self, context: object, /) -> None:
         # Checked after validation and raised with a redacted input: an `after` validator
