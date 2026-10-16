@@ -32,13 +32,15 @@ fi
 alembic upgrade head
 
 # Behind the managed endpoint's proxy: trust forwarded client addresses only from the proxy's
-# addresses (measured in H-05), never from everywhere.
+# addresses (measured in H-05), never from everywhere. Several CIDRs are separated by ";"
+# (commas separate the endpoint's environment variables).
 proxy=""
 if [ -n "${P2P_FORWARDED_ALLOW_IPS:-}" ]; then
   case "$P2P_FORWARDED_ALLOW_IPS" in
-    *[!0-9a-fA-F.:/,]*|"*") echo "P2P_FORWARDED_ALLOW_IPS must list proxy IPs or CIDRs" >&2; exit 1 ;;
+    *[!0-9a-fA-F.:/\;]*|*/0|*/0\;*)
+      echo "P2P_FORWARDED_ALLOW_IPS must list the proxy's IPs or CIDRs (no /0)" >&2; exit 1 ;;
   esac
-  proxy=" --proxy-headers --forwarded-allow-ips=$P2P_FORWARDED_ALLOW_IPS"
+  proxy=" --proxy-headers --forwarded-allow-ips=$(printf '%s' "$P2P_FORWARDED_ALLOW_IPS" | tr ';' ',')"
 fi
 
 export P2P_REPLICATION=litestream  # with the parent process check, what /readyz reports

@@ -24,8 +24,12 @@ RUN mkdir /tmp/litestream \
  && install -m 0755 /tmp/litestream/litestream /usr/local/bin/litestream
 
 FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+# the commit this image is built from: /readyz reports it and Proof Bundles record it
+ARG BUILD_COMMIT
+LABEL org.opencontainers.image.revision=$BUILD_COMMIT
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    P2P_BUILD_COMMIT=$BUILD_COMMIT \
     P2P_ENV=prod \
     DB_URL=sqlite+aiosqlite:////var/lib/p2p/p2p.db \
     PYTHONPATH=/srv/p2p \

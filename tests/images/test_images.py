@@ -247,3 +247,11 @@ def test_the_api_image_starts_start_sh_under_tini() -> None:
     assert "COPY --chmod=0555 images/api/start.sh /opt/p2p/start.sh" in text
     sweep = text.index("-perm /6000 -type f -exec chmod a-s {} +")
     assert sweep > text.rindex("\nCOPY ")  # after the last file lands in the image
+
+
+def test_the_api_image_carries_its_build_commit() -> None:
+    text = (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG BUILD_COMMIT" in text and "P2P_BUILD_COMMIT=$BUILD_COMMIT" in text
+    assert "org.opencontainers.image.revision=$BUILD_COMMIT" in text
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "--build-arg BUILD_COMMIT=$$(git rev-parse HEAD)" in makefile

@@ -108,11 +108,14 @@ def test_a_plain_http_s3_endpoint_is_refused(tmp_path: Path) -> None:
 
 
 def test_forwarded_addresses_are_trusted_only_from_listed_proxies(tmp_path: Path) -> None:
-    _, calls = _run(tmp_path, P2P_FORWARDED_ALLOW_IPS="10.0.0.0/8,192.168.1.2")
+    _, calls = _run(tmp_path, P2P_FORWARDED_ALLOW_IPS="10.0.0.0/8;192.168.1.2")
     assert calls[-2].endswith(" --proxy-headers --forwarded-allow-ips=10.0.0.0/8,192.168.1.2")
 
 
-@pytest.mark.parametrize("value", ["*", "10.0.0.0/8 --reload", "$(id)"])
+@pytest.mark.parametrize(
+    "value",
+    ["*", "10.0.0.0/8 --reload", "$(id)", "0.0.0.0/0", "::/0", "10.0.0.0/8;0.0.0.0/0", "a,b"],
+)
 def test_a_wildcard_or_odd_proxy_list_is_refused(tmp_path: Path, value: str) -> None:
     done, calls = _run(tmp_path, P2P_FORWARDED_ALLOW_IPS=value)
     assert done.returncode != 0

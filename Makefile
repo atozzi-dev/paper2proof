@@ -44,7 +44,8 @@ dev: ## Migrations + uvicorn --reload on :8000 with P2P_ENV=dev and .env (local 
 images: ## Build api, runner, runner-cpu, provisioner images locally (tag $(IMAGE_TAG)) + size check
 	$(DOCKER) build --platform linux/amd64 -f images/runner-cpu/Dockerfile -t p2p-runner-cpu:$(IMAGE_TAG) .
 	$(DOCKER) build --platform linux/amd64 -f images/provisioner/Dockerfile -t p2p-provisioner:$(IMAGE_TAG) .
-	$(DOCKER) build --platform linux/amd64 -f images/api/Dockerfile -t p2p-api:$(IMAGE_TAG) .
+	$(DOCKER) build --platform linux/amd64 -f images/api/Dockerfile \
+	  --build-arg BUILD_COMMIT=$$(git rev-parse HEAD) -t p2p-api:$(IMAGE_TAG) .
 	$(DOCKER) build --platform linux/amd64 -f images/runner/Dockerfile -t p2p-runner:$(IMAGE_TAG) .
 	bash scripts/check_image_size.sh $(IMAGE_TAG)
 
