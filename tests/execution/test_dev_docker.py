@@ -154,6 +154,31 @@ async def test_the_provisioner_gets_the_network_and_a_writable_cache(tmp_path: P
     assert f"type=bind,source={(tmp_path / 'cache').resolve()},target=/mnt/cache" in run
 
 
+async def test_the_fetch_job_gets_the_network_and_no_cache(tmp_path: Path) -> None:
+    docker = Docker()
+    backend = _backend(tmp_path, docker)
+    volumes = [VolumeMount(source=f"p2p-run-{SLUG}", mount_path="/mnt/run", mode="rw")]
+    await backend.submit(_spec(JobKind.FETCH, volumes=volumes))
+    run = _run_argv(docker)
+    assert "--network=none" not in run  # it clones and downloads
+    assert not any("target=/mnt/cache" in a for a in run)
+
+
+async def test_a_fetch_job_with_the_cache_is_refused_even_unvalidated(tmp_path: Path) -> None:
+    backend = _backend(tmp_path, Docker())
+    volumes = [VolumeMount(source=f"p2p-run-{SLUG}", mount_path="/mnt/run", mode="rw")]
+    planted = _spec(JobKind.FETCH, volumes=volumes).model_copy(
+        update={
+            "volumes": [
+                *volumes,
+                VolumeMount(source="p2p-cache", mount_path="/mnt/cache", mode="ro"),
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="cache"):
+        await backend.submit(planted)
+
+
 async def test_submit_is_get_by_name(tmp_path: Path) -> None:
     docker = Docker()
     backend = _backend(tmp_path, docker)
@@ -407,3 +432,17 @@ def test_docker_cli_times_out_without_a_container_name() -> None:
     argv = [sys.executable, "-c", "import time; time.sleep(30)"]
     code, _, err = asyncio.run(docker_cli(argv, 0.5))
     assert code == -1 and "timed out" in err
+
+
+async def test_the_cache_mounts_only_at_its_path_even_unvalidated(tmp_path: Path) -> None:
+    backend = _backend(tmp_path, Docker())
+    moved = _spec(JobKind.PROVISION).model_copy(
+        update={
+            "volumes": [
+                VolumeMount(source=f"p2p-run-{SLUG}", mount_path="/mnt/run", mode="rw"),
+                VolumeMount(source="p2p-cache", mount_path="/mnt/elsewhere", mode="rw"),
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="cache"):
+        await backend.submit(moved)
