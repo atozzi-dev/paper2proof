@@ -483,6 +483,7 @@ def build_runtime(
             models=lm,
             artifacts=artifacts,
             http=http,
+            canaries=load_canaries(config_dir / "canary_allowlist.yaml"),
         ),
         StepName.PLANNING: PlanningStep(
             lm,

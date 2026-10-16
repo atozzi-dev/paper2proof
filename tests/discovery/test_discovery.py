@@ -214,3 +214,33 @@ async def test_without_a_tavily_key_discovery_still_completes(store: Store, tmp_
     discovery, _ = await _discover(store, tmp_path, tavily_key=None)
     assert discovery.repo is None
     assert any("DISCOVERY_DEGRADED" in n for n in discovery.notes)
+
+
+@respx.mock  # no route: any HTTP call (arXiv, HF, Tavily) fails the test
+async def test_a_canary_paper_never_searches_for_code(store: Store, tmp_path: Path) -> None:
+    """Canary titles are public: a repository anyone could publish must never steer the Coder
+    whose code runs on the developer machine (A-29 review)."""
+    canary = "c" * 64
+    fake = FakeModelClient(LLM_FIXTURES)
+    artifacts = LocalArtifactStore(tmp_path)
+    ctx = await ctx_at(
+        store,
+        StepName.DISCOVERING,
+        previous=[(StepName.INGESTING, "x"), (StepName.EXTRACTING_CLAIMS, "y")],
+        arxiv_id="0000.00001",
+    )
+    await store.set_paper_sha256(RUN, canary)
+    step = DiscoveringStep(
+        store=store,
+        arxiv=ArxivClient(limiter=RateLimiter(0.0, sleep=_no_sleep)),
+        tavily=TavilyClient(SecretStr("test-key-not-real")),
+        models=fake,
+        artifacts=artifacts,
+        canaries=frozenset({canary}),
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.PLANNING and result.output_ref is not None
+    discovery = Discovery.model_validate(artifacts.get_json(result.output_ref))
+    assert discovery.repo is None and discovery.datasets == []
+    assert any("canary" in note for note in discovery.notes)
+    assert not fake.calls
