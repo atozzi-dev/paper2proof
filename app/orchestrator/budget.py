@@ -18,6 +18,7 @@ from typing import Protocol
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.observability import metrics
 from app.settings import Env
 
 EPSILON = 1e-9
@@ -194,6 +195,7 @@ class Budget:
             )
             if reservation.kind is SpendKind.CLOUD_USD:
                 await self._trip_if_over(reservation.day)
+        metrics.spend(reservation.kind.value, actual)
 
     async def enforce_daily_cloud_cap(self, day: date) -> None:
         """Trip the kill switch when cloud spend written without a reservation (the reaper

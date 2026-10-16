@@ -17,6 +17,7 @@ from app.orchestrator.budget import Budget, SpendKind, load_budget_limits
 from app.orchestrator.reaper import Reaper, reaper_rates
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
+from tests.observability.fakes import Telemetry
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN = "r_01jb7z00000000000000000000"
@@ -460,3 +461,31 @@ def test_rates_cover_every_job_kind() -> None:
     rates = reaper_rates(load_cloud_prices(ROOT / "config" / "pricing.yaml"))
     assert set(rates) == {kind.value for kind in JobKind}
     assert rates["exec"] > rates["prov"] > 0
+
+
+async def test_reaper_spend_and_actions_are_exported(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    telemetry = Telemetry(monkeypatch)
+    await world.run(RUN, RunStatus.FAILED)
+    started = NOW - timedelta(minutes=30)
+    handle = add_job(world.backend, JobKind.EXEC, RUN, JobState.SUCCEEDED, started)
+    await world.record(handle, "exec", RUN, started)
+    await world.reaper.tick()
+    cost = telemetry.points("p2p_cost_usd_total")[(("kind", "cloud"),)]
+    assert cost == pytest.approx(RATES["exec"] * 0.5)
+    assert telemetry.points("p2p_gpu_seconds_total") == {(): pytest.approx(1800.0)}
+    assert telemetry.points("p2p_reaper_actions_total") == {(("action", "ledger_reconciled"),): 1}
+
+
+async def test_the_reaper_exports_the_age_of_the_oldest_running_job(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    telemetry = Telemetry(monkeypatch)
+    await world.run(RUN, RunStatus.RUNNING, StepName.EXECUTING)
+    add_job(world.backend, JobKind.EXEC, RUN, JobState.RUNNING, NOW - timedelta(minutes=50))
+    add_job(world.backend, JobKind.EXEC, RUN2, JobState.SUCCEEDED, NOW - timedelta(hours=2))
+    await world.reaper.tick()
+    oldest = telemetry.points("p2p_job_oldest_running_seconds")
+    assert oldest[(("kind", "exec"),)] == pytest.approx(3000.0)
+    assert oldest[(("kind", "prov"),)] == 0
