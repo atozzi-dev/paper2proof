@@ -4,7 +4,8 @@ import pytest
 HEADERS = {
     "content-security-policy": (
         "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-        "connect-src 'self'; frame-ancestors 'none'"
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
+        "object-src 'none'"
     ),
     "strict-transport-security": "max-age=31536000",
     "x-content-type-options": "nosniff",

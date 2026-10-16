@@ -3,6 +3,7 @@
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fastapi import HTTPException, Request
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -32,6 +33,7 @@ class AppState:
     models_ready: bool = False
     replication_ready: bool = True  # set by the prod start script check (Litestream)
     draining: bool = False
+    web_dist: Path | None = None  # the built UI (web/dist), served after every API route
     sse_poll_s: float = 0.5
     sse_heartbeat_s: float = 15.0
     sse_streams_per_session: int = 2

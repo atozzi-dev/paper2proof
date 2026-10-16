@@ -4,6 +4,7 @@ resolved at startup, interrupted runs resumed."""
 import asyncio
 import dataclasses
 import json
+import multiprocessing
 import os
 import stat
 from collections.abc import AsyncIterator
@@ -409,3 +410,9 @@ def test_authorized_keys_leave_the_environment_and_their_private_part_is_redacte
     settings = _settings(tmp_path, runtime_auth_key=SecretStr(key))
     secrets = main.known_secrets(settings)
     assert key in secrets and private in secrets
+
+
+def test_the_cpu_pool_never_forks_a_threaded_process() -> None:
+    method = main.pool_start_method()
+    assert method in multiprocessing.get_all_start_methods()
+    assert method != "fork"  # aiosqlite and asyncio threads are already running

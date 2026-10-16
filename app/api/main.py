@@ -1,12 +1,16 @@
 """FastAPI application factory. Wiring of real services happens in app/main.py (A-14)."""
 
 import logging
+from pathlib import PurePath
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Match, Mount
+from starlette.types import ASGIApp, Scope
 
 from app.api import admin, auth, gallery, runs
 from app.api.deps import AppState, get_state
@@ -62,4 +66,43 @@ def create_app(state: AppState) -> FastAPI:
     app.include_router(runs.router)
     app.include_router(gallery.router)
     app.include_router(admin.router)
+    dist = getattr(state, "web_dist", None)  # openapi_export builds the app without a state
+    if dist is not None and (dist / "index.html").is_file():
+        app.router.routes.append(WebMount(WebFiles(directory=dist, html=True), API_ROOTS))
     return app
+
+
+API_ROOTS = frozenset({"api", "admin", "healthz", "readyz"})  # first segment of every route
+
+
+class WebMount(Mount):
+    """The UI at "/", after every route. API paths never reach it: a wrong method on an API
+    route stays the router's 405, never a static 404 or a file."""
+
+    def __init__(self, app: ASGIApp, api_roots: frozenset[str]) -> None:
+        super().__init__("/", app=app, name="web")
+        self._api_roots = api_roots
+
+    def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        root = str(scope.get("path", "")).lstrip("/").split("/", 1)[0]
+        if root in self._api_roots:
+            return Match.NONE, {}
+        return super().matches(scope)
+
+
+class WebFiles(StaticFiles):
+    """The built UI. Hashed assets never change (cached for good); index.html always
+    revalidates, so a deploy is visible at once. The CSP comes from SecurityHeadersMiddleware."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        parts = PurePath(path).parts  # an OS path (backslashes on Windows)
+        if not parts and scope.get("path") != "/":
+            raise StarletteHTTPException(404)  # "/." or "/assets/..": only "/" is the page
+        response = await super().get_response(path, scope)
+        if 300 <= response.status_code < 400 and response.status_code != 304:
+            raise StarletteHTTPException(404)  # no directory redirects built from the Host
+        immutable = parts[:1] == ("assets",) and response.status_code in (200, 206, 304)
+        response.headers["cache-control"] = (
+            "public, max-age=31536000, immutable" if immutable else "no-cache"
+        )
+        return response

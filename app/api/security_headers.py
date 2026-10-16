@@ -19,7 +19,8 @@ SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     (
         b"content-security-policy",
         b"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-        b"connect-src 'self'; frame-ancestors 'none'",
+        b"connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
+        b"object-src 'none'",
     ),
     (b"strict-transport-security", b"max-age=31536000"),
     (b"x-content-type-options", b"nosniff"),
