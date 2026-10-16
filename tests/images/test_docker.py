@@ -1,0 +1,194 @@
+"""The built images (A-06), on the local Docker daemon: `make images`, then `make test-docker`.
+Skipped when an image is missing. One test downloads a package from PyPI."""
+
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+from packaging.version import Version
+
+pytestmark = pytest.mark.docker
+TAG = "dev"
+ALL = ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner", "p2p-api"]
+
+
+def _docker(args: list[str], timeout: float = 600) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(  # noqa: S603 - the docker CLI with arguments built by these tests
+        ["docker", *args],  # noqa: S607
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _need(*images: str) -> None:
+    for image in images:
+        try:
+            found = _docker(["image", "inspect", f"{image}:{TAG}"], timeout=30).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            found = False
+        if not found:
+            pytest.skip(f"{image}:{TAG} not built (make images)")
+
+
+def _run(image: str, *argv: str, entrypoint: str, mounts: tuple[str, ...] = ()) -> str:
+    _need(image)
+    done = _docker(
+        ["run", "--rm", "--network", "none", "--entrypoint", entrypoint, *mounts,
+         f"{image}:{TAG}", *argv]
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr[-2000:]
+    return done.stdout
+
+
+@pytest.mark.parametrize("image", ALL)
+def test_images_run_as_p2p(image: str) -> None:
+    assert _run(image, "-u", entrypoint="id").strip() == "10001"
+
+
+def test_the_cpu_runner_imports_its_stack() -> None:
+    _run("p2p-runner-cpu", "-c", "import torch, timm, transformers, datasets", entrypoint="python")
+
+
+@pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner"])
+def test_runner_constraints_are_root_owned_and_read_only(image: str) -> None:
+    out = _run(image, "-c", "%U %a", "/opt/p2p/runner-constraints.txt", entrypoint="stat")
+    assert out.split() == ["root", "444"]
+
+
+def test_constraints_match_the_cpu_runner_s_versions() -> None:
+    script = (
+        "import importlib.metadata as m\n"
+        "lines = open('/opt/p2p/runner-constraints.txt').read().split()\n"
+        "pins = dict(line.split('==') for line in lines if '==' in line)\n"
+        "for name in ('numpy', 'transformers', 'torch'):\n"
+        "    assert m.version(name).split('+')[0] == pins[name], name\n"
+    )
+    _run("p2p-runner-cpu", "-c", script, entrypoint="python")
+
+
+def test_the_entrypoint_starts_under_tini_and_rejects_a_missing_manifest() -> None:
+    _need("p2p-runner-cpu")
+    done = _docker(["run", "--rm", "--network", "none", f"p2p-runner-cpu:{TAG}"], timeout=300)
+    assert done.returncode == 30  # contract error: no /etc/p2p/manifest.json
+    assert "CONTRACT ERROR" in done.stderr
+
+
+def test_real_zstd_extraction_round_trip() -> None:
+    script = (
+        "import hashlib, pathlib, subprocess, sys\n"
+        "sys.path.insert(0, '/opt/p2p')\n"
+        "import entrypoint\n"
+        "src = pathlib.Path('/tmp/src'); (src / 'a').mkdir(parents=True)\n"
+        "(src / 'a' / 'x.txt').write_text('hello')\n"
+        "subprocess.run(['tar', '-I', 'zstd -T0', '-cf', '/tmp/a.tar.zst', '-C', str(src), '.'],"
+        " check=True)\n"
+        "archive = pathlib.Path('/tmp/a.tar.zst')\n"
+        "digest = hashlib.sha256(archive.read_bytes()).hexdigest()\n"
+        "entrypoint.tar_extract(archive, pathlib.Path('/tmp/out'), digest)\n"
+        "assert (pathlib.Path('/tmp/out') / 'a' / 'x.txt').read_text() == 'hello'\n"
+        "try:\n"
+        "    entrypoint.tar_extract(archive, pathlib.Path('/tmp/bad'), '0' * 64)\n"
+        "except entrypoint.ContractError:\n"
+        "    print('rejected')\n"
+    )
+    assert _run("p2p-runner-cpu", "-c", script, entrypoint="python").strip() == "rejected"
+
+
+def test_the_provisioner_packs_deterministically() -> None:
+    # provision.py's _pack flags with zstd -T0 (one worker per core): multithreaded zstd
+    # output must not depend on the worker count, so hosts with different cores agree
+    script = (
+        "set -e; mkdir -p /tmp/t/d; echo x > /tmp/t/f\n"
+        "head -c 64000000 /dev/urandom > /tmp/t/d/blob\n"
+        'for t in 2 4 0; do tar -I "zstd -T$t" --sort=name --mtime=@0 --owner=0 --group=0'
+        " --numeric-owner -cf /tmp/$t.tar.zst -C /tmp/t .; done\n"
+        "sha256sum /tmp/2.tar.zst /tmp/4.tar.zst /tmp/0.tar.zst | cut -d' ' -f1 | uniq | wc -l\n"
+    )
+    assert _run("p2p-provisioner", "-c", script, entrypoint="sh").strip() == "1"
+
+
+def test_the_provisioner_has_safe_pyarrow_git_and_uv() -> None:
+    out = _run(
+        "p2p-provisioner",
+        "-c",
+        "import pyarrow, huggingface_hub, shutil; "
+        "print(pyarrow.__version__, bool(shutil.which('git')), bool(shutil.which('uv')))",
+        entrypoint="python",
+    ).split()
+    assert Version(out[0]) >= Version("14.0.1") and out[1:] == ["True", "True"]
+
+
+def test_the_api_image_has_the_app_the_ui_and_litestream() -> None:
+    out = _run(
+        "p2p-api",
+        "-c",
+        "import app.api.main, pathlib, shutil; "
+        "print(pathlib.Path('web/dist/index.html').is_file(), bool(shutil.which('litestream')))",
+        entrypoint="python",
+    ).split()
+    assert out == ["True", "True"]
+
+
+def test_a_provisioned_overlay_imports_in_the_cpu_runner(tmp_path: Path) -> None:
+    """End to end on real images: the provisioner locks and packs `tabulate` (from PyPI), the
+    CPU runner extracts the overlay against its digest and imports it."""
+    _need("p2p-provisioner", "p2p-runner-cpu")
+    run, cache = tmp_path / "run", tmp_path / "cache"
+    for d in (run / "staging", cache):
+        d.mkdir(parents=True)
+    manifest = {
+        "schema": "p2p.provision/v1", "run_id": "r_01jb7z00000000000000000000",
+        "packages": ["tabulate", "torchmetrics"], "repo": None, "datasets": [],
+        "smoke_subset": None,
+        "hf_token_secret": None, "cache_salt": "test", "policy": {"denylist": [], "popular": []},
+        "trusted_overlays": {}, "deadline_unix": 4102444800.0,
+    }  # fmt: skip
+    (tmp_path / "provision.json").write_text(json.dumps(manifest))
+    done = _docker(
+        ["run", "--rm", "--user", "0:0",  # host bind mounts are root-owned on Docker Desktop
+         "-v", f"{run}:/mnt/run", "-v", f"{cache}:/mnt/cache",
+         "-v", f"{tmp_path / 'provision.json'}:/etc/p2p/provision.json:ro",
+         f"p2p-provisioner:{TAG}"],
+        timeout=900,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr[-3000:]
+    report = json.loads((run / "staging" / "provision_report.json").read_text())
+    overlay = run / "staging" / "overlay.tar.zst"
+    assert hashlib.sha256(overlay.read_bytes()).hexdigest() == report["overlay_sha256"]
+    script = (
+        "import pathlib, subprocess, sys\n"
+        "sys.path.insert(0, '/opt/p2p')\n"
+        "import entrypoint\n"
+        "entrypoint.tar_extract(pathlib.Path('/mnt/run/staging/overlay.tar.zst'),"
+        f" pathlib.Path('/tmp/overlay'), {report['overlay_sha256']!r})\n"
+        "assert not [p for p in pathlib.Path('/tmp/overlay').iterdir()"
+        " if p.name.startswith(('torch', 'nvidia', 'cuda', 'triton'))"
+        " and not p.name.startswith('torchmetrics')], 'the runner provides torch'\n"
+        "subprocess.run([sys.executable, '-c', 'import tabulate, torchmetrics'], check=True,"
+        " env={'PYTHONPATH': '/tmp/overlay'})\n"
+    )
+    _run("p2p-runner-cpu", "-c", script, entrypoint="python", mounts=("-v", f"{run}:/mnt/run:ro"))
+
+
+@pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner"])
+def test_tini_is_pid_1(image: str) -> None:
+    _need(image)
+    done = _docker(
+        ["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/tini", f"{image}:{TAG}",
+         "--", "cat", "/proc/1/comm"]
+    )  # fmt: skip
+    assert done.stdout.strip() == "tini"
+
+
+@pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner"])
+def test_the_environment_is_read_only_and_work_is_writable(image: str) -> None:
+    script = (
+        "touch /opt/venv/x 2>/dev/null && echo venv-writable; "
+        "touch /opt/p2p/x 2>/dev/null && echo p2p-writable; "
+        "touch /work/x && echo work-ok"
+    )
+    assert _run(image, "-c", script, entrypoint="sh").split() == ["work-ok"]

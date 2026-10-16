@@ -1,8 +1,10 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup lint test test-live dev images tf-check eval
+.PHONY: help setup lint test test-docker test-live dev images tf-check eval
 
 UV ?= uv
 NPM ?= npm
+DOCKER ?= docker
+IMAGE_TAG ?= dev
 SHELL_SCRIPTS := $(wildcard spikes/*.sh deploy/*.sh scripts/*.sh)
 
 help: ## List targets
@@ -25,8 +27,11 @@ endif
 	cd web && $(NPM) run lint && $(NPM) run typecheck
 
 test: ## pytest (no live tests) + vitest
-	$(UV) run pytest -m "not live" --cov=app/verdict --cov-fail-under=100
+	$(UV) run pytest -m "not live and not docker" --cov=app/verdict --cov-fail-under=100
 	cd web && $(NPM) test
+
+test-docker: ## Tests on the built images (make images first; one test downloads from PyPI)
+	$(UV) run pytest -m docker tests/images
 
 test-live: ## Real Token Factory / Tavily / Nebius calls: costs money, ask first
 	@echo "not implemented yet (A-20)"; exit 1
@@ -34,8 +39,12 @@ test-live: ## Real Token Factory / Tavily / Nebius calls: costs money, ask first
 dev: ## MinIO + uvicorn --reload with P2P_ENV=dev
 	@echo "not implemented yet (A-13)"; exit 1
 
-images: ## Build api, runner, runner-cpu, provisioner images locally
-	@echo "not implemented yet (A-06)"; exit 1
+images: ## Build api, runner, runner-cpu, provisioner images locally (tag $(IMAGE_TAG)) + size check
+	$(DOCKER) build --platform linux/amd64 -f images/runner-cpu/Dockerfile -t p2p-runner-cpu:$(IMAGE_TAG) .
+	$(DOCKER) build --platform linux/amd64 -f images/provisioner/Dockerfile -t p2p-provisioner:$(IMAGE_TAG) .
+	$(DOCKER) build --platform linux/amd64 -f images/api/Dockerfile -t p2p-api:$(IMAGE_TAG) .
+	$(DOCKER) build --platform linux/amd64 -f images/runner/Dockerfile -t p2p-runner:$(IMAGE_TAG) .
+	bash scripts/check_image_size.sh $(IMAGE_TAG)
 
 tf-check: ## terraform fmt -check, validate, tflint, checkov
 	@echo "not implemented yet (A-03)"; exit 1
