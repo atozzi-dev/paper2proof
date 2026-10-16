@@ -2,9 +2,17 @@
 schemas/results.schema.json. tests/contracts keeps both sides in agreement."""
 
 import re
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from app.domain.models import ClaimType
 
@@ -25,6 +33,13 @@ class ScaleSpec(_Strict):
     fraction_of_data: float | None = Field(default=None, gt=0, le=1)
     epochs: int | None = Field(default=None, ge=1)
     paper_epochs: int | None = Field(default=None, ge=1)
+
+    @model_serializer(mode="wrap")
+    def _omit_unset(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Unset fields are left out, never null: the manifest and results schemas type them
+        as numbers, and the runner echoes the manifest's scale into results.json."""
+        data: dict[str, Any] = handler(self)
+        return {key: value for key, value in data.items() if value is not None}
 
 
 class DataArchive(_Strict):

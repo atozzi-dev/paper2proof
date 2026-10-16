@@ -129,6 +129,39 @@ def test_absolute_manifest_may_omit_baseline() -> None:
     assert _model_ok(ExecManifest, data)
 
 
+@pytest.mark.parametrize("scale", [{"full": False}, {"full": True, "paper_epochs": None}])
+def test_a_serialised_manifest_with_unset_scale_fields_matches_the_schema(
+    scale: dict[str, Any],
+) -> None:
+    """What the orchestrator injects and keeps: unset scale fields are left out (the schema
+    has no nulls there), while repo and baseline_name stay explicit nulls."""
+    data = copy.deepcopy(_fixture("manifest_valid.json"))
+    data.update(claim_type="ABSOLUTE", baseline_name=None, scale=scale)
+    data["paths"]["repo"] = None
+    data["archives"]["repo"] = None
+    manifest = ExecManifest.model_validate(data)
+    kept = manifest.model_dump(mode="json", by_alias=True)
+    injected = json.loads(manifest.model_dump_json(by_alias=True))
+    assert kept == injected
+    assert _schema_ok(_schema("manifest.schema.json"), injected)
+    assert injected["scale"] == {"full": scale["full"]}
+    assert injected["baseline_name"] is None
+    assert injected["paths"]["repo"] is None and injected["archives"]["repo"] is None
+    assert ExecManifest.model_validate(injected) == manifest
+
+
+def test_a_serialised_results_with_unset_scale_fields_matches_the_schema() -> None:
+    data = copy.deepcopy(_fixture("results_valid.json"))
+    data["scale"] = {"full": False}
+    results = Results.model_validate(data)
+    assert _schema_ok(
+        _schema("results.schema.json"), json.loads(results.model_dump_json(by_alias=True))
+    )
+    assert _schema_ok(
+        _schema("results.schema.json"), results.model_dump(mode="json", by_alias=True)
+    )
+
+
 # --- events.schema.json ------------------------------------------------------------------
 
 
