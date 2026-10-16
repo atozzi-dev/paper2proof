@@ -3,7 +3,7 @@
 # .github/workflows/spike-s7-oidc.yml on a branch named spike/oidc, push, read the job log,
 # then tear everything down (branch AND federated credential). Repository variables (not secrets):
 #   NEBIUS_SPIKE_SA_ID            id of a THROWAWAY service account with no roles (required)
-#   NEBIUS_CLI_INSTALLER_SHA256   sha256 of https://storage.eu-north1.nebius.cloud/cli/install.sh,
+#   NEBIUS_CLI_INSTALLER_SHA256   sha256 of https://artifacts.nebius.cloud/cli/install.sh,
 #                                 computed by you beforehand (required)
 #   NEBIUS_OIDC_AUDIENCE          audience to request from GitHub (optional, default below)
 #   NEBIUS_TOKEN_EXCHANGE_URLS    space-separated RFC 8693 endpoints to try (optional)
@@ -36,7 +36,7 @@ jobs:
           INSTALLER_SHA256: ${{ vars.NEBIUS_CLI_INSTALLER_SHA256 }}
         run: |
           test -n "$INSTALLER_SHA256" || { echo "set NEBIUS_CLI_INSTALLER_SHA256"; exit 1; }
-          curl -fsSL -o "$RUNNER_TEMP/install.sh" https://storage.eu-north1.nebius.cloud/cli/install.sh
+          curl -fsSL -o "$RUNNER_TEMP/install.sh" https://artifacts.nebius.cloud/cli/install.sh
           echo "$INSTALLER_SHA256  $RUNNER_TEMP/install.sh" | sha256sum -c -
           bash "$RUNNER_TEMP/install.sh"
           echo "$HOME/.nebius/bin" >> "$GITHUB_PATH"
