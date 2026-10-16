@@ -1,0 +1,23 @@
+import type { RunStatus, StepName } from '../types/api'
+
+export const PIPELINE: { step: StepName; label: string }[] = [
+  { step: 'INGESTING', label: 'Ingesting the paper' },
+  { step: 'EXTRACTING_CLAIMS', label: 'Extracting claims' },
+  { step: 'DISCOVERING', label: 'Discovering code and data' },
+  { step: 'PLANNING', label: 'Planning the experiment' },
+  { step: 'AWAITING_APPROVAL', label: 'Awaiting approval' },
+  { step: 'PROVISIONING', label: 'Provisioning packages and data' },
+  { step: 'SMOKE_TESTING', label: 'Smoke testing in the sandbox' },
+  { step: 'EXECUTING', label: 'Executing on GPU' },
+  { step: 'ANALYZING', label: 'Analyzing results' },
+  { step: 'VERDICT', label: 'Verdict' },
+]
+
+export const STATUS_TEXT: Record<RunStatus, string> = {
+  QUEUED: 'Queued',
+  RUNNING: 'Running',
+  COMPLETED: 'Completed',
+  FAILED: 'Failed',
+  CANCELLED: 'Cancelled',
+  BUDGET_EXCEEDED: 'Stopped: budget reached',
+}

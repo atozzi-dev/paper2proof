@@ -21,6 +21,7 @@ from app.api.deps import (
 )
 from app.api.sse import event_stream, replay_stream
 from app.bundle.store import PRESIGN_TTL_S, download_name
+from app.domain.events import EventEnvelope
 from app.domain.ids import new_run_id
 from app.domain.models import Claim, ErrorCode, RunStatus, StepName, Verdict
 
@@ -73,6 +74,12 @@ class RunView(BaseModel):
     steps: list[StepView]
     claims: list[ClaimView]
     verdicts: list[VerdictView]
+
+
+class EventsPage(BaseModel):
+    """Polling fallback; typed so the event payloads reach the OpenAPI schema (web types)."""
+
+    events: list[EventEnvelope]
 
 
 @router.post("/api/runs", status_code=202)
@@ -192,10 +199,9 @@ async def events(
 @router.get("/api/runs/{run_id}/events.json")
 async def events_json(
     run_id: str, request: Request, after: Annotated[int, Query(ge=0)] = 0
-) -> dict[str, list[dict[str, object]]]:
+) -> EventsPage:
     await visible_run(request, run_id)
-    stored = await get_state(request).store.events_after(run_id, after)
-    return {"events": [e.model_dump(mode="json") for e in stored]}
+    return EventsPage(events=await get_state(request).store.events_after(run_id, after))
 
 
 async def _decide(request: Request, run_id: str, decision: str) -> Response:
