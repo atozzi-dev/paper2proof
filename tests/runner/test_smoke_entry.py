@@ -88,6 +88,7 @@ def _setup(
         "timeout_s": 60,
         "workspace_sha256": hashlib.sha256(tar).hexdigest(),
         "nonce": NONCE,
+        "archives": {"overlay": "a" * 64, "repo": None, "data": []},
     }
     manifest.update(overrides)
     path = tmp_path / "smoke.json"
@@ -95,12 +96,20 @@ def _setup(
     return path, mnt
 
 
+EXTRACTED: list[tuple[str, str]] = []
+
+
+def _extract(archive: Path, dest: Path, sha256: str) -> None:
+    EXTRACTED.append((archive.name, sha256))
+    dest.mkdir(parents=True, exist_ok=True)
+
+
 def _run(path: Path, mnt: Path, tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
     code = smoke.run(
         path,
         mnt=mnt,
         work=tmp_path / "work",
-        extract=lambda archive, dest: dest.mkdir(parents=True, exist_ok=True),
+        extract=_extract,
         **kwargs,
     )
     assert code == 0  # the job succeeds whenever it could write a result
@@ -143,11 +152,13 @@ def test_timeouts_are_enforced(tmp_path: Path) -> None:
         {"schema": "other"},
         {"workspace_sha256": "not-hex"},
         {"nonce": "x"},
+        {"archives": {"overlay": "x", "repo": None, "data": []}},
+        {"archives": None},
     ],
 )
 def test_invalid_manifests_are_contract_errors(tmp_path: Path, override: dict[str, Any]) -> None:
     path, mnt = _setup(tmp_path, **override)
-    code = smoke.run(path, mnt=mnt, work=tmp_path / "work", extract=lambda a, d: None)
+    code = smoke.run(path, mnt=mnt, work=tmp_path / "work", extract=lambda a, d, s: None)
     assert code == 30
     assert not (mnt / "smoke" / "3" / "result.json").exists()
 
@@ -204,3 +215,28 @@ def test_only_flat_numeric_metrics_are_reported(tmp_path: Path) -> None:
     path, mnt = _setup(tmp_path, tar=workspace_tar({"train.py": script.encode()}))
     result = _run(path, mnt, tmp_path)
     assert result["metrics"] == {"acc": 0.5}
+
+
+def test_staging_archives_are_extracted_with_their_manifest_digests(tmp_path: Path) -> None:
+    archives = {
+        "overlay": "a" * 64,
+        "repo": "b" * 64,
+        "data": [{"name": "smoke", "sha256": "c" * 64}],
+    }
+    path, mnt = _setup(tmp_path, archives=archives)
+    (mnt / "staging" / "repo.tar.zst").write_bytes(b"")
+    (mnt / "staging" / "data").mkdir()
+    (mnt / "staging" / "data" / "smoke.tar.zst").write_bytes(b"")
+    EXTRACTED.clear()
+    _run(path, mnt, tmp_path)
+    assert EXTRACTED == [
+        ("overlay.tar.zst", "a" * 64), ("repo.tar.zst", "b" * 64), ("smoke.tar.zst", "c" * 64),
+    ]  # fmt: skip
+
+
+def test_an_unlisted_repo_archive_is_ignored(tmp_path: Path) -> None:
+    path, mnt = _setup(tmp_path)  # repo digest null
+    (mnt / "staging" / "repo.tar.zst").write_bytes(b"planted")
+    EXTRACTED.clear()
+    _run(path, mnt, tmp_path)
+    assert [name for name, _ in EXTRACTED] == ["overlay.tar.zst"]

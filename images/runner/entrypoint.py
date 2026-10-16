@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -50,7 +51,9 @@ DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 MANIFEST_KEYS = {
     "schema", "run_id", "attempt", "image_digest", "entrypoint", "args", "seeds", "budget_seconds",
     "paths", "claim_ref", "metric", "higher_is_better", "claim_type", "baseline_name", "scale",
+    "archives",
 }  # fmt: skip
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PATH_KEYS = {"overlay", "repo", "data_dir", "workspace", "cache", "results"}
 SCALE_KEYS = {"full", "fraction_of_data", "epochs", "paper_epochs"}
 ARCHIVE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
@@ -136,6 +139,24 @@ def _validate(manifest: Any) -> dict[str, Any]:
     scale = m["scale"]
     need(isinstance(scale, dict) and set(scale) <= SCALE_KEYS, "scale")
     need(isinstance(scale.get("full"), bool), "scale.full")
+    archives = m["archives"]
+    need(isinstance(archives, dict) and set(archives) == {"overlay", "repo", "data"}, "archives")
+    need(
+        isinstance(archives["overlay"], str) and bool(SHA256.fullmatch(archives["overlay"])),
+        "overlay",
+    )
+    repo = archives["repo"]
+    need(repo is None or (isinstance(repo, str) and bool(SHA256.fullmatch(repo))), "archives.repo")
+    data = archives["data"]
+    need(isinstance(data, list) and len(data) <= 3, "archives.data")
+    for entry in data:
+        need(isinstance(entry, dict) and set(entry) == {"name", "sha256"}, "archives.data")
+        name, digest = entry["name"], entry["sha256"]
+        need(
+            isinstance(name, str) and bool(ARCHIVE_NAME.fullmatch(name)) and set(name) != {"."},
+            "archives.data.name",
+        )
+        need(isinstance(digest, str) and bool(SHA256.fullmatch(digest)), "archives.data.sha256")
     return m
 
 
@@ -160,24 +181,54 @@ def extract_stream(stream: IO[bytes], dest: Path, *, max_bytes: int, max_members
             tar.extract(member, dest, filter="data")
 
 
-def tar_extract(archive: Path, dest: Path) -> None:  # pragma: no cover - needs zstd in the image
-    proc = subprocess.Popen(["zstd", "-dc", "--", str(archive)], stdout=subprocess.PIPE)
-    if proc.stdout is None:
-        raise ContractError("zstd produced no stream")
+def _feed(archive: Path, sink: IO[bytes], digest: Any) -> None:
+    """Read the archive once: every byte is hashed and handed to the decompressor."""
+    try:
+        with archive.open("rb") as source:
+            for chunk in iter(lambda: source.read(1 << 20), b""):
+                digest.update(chunk)
+                sink.write(chunk)
+    except (BrokenPipeError, ValueError):
+        pass  # the extractor stopped early; its own error explains why
+    finally:
+        with contextlib.suppress(OSError):
+            sink.close()
+
+
+def tar_extract(
+    archive: Path, dest: Path, sha256: str, *, decompress: Sequence[str] = ("zstd", "-dc")
+) -> None:
+    """Extract while hashing the very bytes read (no window for a swapped file): a digest
+    other than the manifest's discards everything extracted."""
+    proc = subprocess.Popen(list(decompress), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    if proc.stdout is None or proc.stdin is None:
+        raise ContractError("the decompressor produced no stream")
+    digest = hashlib.sha256()
+    feeder = threading.Thread(target=_feed, args=(archive, proc.stdin, digest), daemon=True)
+    feeder.start()
     try:
         extract_stream(
             proc.stdout, dest, max_bytes=MAX_ARCHIVE_BYTES, max_members=MAX_ARCHIVE_MEMBERS
         )
+        proc.stdout.read()  # drain: the digest must cover the whole file
     except tarfile.TarError as err:
+        proc.kill()
+        shutil.rmtree(dest, ignore_errors=True)
         raise ContractError(f"unreadable archive {archive.name}: {err}") from None
     except BaseException:
-        proc.kill()  # the real reason is the exception in flight, not zstd's exit status
+        proc.kill()  # the real reason is the exception in flight, not the decompressor's status
+        shutil.rmtree(dest, ignore_errors=True)
         raise
     finally:
+        feeder.join(timeout=60)
         proc.stdout.close()
         status = proc.wait(timeout=60)
     if status != 0:
+        shutil.rmtree(dest, ignore_errors=True)
         raise ContractError(f"could not decompress {archive.name}")
+    if digest.hexdigest() != sha256:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise ContractError(f"{archive.name} does not match its manifest digest")
 
 
 def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
@@ -352,7 +403,7 @@ def run(
     manifest_path: Path,
     *,
     work: Path,
-    extract: Callable[[Path, Path], None] = tar_extract,
+    extract: Callable[[Path, Path, str], None] = tar_extract,
     gpu_name: Callable[[], str] = nvidia_gpu_name,
     flush_interval_s: float = 10.0,
     on_flush: Callable[[str], None] | None = None,
@@ -410,20 +461,19 @@ def run(
     try:
         if not script.is_file():
             raise ContractError("entrypoint not found in the workspace")
+        digests = manifest["archives"]
         if not Path(paths["overlay"]).is_file():
             raise ContractError("overlay archive missing")
-        extract(Path(paths["overlay"]), overlay)
+        extract(Path(paths["overlay"]), overlay, digests["overlay"])
         if paths["repo"]:
-            if not Path(paths["repo"]).is_file():
-                raise ContractError("repository archive missing")
-            extract(Path(paths["repo"]), repo)
-        data_dir = Path(paths["data_dir"])
-        if data_dir.is_dir():
-            for archive in sorted(data_dir.glob("*.tar.zst")):
-                name = archive.name.removesuffix(".tar.zst")
-                if not ARCHIVE_NAME.fullmatch(name) or set(name) == {"."}:
-                    raise ContractError(f"invalid data archive name: {archive.name[:100]}")
-                extract(archive, data / name)
+            if not Path(paths["repo"]).is_file() or digests["repo"] is None:
+                raise ContractError("repository archive or its digest missing")
+            extract(Path(paths["repo"]), repo, digests["repo"])
+        for entry in digests["data"]:  # exactly the listed archives: nothing else is trusted
+            archive = Path(paths["data_dir"]) / f"{entry['name']}.tar.zst"
+            if not archive.is_file():
+                raise ContractError(f"data archive {entry['name']} missing")
+            extract(archive, data / entry["name"], entry["sha256"])
         gpu = gpu_name()  # nvidia-smi can take seconds: SIGTERM here still writes results
     except (ContractError, OSError, subprocess.SubprocessError) as err:
         print(f"CONTRACT ERROR: {err}", file=sys.stderr)

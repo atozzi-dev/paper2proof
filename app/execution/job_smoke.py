@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
+from app.domain.contracts import ArchiveDigests
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -60,6 +61,7 @@ class JobSmokeExecutor:
         self,
         ctx: RunContext,
         *,
+        archives: ArchiveDigests,
         storage: RunStorage,
         config: ExecutionConfig,
         cloud: CloudPrices,
@@ -68,6 +70,7 @@ class JobSmokeExecutor:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._ctx = ctx
+        self._archives = archives  # what the smoke runner may extract, with digests
         self._storage = storage
         self._config = config
         self._usd_per_hour = cloud.hourly(SMOKE_PLATFORM, SMOKE_PRESET)
@@ -122,6 +125,7 @@ class JobSmokeExecutor:
             "timeout_s": timeout_s,
             "workspace_sha256": digest,
             "nonce": nonce,
+            "archives": self._archives.model_dump(mode="json"),
         }
         bucket = await ctx.jobs.ensure_run_bucket(env_id)
         spec = JobSpec(

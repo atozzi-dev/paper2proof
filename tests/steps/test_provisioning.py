@@ -546,3 +546,27 @@ async def test_the_repository_snapshot_digest_is_kept(store: Store, tmp_path: Pa
     result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
     assert result.output_ref is not None
     assert artifacts.get_json(result.output_ref)["repo_files_sha256"] == "d" * 64
+
+
+async def test_archive_digests_are_kept_and_validated(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(
+        storage,
+        repo_sha256="e" * 64,
+        data_archives=[
+            {"name": "uoft-cs__cifar10", "sha256": "f" * 64},
+            {"name": "smoke", "sha256": "1" * 64},
+            {"name": "../evil", "sha256": "2" * 64},
+            {"name": "x", "sha256": "short"},
+        ],
+    )
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert stored["repo_sha256"] == "e" * 64
+    assert stored["data_archives"] == [
+        {"name": "uoft-cs__cifar10", "sha256": "f" * 64},
+        {"name": "smoke", "sha256": "1" * 64},
+    ]

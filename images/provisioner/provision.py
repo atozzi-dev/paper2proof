@@ -33,7 +33,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 SCHEMA = "p2p.provision/v1"
 RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")
@@ -307,8 +307,9 @@ def _explain(err: subprocess.SubprocessError, what: str) -> ProvisionError:
     return _fail(f"{what} failed (exit {err.returncode})")
 
 
-def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: Clock) -> None:
-    """Pack on local disk first, then copy once to the destination (FUSE mounts are slow)."""
+def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: Clock) -> str:
+    """Pack on local disk first, then copy once to the destination (FUSE mounts are slow).
+    Returns the sha256 of the local archive: never read back from the shared mount."""
     local = source.parent / f".{out.name}.local"
     runner(
         [
@@ -330,9 +331,11 @@ def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: C
         env=env,
         timeout=clock.timeout(),
     )
+    digest = _sha256(local)
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(local, out)
     local.unlink(missing_ok=True)
+    return digest
 
 
 def _lock_names(lock: str) -> list[str]:
@@ -430,8 +433,7 @@ def lock_and_overlay(
             )  # fmt: skip
         except subprocess.SubprocessError as err:
             raise _explain(err, "installing packages") from None
-    _pack(work, overlay, runner, env, clock)
-    digest = _sha256(overlay)
+    digest = _pack(work, overlay, runner, env, clock)
     _publish_to_cache(overlay, cached, digest, manifest.run_id)
     return key, False, digest
 
@@ -440,13 +442,20 @@ def _size(path: Path) -> int:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
 
 
+class RepoResult(NamedTuple):
+    requirement_files: dict[str, str]
+    commit: str | None
+    snapshot_sha256: str | None
+    archive_sha256: str | None
+
+
 def clone_repo(
     manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
-) -> tuple[dict[str, str], str | None, str | None]:
+) -> RepoResult:
     """Shallow clone; nothing from the repository is executed. Returns the text of its
     requirement files (parsed by the control plane) and the resolved commit."""
     if manifest.repo_url is None:
-        return {}, None, None
+        return RepoResult({}, None, None, None)
     dest = paths.work / "repo"
     branch = ["--branch", manifest.repo_ref] if manifest.repo_ref else []  # None: default branch
     try:
@@ -480,10 +489,15 @@ def clone_repo(
                 break
             files[path.name] = text
             budget -= cost
-    _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
+    archive_sha = _pack(dest, paths.staging / "repo.tar.zst", runner, env, clock)
     snapshot_sha = _write_snapshot(dest, paths.staging / "repo_files.json")
     resolved = commit.strip()
-    return files, resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None, snapshot_sha
+    return RepoResult(
+        files,
+        resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None,
+        snapshot_sha,
+        archive_sha,
+    )
 
 
 def _snapshot_order(rel: str) -> tuple[int, str]:
@@ -598,7 +612,9 @@ def fetch_datasets(
     clock: Clock,
     fetch: Fetcher,
     smoke: SmokeBuilder,
-) -> list[str]:
+) -> list[dict[str, str]]:
+    """Returns [{name, sha256}] for each archive written under staging/data/."""
+    archives: list[dict[str, str]] = []
     names = []
     for dataset in manifest.datasets:
         clock.timeout()
@@ -607,7 +623,8 @@ def fetch_datasets(
         fetch(dataset.id, dataset.split, dest, dataset.max_bytes)
         if _size(dest) > dataset.max_bytes:
             raise _fail(f"dataset {dataset.id} is larger than its {dataset.max_bytes}-byte cap")
-        _pack(dest, paths.staging / "data" / f"{name}.tar.zst", runner, env, clock)
+        digest = _pack(dest, paths.staging / "data" / f"{name}.tar.zst", runner, env, clock)
+        archives.append({"name": name, "sha256": digest})
         names.append(name)
     if manifest.smoke_dataset:
         source = paths.work / "data" / manifest.smoke_dataset.replace("/", "__")
@@ -617,10 +634,11 @@ def fetch_datasets(
         smoke(source, dest, manifest.smoke_rows)
         if _size(dest) > MAX_SMOKE_BYTES:
             raise _fail("smoke subset over 50 MB: lower smoke_subset.rows")
-        _pack(dest, paths.staging / "data" / "smoke.tar.zst", runner, env, clock)
+        digest = _pack(dest, paths.staging / "data" / "smoke.tar.zst", runner, env, clock)
+        archives.append({"name": "smoke", "sha256": digest})
     for name in names:  # packed (and the smoke subset built): free the local disk
         shutil.rmtree(paths.work / "data" / name, ignore_errors=True)
-    return names
+    return archives
 
 
 def _clean_staging(staging: Path) -> None:
@@ -663,8 +681,8 @@ def provision(
     _clean_staging(paths.staging)
     env = build_env(paths)
     cache_key, cache_hit, overlay_sha = lock_and_overlay(manifest, paths, runner, env, clock)
-    requirement_files, commit, snapshot_sha = clone_repo(manifest, paths, runner, env, clock)
-    datasets = fetch_datasets(manifest, paths, runner, env, clock, fetch, smoke)
+    repo = clone_repo(manifest, paths, runner, env, clock)
+    archives = fetch_datasets(manifest, paths, runner, env, clock, fetch, smoke)
     report = {
         "schema": "p2p.provision-report/v1",
         "run_id": manifest.run_id,
@@ -673,10 +691,12 @@ def provision(
         "overlay_cache_hit": cache_hit,
         "overlay_sha256": overlay_sha,
         "repo": manifest.repo_url is not None,
-        "repo_commit": commit,
-        "requirement_files": requirement_files,
-        "repo_files_sha256": snapshot_sha,  # of the bytes written, not read back
-        "datasets": datasets,
+        "repo_commit": repo.commit,
+        "requirement_files": repo.requirement_files,
+        "repo_files_sha256": repo.snapshot_sha256,  # of the bytes written, not read back
+        "datasets": [a["name"] for a in archives if a["name"] != "smoke"],
+        "repo_sha256": repo.archive_sha256,
+        "data_archives": archives,
         "smoke": manifest.smoke_dataset is not None,
     }
     (paths.staging / "provision_report.json").write_text(

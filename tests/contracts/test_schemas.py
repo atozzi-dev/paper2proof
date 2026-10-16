@@ -93,6 +93,20 @@ MANIFEST_MUTATIONS: list[tuple[str, Any]] = [
     ("duplicate seeds", lambda d: d.update(seeds=[1, 1])),
     ("extra key", lambda d: d.update(api_key="x")),
     ("missing higher_is_better", lambda d: d.pop("higher_is_better")),
+    ("archives missing", lambda d: d.pop("archives")),
+    ("overlay digest not hex", lambda d: d["archives"].update(overlay="x")),
+    ("repo digest not hex", lambda d: d["archives"].update(repo="sha256:abc")),
+    (
+        "data archive traversal",
+        lambda d: d["archives"]["data"].append({"name": "..", "sha256": "c" * 64}),
+    ),
+    (
+        "too many data archives",
+        lambda d: d["archives"].update(
+            data=[{"name": f"d{i}", "sha256": "c" * 64} for i in range(4)]
+        ),
+    ),
+    ("args set the seed", lambda d: d.update(args=["--seed", "3"])),
 ]
 
 

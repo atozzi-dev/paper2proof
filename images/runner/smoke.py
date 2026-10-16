@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # works under `python 
 from entrypoint import (
     EXIT_CONTRACT,
     RUN_ID,
+    SHA256,
     ContractError,
     LiveLog,
     Terminated,
@@ -48,7 +49,6 @@ MAX_ARGS = 32
 MAX_TIMEOUT_S = 240
 TAIL_BYTES = 48 * 1024  # per stream, as encoded in result.json (< 256 KiB in total)
 METRICS = "out/metrics.json"
-SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[0-9a-f]{32}$")
 MAX_WORKSPACE_BYTES = 16 * 1024 * 1024
 
@@ -87,6 +87,22 @@ def validate(manifest: Any) -> dict[str, Any]:
         raise SmokeContractError("invalid workspace digest")
     if not isinstance(nonce, str) or not NONCE.fullmatch(nonce):
         raise SmokeContractError("invalid nonce")
+    archives = manifest.get("archives")
+    if not isinstance(archives, dict) or set(archives) != {"overlay", "repo", "data"}:
+        raise SmokeContractError("invalid archives")
+    if not isinstance(archives["overlay"], str) or not SHA256.fullmatch(archives["overlay"]):
+        raise SmokeContractError("invalid overlay digest")
+    repo = archives["repo"]
+    if repo is not None and (not isinstance(repo, str) or not SHA256.fullmatch(repo)):
+        raise SmokeContractError("invalid repo digest")
+    data = archives["data"]
+    if not isinstance(data, list) or len(data) > 1:
+        raise SmokeContractError("invalid data archives")
+    for entry in data:
+        if not isinstance(entry, dict) or entry.get("name") != "smoke":
+            raise SmokeContractError("smoke jobs only extract the smoke subset")
+        if not isinstance(entry.get("sha256"), str) or not SHA256.fullmatch(entry["sha256"]):
+            raise SmokeContractError("invalid smoke digest")
     return manifest
 
 
@@ -165,7 +181,7 @@ def run(
     *,
     mnt: Path,
     work: Path,
-    extract: Callable[[Path, Path], None] = tar_extract,
+    extract: Callable[[Path, Path, str], None] = tar_extract,
     timeout_override_s: float | None = None,
     kill_grace_s: float = 5.0,
 ) -> int:
@@ -191,13 +207,18 @@ def run(
 
     started = time.monotonic()
     try:
+        digests = manifest["archives"]  # from the validated provision report, not the bucket
         if not (staging / "overlay.tar.zst").is_file():
             raise ContractError("overlay archive missing")
-        extract(staging / "overlay.tar.zst", overlay)
-        if (staging / "repo.tar.zst").is_file():
-            extract(staging / "repo.tar.zst", repo)
-        if (staging / "data" / "smoke.tar.zst").is_file():
-            extract(staging / "data" / "smoke.tar.zst", data / "smoke")
+        extract(staging / "overlay.tar.zst", overlay, digests["overlay"])
+        if digests["repo"] is not None:
+            if not (staging / "repo.tar.zst").is_file():
+                raise ContractError("repository archive missing")
+            extract(staging / "repo.tar.zst", repo, digests["repo"])
+        for entry in digests["data"]:
+            if not (staging / "data" / "smoke.tar.zst").is_file():
+                raise ContractError("smoke data archive missing")
+            extract(staging / "data" / "smoke.tar.zst", data / "smoke", entry["sha256"])
         _extract_workspace(out_dir / "workspace.tar", workspace, manifest["workspace_sha256"])
         (work / "home").mkdir(parents=True, exist_ok=True)
     except (ContractError, OSError, subprocess.SubprocessError, Terminated) as err:

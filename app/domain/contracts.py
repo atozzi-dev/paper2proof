@@ -1,6 +1,7 @@
 """Pydantic mirrors of the runner contracts in schemas/manifest.schema.json and
 schemas/results.schema.json. tests/contracts keeps both sides in agreement."""
 
+import re
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -9,6 +10,10 @@ from app.domain.models import ClaimType
 
 RUN_ID_PATTERN = r"^r_[0-9a-z]{26}$"
 ENTRYPOINT_PATTERN = r"^workspace/[A-Za-z0-9_./-]+\.py$"
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
+ARCHIVE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$"
+# --seed/--out/--smoke (and argparse prefixes), short clusters with -s/-o, @file
+RUNNER_FLAG = re.compile(r"^(--(s|se|see|seed|sm|smo|smok|smoke|o|ou|out)(=.*)?$|-[A-Za-z]*[so]|@)")
 
 
 class _Strict(BaseModel):
@@ -20,6 +25,27 @@ class ScaleSpec(_Strict):
     fraction_of_data: float | None = Field(default=None, gt=0, le=1)
     epochs: int | None = Field(default=None, ge=1)
     paper_epochs: int | None = Field(default=None, ge=1)
+
+
+class DataArchive(_Strict):
+    name: str = Field(pattern=ARCHIVE_NAME_PATTERN)
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @field_validator("name")
+    @classmethod
+    def _not_dots(cls, name: str) -> str:
+        if set(name) == {"."}:
+            raise ValueError("invalid archive name")
+        return name
+
+
+class ArchiveDigests(_Strict):
+    """sha256 of every archive the runner extracts, taken from the validated provision report
+    (never from the shared bucket): the runner checks each one while extracting."""
+
+    overlay: str = Field(pattern=SHA256_PATTERN)
+    repo: str | None = Field(pattern=SHA256_PATTERN)
+    data: list[DataArchive] = Field(max_length=3)
 
 
 class ManifestPaths(_Strict):
@@ -49,6 +75,7 @@ class ExecManifest(_Strict):
     claim_type: ClaimType
     baseline_name: str | None = Field(max_length=128)
     scale: ScaleSpec
+    archives: ArchiveDigests
 
     @field_validator("entrypoint")
     @classmethod
@@ -62,6 +89,8 @@ class ExecManifest(_Strict):
     def _short_args(cls, args: list[str]) -> list[str]:
         if any(len(a) > 200 for a in args):
             raise ValueError("each arg must be at most 200 characters")
+        if any(RUNNER_FLAG.match(a) for a in args):
+            raise ValueError("args may not set --seed, --out or --smoke")
         return args
 
     @field_validator("seeds")

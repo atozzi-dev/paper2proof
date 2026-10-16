@@ -542,3 +542,18 @@ def test_the_snapshot_budget_counts_its_encoding_and_keeps_sources_first(tmp_pat
     raw = (paths.staging / "repo_files.json").read_bytes()
     assert len(raw) <= int(3.5 * 1024 * 1024)
     assert "src/model.py" in json.loads(raw)["files"]
+
+
+def test_the_report_records_every_archive_digest(tmp_path: Path) -> None:
+    import hashlib
+
+    report, paths = _provision(tmp_path)
+
+    def sha(name: str) -> str:
+        return hashlib.sha256((paths.staging / name).read_bytes()).hexdigest()
+
+    assert report["repo_sha256"] == sha("repo.tar.zst")
+    assert report["data_archives"] == [
+        {"name": "uoft-cs__cifar10", "sha256": sha("data/uoft-cs__cifar10.tar.zst")},
+        {"name": "smoke", "sha256": sha("data/smoke.tar.zst")},
+    ]

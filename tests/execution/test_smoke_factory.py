@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from app.domain.contracts import ArchiveDigests
 from app.domain.models import StepName
 from app.execution.config import ExecutionConfig
 from app.execution.job_smoke import JobSmokeExecutor
@@ -45,6 +46,7 @@ async def _build(store: Store, tmp_path: Path, options: SmokeOptions) -> object:
     return build_smoke_executor(
         options,
         ctx,
+        archives=ArchiveDigests(overlay="a" * 64, repo=None, data=[]),
         storage=FakeRunStorage(),
         config=CFG,
         cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from app.domain.contracts import ArchiveDigests, DataArchive
 from app.domain.models import StepName
 from app.execution.backend import JobKind, JobSpec, JobState
 from app.execution.config import ExecutionConfig
@@ -32,6 +33,9 @@ CFG = ExecutionConfig(
 )
 NOW = datetime(2026, 10, 20, tzinfo=UTC)
 ARGV = ["python", "train.py", "--out", "out", "--smoke"]
+ARCHIVES = ArchiveDigests(
+    overlay="a" * 64, repo=None, data=[DataArchive(name="smoke", sha256="c" * 64)]
+)
 
 
 class Clock:
@@ -66,6 +70,7 @@ async def _executor(
     clock = Clock()
     executor = JobSmokeExecutor(
         ctx,
+        archives=ARCHIVES,
         storage=storage,
         config=CFG,
         cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
@@ -95,6 +100,7 @@ async def test_a_smoke_run_is_an_offline_cpu_job(store: Store) -> None:
     }
     manifest = json.loads(spec.inject_files["/etc/p2p/smoke.json"])
     nonce, digest = manifest.pop("nonce"), manifest.pop("workspace_sha256")
+    assert manifest.pop("archives") == ARCHIVES.model_dump(mode="json")
     assert manifest == {
         "schema": "p2p.smoke/v1", "run_id": RUN, "iteration": 1, "argv": ARGV, "timeout_s": 120,
     }  # fmt: skip
@@ -127,7 +133,8 @@ async def _executor_reuse(
     )
     clock = Clock()
     executor = JobSmokeExecutor(
-        ctx, storage=storage, config=CFG, cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+        ctx, archives=ARCHIVES, storage=storage, config=CFG,
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
         poll_s=5, clock=clock, sleep=clock.sleep,
     )  # fmt: skip
     return executor, None

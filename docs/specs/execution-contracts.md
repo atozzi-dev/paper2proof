@@ -99,7 +99,10 @@ means the default branch. Every resolved dependency (not only the requested name
 denylist and typosquat checks, except packages the runner image already provides.
 
 The smoke manifest (`/etc/p2p/smoke.json`, CPU smoke jobs): `{schema: "p2p.smoke/v1", run_id,
-iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce}`. `argv` is
+iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce, archives}`. `archives` (also in the exec
+manifest) lists the sha256 of the overlay, repo and data archives the runner may extract, taken from
+the validated provision report; the runners hash the bytes they read and discard anything that
+doesn't match, and never glob `staging/data`. `argv` is
 `python <script> --seed 0 --out out --smoke [args]`; args may never set or abbreviate
 `--seed`, `--out` or `--smoke` (also `-s`, `-o`, clusters and `@file`), here and in the exec
 manifest. A result counts only when the job SUCCEEDED and `result.json` echoes the nonce.

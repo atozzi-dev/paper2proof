@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.discovery.tavily import TavilyClient, TavilyUnavailable
+from app.domain.contracts import ArchiveDigests
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import Claim, ClaimType, ErrorCode, PackageReq, Plan, StepName
@@ -122,7 +123,7 @@ class SmokeTestingStep:
         models: ModelClient,
         artifacts: ArtifactStore,
         storage: RunStorage,
-        smoke: Callable[[RunContext], SmokeExecutor],
+        smoke: Callable[[RunContext, ArchiveDigests], SmokeExecutor],
         *,
         tavily: TavilyClient | None = None,
         smoke_timeout_s: int = SMOKE_TIMEOUT_S,
@@ -171,6 +172,28 @@ class SmokeTestingStep:
                 },
             )
         return snapshot
+
+    async def _archives(self, ctx: RunContext) -> ArchiveDigests:
+        """Digests of what smoke jobs extract, from the validated provision report artifact."""
+        report = await self._json(await output_of(ctx, StepName.PROVISIONING))
+        report = report if isinstance(report, dict) else {}
+        smoke = [
+            a
+            for a in report.get("data_archives") or []
+            if isinstance(a, dict) and a.get("name") == "smoke"
+        ]
+        try:
+            return ArchiveDigests.model_validate(
+                {
+                    "overlay": report.get("overlay_sha256"),
+                    "repo": report.get("repo_sha256"),
+                    "data": smoke[:1],
+                }
+            )
+        except ValidationError:
+            raise P2PError(
+                ErrorCode.PROVISION_FAILED, "the provision report has no valid digests"
+            ) from None
 
     async def _state(self, ctx: RunContext) -> _State:
         try:
@@ -269,7 +292,7 @@ class SmokeTestingStep:
         state = await self._state(ctx)
         ws = Workspace.from_snapshot(state.files, await self._repo(ctx))
         max_runs = ctx.limits.per_run.fix_iterations
-        executor = self._smoke(ctx)
+        executor = self._smoke(ctx, await self._archives(ctx))
         env: str | None = None
         messages = self._messages(claim, kind, plan, ws, state, max_runs)
         state_key = f"runs/{ctx.run_id}/workspace.json"

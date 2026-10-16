@@ -63,7 +63,7 @@ def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
     ):
         return None
     commit, lock = data.get("repo_commit"), data.get("lock_sha256")
-    snapshot = data.get("repo_files_sha256")
+    snapshot, archives = data.get("repo_files_sha256"), data.get("data_archives")
     datasets = data.get("datasets")
     return {  # whitelisted fields only: later steps and bundles read this artifact
         "schema": "p2p.provision-report/v1",
@@ -81,10 +81,21 @@ def parse_report(raw: bytes, run_id: str) -> dict[str, Any] | None:
             if isinstance(d, str) and _DATASET.fullmatch(d)
         ],
         "smoke": data.get("smoke") is True,
-        "repo_files_sha256": (
-            snapshot if isinstance(snapshot, str) and _SHA256.fullmatch(snapshot) else None
-        ),
+        "repo_files_sha256": _hex(snapshot),
+        "repo_sha256": _hex(data.get("repo_sha256")),
+        "data_archives": [
+            {"name": a["name"], "sha256": a["sha256"]}
+            for a in (archives if isinstance(archives, list) else [])[:4]
+            if isinstance(a, dict)
+            and isinstance(a.get("name"), str)
+            and _DATASET.fullmatch(a["name"])
+            and _hex(a.get("sha256"))
+        ],
     }
+
+
+def _hex(value: object) -> str | None:
+    return value if isinstance(value, str) and _SHA256.fullmatch(value) else None
 
 
 def _error_message(raw: bytes | None) -> str:

@@ -90,6 +90,7 @@ def _setup(
         "claim_type": "RELATIVE",
         "baseline_name": "resnet18",
         "scale": {"full": False, "fraction_of_data": 0.1, "epochs": 2, "paper_epochs": 200},
+        "archives": {"overlay": "a" * 64, "repo": None, "data": []},
     }
     manifest.update(overrides)
     path = tmp_path / "manifest.json"
@@ -97,7 +98,11 @@ def _setup(
     return path, results
 
 
-def _extract(archive: Path, dest: Path) -> None:
+EXTRACTED: list[tuple[str, str]] = []
+
+
+def _extract(archive: Path, dest: Path, sha256: str) -> None:
+    EXTRACTED.append((archive.name, sha256))
     dest.mkdir(parents=True, exist_ok=True)
 
 
@@ -213,7 +218,7 @@ def test_a_missing_overlay_or_a_broken_archive_is_a_contract_error(tmp_path: Pat
     assert _run(manifest, tmp_path) == 30
     assert _results(results)["exit_reason"] == "contract_error"
 
-    def broken(archive: Path, dest: Path) -> None:
+    def broken(archive: Path, dest: Path, sha256: str) -> None:
         raise entrypoint.ContractError("archive member escapes")
 
     manifest, results = _setup(tmp_path / "b")
@@ -327,7 +332,7 @@ def test_a_huge_integer_metric_fails_the_seed_not_the_runner(tmp_path: Path) -> 
 
 
 def test_termination_during_extraction_writes_results(tmp_path: Path) -> None:
-    def interrupted(archive: Path, dest: Path) -> None:
+    def interrupted(archive: Path, dest: Path, sha256: str) -> None:
         raise entrypoint.Terminated
 
     manifest, results = _setup(tmp_path)
@@ -335,12 +340,58 @@ def test_termination_during_extraction_writes_results(tmp_path: Path) -> None:
     assert _results(results)["exit_reason"] == "budget_timeout"
 
 
-def test_data_archives_need_plain_names(tmp_path: Path) -> None:
-    manifest, results = _setup(tmp_path)
+def test_only_listed_archives_are_extracted_with_their_digests(tmp_path: Path) -> None:
+    archives = {
+        "overlay": "a" * 64,
+        "repo": None,
+        "data": [{"name": "cifar", "sha256": "c" * 64}],
+    }
+    manifest, _ = _setup(tmp_path, archives=archives)
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "...tar.zst").write_bytes(b"")
+    (tmp_path / "data" / "cifar.tar.zst").write_bytes(b"")
+    (tmp_path / "data" / "planted.tar.zst").write_bytes(b"")
+    EXTRACTED.clear()
+    assert _run(manifest, tmp_path) == 0
+    assert EXTRACTED == [("overlay.tar.zst", "a" * 64), ("cifar.tar.zst", "c" * 64)]
+
+
+def test_a_listed_archive_that_is_missing_is_a_contract_error(tmp_path: Path) -> None:
+    archives = {"overlay": "a" * 64, "repo": None, "data": [{"name": "cifar", "sha256": "c" * 64}]}
+    manifest, results = _setup(tmp_path, archives=archives)
     assert _run(manifest, tmp_path) == 30
     assert _results(results)["exit_reason"] == "contract_error"
+
+
+def _tar_bytes() -> bytes:
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("hello.txt")
+        info.size = 2
+        tar.addfile(info, io.BytesIO(b"hi"))
+    return buffer.getvalue()
+
+
+PASSTHROUGH = [
+    sys.executable,
+    "-c",
+    "import sys,shutil;shutil.copyfileobj(sys.stdin.buffer,sys.stdout.buffer)",
+]
+
+
+def test_extraction_verifies_the_digest_of_what_it_read(tmp_path: Path) -> None:
+    import hashlib
+
+    archive = tmp_path / "a.tar.zst"
+    archive.write_bytes(_tar_bytes())
+    good = hashlib.sha256(archive.read_bytes()).hexdigest()
+    entrypoint.tar_extract(archive, tmp_path / "ok", good, decompress=PASSTHROUGH)
+    assert (tmp_path / "ok" / "hello.txt").read_bytes() == b"hi"
+    with pytest.raises(entrypoint.ContractError, match="digest"):
+        entrypoint.tar_extract(archive, tmp_path / "bad", "0" * 64, decompress=PASSTHROUGH)
+    assert not (tmp_path / "bad").exists()
 
 
 @pytest.mark.parametrize("args", [["--seed", "5"], ["--sm"], ["--out=/tmp/x"]])

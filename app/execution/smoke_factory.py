@@ -13,6 +13,7 @@ from typing import Literal
 import yaml
 from pydantic import SecretStr
 
+from app.domain.contracts import ArchiveDigests
 from app.execution.config import ExecutionConfig
 from app.execution.job_smoke import SMOKE_PLATFORM, SMOKE_PRESET, JobSmokeExecutor
 from app.execution.local_trusted import LocalTrustedExecutor, load_canaries
@@ -50,11 +51,12 @@ def build_smoke_executor(
     options: SmokeOptions,
     ctx: RunContext,
     *,
+    archives: ArchiveDigests,
     storage: RunStorage,
     config: ExecutionConfig,
     cloud: CloudPrices,
 ) -> SmokeExecutor:
-    jobs = JobSmokeExecutor(ctx, storage=storage, config=config, cloud=cloud)
+    jobs = JobSmokeExecutor(ctx, archives=archives, storage=storage, config=config, cloud=cloud)
     if options.kind == "local":
 
         async def paper_sha256(run_id: str) -> str | None:
