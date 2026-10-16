@@ -76,6 +76,7 @@ class ExecManifest(_Strict):
     baseline_name: str | None = Field(max_length=128)
     scale: ScaleSpec
     archives: ArchiveDigests
+    workspace_sha256: str = Field(pattern=SHA256_PATTERN)  # of the tar at paths.workspace
 
     @field_validator("entrypoint")
     @classmethod

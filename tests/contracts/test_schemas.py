@@ -107,6 +107,8 @@ MANIFEST_MUTATIONS: list[tuple[str, Any]] = [
         ),
     ),
     ("args set the seed", lambda d: d.update(args=["--seed", "3"])),
+    ("workspace digest missing", lambda d: d.pop("workspace_sha256")),
+    ("workspace digest not hex", lambda d: d.update(workspace_sha256="sha256:" + "f" * 64)),
 ]
 
 

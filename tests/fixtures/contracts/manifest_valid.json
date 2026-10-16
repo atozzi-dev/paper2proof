@@ -18,7 +18,7 @@
     "overlay": "/mnt/run/staging/overlay.tar.zst",
     "repo": null,
     "data_dir": "/mnt/run/staging/data",
-    "workspace": "/mnt/run/staging/workspace",
+    "workspace": "/mnt/run/staging/workspace.tar",
     "cache": "/mnt/cache",
     "results": "/mnt/run/results/1"
   },
@@ -42,5 +42,6 @@
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       }
     ]
-  }
+  },
+  "workspace_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 }
