@@ -19,6 +19,11 @@ _MENTIONS = [  # longest first: each match is removed before the shorter pattern
 ]
 
 
+def mentions_verdict(text: str) -> bool:
+    """True when the text names any verdict (display-only text must never look like one)."""
+    return any(pattern.search(text) for _, pattern in _MENTIONS)
+
+
 def contradicts(text: str, kind: VerdictKind) -> bool:
     """True when the text is empty or mentions a verdict other than `kind`."""
     if not text.strip():

@@ -1,7 +1,13 @@
 """The Limitations section of every verdict, written by code from the manifest and the results
 (never by a model): scale, seeds, hardware and deviations from the paper's setup."""
 
+import re
+
 from app.domain.contracts import ScaleSpec
+
+DEVIATION_CHARS = 300
+_SPACE = re.compile(r"\s+")
+_MARKUP = re.compile(r"[#*_`>|\[\]<]")
 
 _EXIT = {
     "completed": None,
@@ -37,5 +43,14 @@ def limitations(
     problem = _EXIT.get(exit_reason)
     if problem:
         lines.append(f"Execution: {problem}.")
-    lines += [f"Deviation: {d}" for d in deviations]
+    lines += [f"Deviation: {_plain(d)}" for d in deviations if _plain(d)]
     return "\n".join(f"- {line}" for line in lines)
+
+
+def _plain(text: str) -> str:
+    """Deviations are written by the planner model: one line, no markup, bounded, so they can
+    never pass for a line written here."""
+    text = _SPACE.sub(" ", _MARKUP.sub("", text)).strip()
+    if len(text) > DEVIATION_CHARS:
+        text = text[: DEVIATION_CHARS - 3].rstrip() + "..."
+    return text

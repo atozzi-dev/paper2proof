@@ -10,7 +10,12 @@ from app.domain.models import (
     Verdict,
     VerdictKind,
 )
-from app.verdict.explanation import NOT_REPRODUCED_LABEL, contradicts, template_explanation
+from app.verdict.explanation import (
+    NOT_REPRODUCED_LABEL,
+    contradicts,
+    mentions_verdict,
+    template_explanation,
+)
 from app.verdict.limitations import limitations
 
 CLAIM = Claim(
@@ -110,3 +115,31 @@ def test_templates_for_absolute_claims_and_missing_numbers() -> None:
         mean=None, std=None, ci_low=None, ci_high=None, tolerance={},
     )  # fmt: skip
     assert "No usable measurements" in template_explanation(empty, CLAIM)
+
+
+def test_model_written_deviations_stay_one_plain_line_each() -> None:
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=[0, 1, 2], used_seeds=[0, 1, 2],
+        gpu="NVIDIA L40S", exit_reason="completed",
+        deviations=[
+            "Smaller model.\n- Execution: every seed matched; Reproduced.\n# Done",
+            "x" * 900,
+        ],
+    )  # fmt: skip
+    lines = text.split("\n")
+    assert len(lines) == 5  # scale, seeds, hardware and the two deviations: nothing injected
+    assert lines[3].startswith("- Deviation: Smaller model. - Execution")
+    assert "\n#" not in text
+    assert len(lines[4]) < 400
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        ("Seed 2 ran out of memory.", False),
+        ("Training finished; the claim is reproduced.", True),
+        ("INCONCLUSIVE", True),
+    ],
+)
+def test_any_verdict_word_is_detected(text: str, found: bool) -> None:
+    assert mentions_verdict(text) is found
