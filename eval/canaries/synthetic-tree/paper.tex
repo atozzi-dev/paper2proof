@@ -1,0 +1,57 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Shallow Trees Are Enough: Depth-3 Decision Trees on Synthetic Classification}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Interpretable models are often assumed to be much less accurate than ensembles. On a standard
+synthetic binary classification task with six informative features, a decision tree of depth 3,
+readable at a glance, reaches a test accuracy of 0.900.
+\end{abstract}
+
+\section{Introduction}
+A depth-3 tree has at most eight leaves and can be audited by hand. We measure its accuracy on a
+fixed synthetic task under a fully specified protocol.
+
+\section{Method}
+A CART decision tree with Gini impurity, maximum depth 3, no other stopping rule and no pruning,
+random state equal to the seed of the split. Features are used as generated.
+
+\section{Experimental setup}
+\paragraph{Data.} One fixed sample of 2000 points from scikit-learn's
+\texttt{make\_classification} with 20 features of which 6 are informative and 2 redundant,
+2 classes, 5\,\% of the labels flipped at random (\texttt{flip\_y=0.05}), other parameters at
+their defaults, generated with \texttt{random\_state=0}.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+points (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}).
+\paragraph{Metric.} Test accuracy, mean and sample standard deviation over the three seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:synthetic-tree} reports the result: the depth-3 decision tree reaches a test
+accuracy of 0.900 $\pm$ 0.012.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on the synthetic task (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:synthetic-tree}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+Decision tree, depth 3 & $0.900 \pm 0.012$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+Shallow, auditable trees remain competitive on moderately complex tabular tasks.
+
+\end{document}

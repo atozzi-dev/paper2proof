@@ -1,0 +1,20 @@
+# Ground truth for this canary (eval set A, A-29). `verdicts` is {claim_id: expected_verdict}
+# under config/verdict.yaml at full scale; `claims` are the paper's claims as Claim fields plus
+# `planted` (a false claim planted on purpose). Checked by tests/eval/test_canaries.py.
+arxiv_id: "0000.00005"
+title: "Gradient Boosting on a Small Tabular Benchmark: The Wine Dataset"
+seeds: [0, 1, 2]
+verdicts:
+  c1: REPRODUCED
+claims:
+  - id: c1
+    planted: false
+    text: Gradient boosting reaches a test accuracy of 0.969 ± 0.021 on wine.
+    claim_type: ABSOLUTE
+    metric: accuracy
+    higher_is_better: true
+    dataset: scikit-learn wine
+    setting: stratified 70/30 split per seed, 100 stages, learning rate 0.1, depth 3
+    reported_value: 0.969
+    reported_std: 0.021
+    source_ref: Table 1

@@ -1,0 +1,64 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Boosted Trees for Smooth Non-Linear Regression: The Friedman \#1 Benchmark}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Friedman's first regression problem mixes a sine interaction, a quadratic term and linear terms
+with five irrelevant inputs. Gradient-boosted regression trees reach a test RMSE of 1.300 and
+reduce the RMSE of ordinary least squares by 1.164 on the same splits.
+\end{abstract}
+
+\section{Introduction}
+Synthetic regression benchmarks with a known generating function make it easy to separate model
+error from noise. We report reference errors for boosted trees on Friedman \#1.
+
+\section{Method}
+\paragraph{Boosted trees.} Gradient-boosted regression trees with squared-error loss, 100
+stages, learning rate 0.1, maximum depth 3, no subsampling, random state equal to the seed.
+\paragraph{Baseline.} Ordinary least squares linear regression with an intercept.
+
+\section{Experimental setup}
+\paragraph{Data.} One fixed sample of 2000 points from scikit-learn's \texttt{make\_friedman1}
+with 10 input features and Gaussian noise of standard deviation 1.0, generated with
+\texttt{random\_state=0}.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a random (unstratified) split with 30\,\%
+test points (\texttt{train\_test\_split(test\_size=0.3, random\_state=s)}); both models use the
+same split.
+\paragraph{Metric.} Root mean squared error (RMSE) on the test split, lower is better; mean and
+sample standard deviation over the three seeds. The reduction is the per-seed difference between
+the two models, averaged over seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:friedman} reports the errors. Gradient-boosted trees reach a test RMSE of
+1.300 $\pm$ 0.015, and they reduce the test RMSE of linear regression by 1.164 on average over
+the three seeds.
+
+\begin{table}[t]
+\centering
+\caption{Test RMSE on Friedman \#1, noise 1.0 (mean $\pm$ standard deviation over seeds 0, 1, 2;
+lower is better).}
+\label{tab:friedman}
+\begin{tabular}{lc}
+\toprule
+Model & RMSE \\
+\midrule
+Gradient-boosted trees (100 stages, depth 3) & $1.300 \pm 0.015$ \\
+\midrule
+Reduction with respect to linear regression & $-1.164$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+Boosted trees roughly halve the error of a linear model on Friedman \#1.
+
+\end{document}

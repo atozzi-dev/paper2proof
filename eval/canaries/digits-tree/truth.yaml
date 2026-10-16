@@ -1,0 +1,35 @@
+# Ground truth for this canary (eval set A, A-29). `verdicts` is {claim_id: expected_verdict}
+# under config/verdict.yaml at full scale; `claims` are the paper's claims as Claim fields plus
+# `planted` (a false claim planted on purpose). Checked by tests/eval/test_canaries.py.
+# Planted: c1 reverses the direction (logistic regression is about 0.130 better) and c2 is
+# inflated by about 7.5 points (the protocol measures 0.835).
+arxiv_id: "0000.00010"
+title: "Interpretable and Accurate: Depth-Limited Decision Trees Beat Linear Models on Digits"
+seeds: [0, 1, 2]
+verdicts:
+  c1: NOT_REPRODUCED
+  c2: NOT_REPRODUCED
+claims:
+  - id: c1
+    planted: true
+    text: The depth-8 decision tree beats standardized logistic regression by 0.040 accuracy.
+    claim_type: RELATIVE
+    metric: accuracy
+    higher_is_better: true
+    dataset: scikit-learn digits
+    setting: same split per seed for both models
+    reported_value: null
+    baseline_name: standardized logistic regression
+    claimed_delta: 0.040
+    source_ref: Table 1
+  - id: c2
+    planted: true
+    text: The depth-8 decision tree reaches a test accuracy of 0.910 ± 0.008 on digits.
+    claim_type: ABSOLUTE
+    metric: accuracy
+    higher_is_better: true
+    dataset: scikit-learn digits
+    setting: stratified 70/30 split per seed, CART depth 8
+    reported_value: 0.910
+    reported_std: 0.008
+    source_ref: Table 1
