@@ -228,7 +228,9 @@ def test_dockerignore_keeps_out_every_secret_pattern_of_gitignore() -> None:
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
     for pattern in ("*.pem", "*.key", "*credentials*.json", ".env*", "*.tfvars", "*.tfstate*"):
         assert f"**/{pattern}" in ignore, pattern
-    assert ignore.index("**/*.pem") > max(i for i, p in enumerate(ignore) if p.startswith("!"))
+    allowed = [i for i, p in enumerate(ignore) if p.startswith("!")]
+    late = [ignore[i] for i in allowed if i > ignore.index("**/*.pem")]
+    assert late == ["!docs/bundle-public-key.pem", "!docs/DEPLOY.md"]  # the public key only
 
 
 @pytest.mark.parametrize("image", ["runner", "runner-cpu", "provisioner"])
@@ -239,3 +241,19 @@ def test_job_images_drop_setuid_bits(image: str) -> None:
 
 def test_the_api_build_never_builds_sdists() -> None:
     assert "UV_NO_BUILD=1" in (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+
+
+def test_the_api_image_starts_start_sh_under_tini() -> None:
+    text = (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert '\nENTRYPOINT ["/usr/bin/tini", "-g", "--"]\nCMD ["/opt/p2p/start.sh"]' in text
+    assert "COPY --chmod=0555 images/api/start.sh /opt/p2p/start.sh" in text
+    sweep = text.index("-perm /6000 -type f -exec chmod a-s {} +")
+    assert sweep > text.rindex("\nCOPY ")  # after the last file lands in the image
+
+
+def test_the_api_image_carries_its_build_commit() -> None:
+    text = (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG BUILD_COMMIT" in text and "P2P_BUILD_COMMIT=$BUILD_COMMIT" in text
+    assert "org.opencontainers.image.revision=$BUILD_COMMIT" in text
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "--build-arg BUILD_COMMIT=$$(git rev-parse HEAD)" in makefile

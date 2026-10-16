@@ -24,3 +24,6 @@ web/dist/
 **/*.db
 **/*.db-*
 **/node_modules/
+# the published Proof Bundle key (public) and the deploy notes: docs/ ships nothing else
+!docs/bundle-public-key.pem
+!docs/DEPLOY.md

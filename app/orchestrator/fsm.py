@@ -104,6 +104,14 @@ class Orchestrator:
         task.add_done_callback(lambda t: self._tasks.pop(run_id, None) if t is task else None)
         return task
 
+    async def shutdown(self) -> None:
+        """Stop driving runs (process exit): their jobs keep running and the next start
+        resumes them from their last unfinished step."""
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def resume_all(self) -> list["asyncio.Task[RunStatus]"]:
         """On startup: restart every non-terminal run from its last unfinished step."""
         return [await self.submit(run_id) for run_id in await self._store.active_run_ids()]

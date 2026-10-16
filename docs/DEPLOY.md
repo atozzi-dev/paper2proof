@@ -1,0 +1,100 @@
+# Deploying the control plane
+
+The control plane is the `p2p-api` image on a Nebius Serverless endpoint in `p2p-control`
+(architecture §11.1, ADR-002). The container disk is ephemeral: the SQLite database lives in
+the Litestream replica on the `p2p-state` bucket.
+
+## How the container starts
+
+`images/api/start.sh`, under `tini -g`:
+
+1. `litestream restore` of `/var/lib/p2p/p2p.db`. A missing replica is an error, because an empty
+   database would reset the ledger, the daily caps and the kill switch. Only the very first
+   deploy allows an empty database (`deploy/endpoint.sh --bootstrap`, which sets
+   `P2P_DB_BOOTSTRAP=1` on that one create).
+2. `alembic upgrade head`. Migrations only go forward, so keep them backward compatible for one
+   release (expand, then contract) so that a rollback to the previous image still works.
+3. `exec litestream replicate -exec "uvicorn app.main:app ..."`. Litestream replicates every
+   write. When uvicorn exits, litestream does a final sync and exits. uvicorn shuts down
+   gracefully for at most 10 s.
+
+Required environment:
+- **Secrets**, from the Nebius secret named by `P2P_SECRET_NAME`: `NEBIUS_API_KEY`,
+  `TAVILY_API_KEY`, `SESSION_KEY`, `ADMIN_TOKEN`, `RUNTIME_S3_KEY_ID`, `RUNTIME_S3_SECRET`,
+  `RUNTIME_AUTH_KEY` (the authorized key JSON of sa-api-runtime: KMS signing),
+  `JOB_LAUNCHER_AUTH_KEY` (of sa-job-launcher: jobs, buckets, gateway), `JOB_LAUNCHER_S3_KEY_ID`,
+  `JOB_LAUNCHER_S3_SECRET`. The app writes the two authorized keys owner-only to
+  `/var/lib/p2p/keys` on the ephemeral container disk, because the Nebius SDK reads a file.
+- **Settings**, from `deploy/prod.env`, whose template is `deploy/prod.env.example`. Only those
+  keys are accepted.
+
+`/readyz` returns 200 only when the database answers, the models are routed, and the process
+really runs under litestream. It also reports the `commit` baked into the image at build time
+(`--build-arg BUILD_COMMIT`, also the `org.opencontainers.image.revision` label).
+
+`P2P_ENV=prod` refuses to start when a setting or secret above is missing, with
+`SMOKE_EXECUTOR=local`, or when model routing fails. With everything in place it runs the Nebius
+job backend (sa-job-launcher), the S3 storage (sa-job-launcher for run buckets, sa-api-runtime
+for the control bucket), KMS bundle signing and one reaper task. At startup it signs a probe and checks it
+under the published key `docs/bundle-public-key.pem`, which must be exported (A-26 PAIR step:
+`uv run python -m app.bundle.sign public-key --key-id <id> > docs/bundle-public-key.pem`) and
+committed before the image is built; the image ships it.
+
+## Deploying
+
+```bash
+deploy/endpoint.sh <registry>/p2p-api@sha256:<digest> deploy/prod.env
+```
+
+with `P2P_CONTROL_PROJECT_ID`, `SUBNET_CONTROL_ID`, `P2P_EXPECT_COMMIT` (the commit the image was
+built from) and, to replace a running endpoint, `ADMIN_TOKEN` set. The very first deploy adds
+`--bootstrap` before the image; it is refused once the endpoint exists.
+
+The script:
+1. checks every input before it changes anything;
+2. looks the endpoint up by name, and stops on any listing error;
+3. prints the current image, which is the rollback target;
+4. drains the running instance;
+5. by default stops the old endpoint (Litestream's final sync), waits for STOPPED, deletes it,
+   waits until the name is free, and creates the new one, so there is a single database
+   writer. Use `P2P_ENDPOINT_UPDATE=update` once S-6 shows that an in-place update stops the
+   old instance first;
+6. waits until `/readyz` reports the new commit. A replace that fails before the old instance
+   is gone un-drains it.
+
+**Rollback:** run the same command with the previous digest. If the instance is down, add
+`P2P_SKIP_DRAIN=1`.
+
+## H-05 checklist (first deploy, also the S-6 facts for RESULTS.md)
+
+1. Does `endpoint update --image <digest>` work in place? Do the old and new revisions overlap?
+   If they do, keep `recreate`.
+2. After an update, are disk (30Gi), preset, subnet and env unchanged?
+3. What is the exact `--env` / `--env-secret` syntax, and how does one secret with several keys
+   map to variables? Is ENTRYPOINT/CMD honoured without `--container-command`?
+4. Where is the container disk mounted? Is `/var/lib/p2p` writable by uid 10001, and is the
+   disk ephemeral across stop/start?
+5. Restore round trip: create with `--bootstrap`, write data, redeploy the same digest without
+   it (recreate), and check that the data comes back. Also check that restore → migrate →
+   replicate → kill → restore keeps both the migration and the later writes.
+   5b. Without `P2P_DB_BOOTSTRAP`, `litestream restore` against an empty replica path exits
+   non-zero in 0.5.17 (the guard works).
+6. SIGTERM: what is the platform's grace period? Do the Litestream logs show the forwarded
+   signal and a final sync? Does uvicorn exit in time while an SSE stream is open?
+   6b. On recreate, the old instance logs its final Litestream sync before the new instance's
+   restore starts (compare the timestamps in both logs).
+7. Restart policy when uvicorn or Litestream exits non-zero. Does a slow restore or model
+   routing trip a startup probe?
+8. The proxy's peer address and forwarding headers, and whether it strips a client-supplied
+   `X-Forwarded-For`. Then set `P2P_FORWARDED_ALLOW_IPS` to the proxy CIDR (never `*`), so the
+   per-IP limits work.
+9. Does the URL change after a recreate or a stop/start?
+10. Are endpoint names unique, and does `list` paginate? (The script refuses a listing with a
+    next page.)
+11. The SDK authorized keys from the env secrets: the app writes them to `/var/lib/p2p/keys`,
+    and the sa-job-launcher identity can list jobs from inside the endpoint.
+12. The real field names in `endpoint get` for the image (`spec.image`?), the URL
+    (`status.public_endpoints`) and the state (`status.state`, value `STOPPED`?), so the
+    rollback target, the URL and the stop wait can be relied on.
+13. With `tini -g`, uvicorn gets SIGTERM from both tini and Litestream: it still shuts down
+    gracefully, and Litestream does not SIGKILL its child when its context is cancelled.

@@ -1,0 +1,18 @@
+# Litestream (A-14): continuous replication of the control-plane SQLite database to the
+# p2p-state bucket (architecture ADR-002: the endpoint's container disk is ephemeral).
+# Values come from the environment (expanded by litestream); credentials are passed as
+# LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY by start.sh, never written here.
+snapshot:
+  interval: 6h
+  retention: 168h
+
+dbs:
+  - path: /var/lib/p2p/p2p.db
+    replica:
+      type: s3
+      bucket: ${P2P_STATE_BUCKET}
+      path: litestream/p2p.db
+      endpoint: ${S3_ENDPOINT}
+      region: ${S3_REGION}
+      force-path-style: true
+      sync-interval: 1s

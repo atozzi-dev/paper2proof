@@ -1,5 +1,6 @@
 # p2p-api: the control plane (FastAPI + the built web UI + litestream), deployed as the
-# Serverless endpoint. Its start command arrives with the runtime packaging task (A-14).
+# Serverless endpoint. It starts with images/api/start.sh (Litestream restore, migrations,
+# uvicorn under `litestream replicate`).
 # Build from the repository root:
 #   docker build -f images/api/Dockerfile -t p2p-api:dev .
 FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS web
@@ -23,14 +24,22 @@ RUN mkdir /tmp/litestream \
  && install -m 0755 /tmp/litestream/litestream /usr/local/bin/litestream
 
 FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+# the commit this image is built from: /readyz reports it and Proof Bundles record it
+ARG BUILD_COMMIT
+LABEL org.opencontainers.image.revision=$BUILD_COMMIT
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    P2P_BUILD_COMMIT=$BUILD_COMMIT \
     P2P_ENV=prod \
     DB_URL=sqlite+aiosqlite:////var/lib/p2p/p2p.db \
+    P2P_VAR_DIR=/var/lib/p2p \
     PYTHONPATH=/srv/p2p \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin
 # the slim base has no useradd: the user is written directly
-RUN echo 'p2p:x:10001:' >> /etc/group \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && echo 'p2p:x:10001:' >> /etc/group \
  && echo 'p2p:x:10001:10001:p2p:/home/p2p:/usr/sbin/nologin' >> /etc/passwd \
  && install -d -o 10001 -g 10001 -m 0750 /home/p2p \
  && install -d -o 10001 -g 10001 /var/lib/p2p
@@ -44,6 +53,14 @@ COPY app ./app
 COPY config ./config
 COPY schemas ./schemas
 COPY migrations ./migrations
+COPY docs ./docs
 COPY --from=web /web/dist ./web/dist
+COPY --chmod=0555 images/api/start.sh /opt/p2p/start.sh
+COPY --chmod=0444 images/api/litestream.yml /opt/p2p/litestream.yml
+# after the last COPY: no setuid/setgid bit anywhere (no path from p2p to root)
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 USER 10001:10001
 EXPOSE 8080
+# tini as PID 1 (-g: signals reach the whole group, also during restore and migrations)
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
+CMD ["/opt/p2p/start.sh"]

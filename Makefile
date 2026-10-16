@@ -36,13 +36,16 @@ test-docker: ## Tests on the built images (make images first; one test downloads
 test-live: ## Real Token Factory / Tavily / Nebius calls: costs money, ask first
 	@echo "not implemented yet (A-20)"; exit 1
 
-dev: ## MinIO + uvicorn --reload with P2P_ENV=dev
-	@echo "not implemented yet (A-13)"; exit 1
+dev: ## Migrations + uvicorn --reload on :8000 with P2P_ENV=dev and .env (local artifacts, no jobs run)
+	set -a; [ ! -f .env ] || . ./.env; set +a; export P2P_ENV=dev; \
+	$(UV) run alembic upgrade head && \
+	$(UV) run uvicorn app.main:app --reload --reload-dir app --port 8000
 
 images: ## Build api, runner, runner-cpu, provisioner images locally (tag $(IMAGE_TAG)) + size check
 	$(DOCKER) build --platform linux/amd64 -f images/runner-cpu/Dockerfile -t p2p-runner-cpu:$(IMAGE_TAG) .
 	$(DOCKER) build --platform linux/amd64 -f images/provisioner/Dockerfile -t p2p-provisioner:$(IMAGE_TAG) .
-	$(DOCKER) build --platform linux/amd64 -f images/api/Dockerfile -t p2p-api:$(IMAGE_TAG) .
+	$(DOCKER) build --platform linux/amd64 -f images/api/Dockerfile \
+	  --build-arg BUILD_COMMIT=$$(git rev-parse HEAD) -t p2p-api:$(IMAGE_TAG) .
 	$(DOCKER) build --platform linux/amd64 -f images/runner/Dockerfile -t p2p-runner:$(IMAGE_TAG) .
 	bash scripts/check_image_size.sh $(IMAGE_TAG)
 
