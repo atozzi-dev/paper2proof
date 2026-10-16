@@ -13,4 +13,4 @@ class ExecutionConfig(BaseModel):
     runner_cpu_image: str = Field(pattern=DIGEST_REF)
     subnet_provision: str = Field(min_length=1)
     subnet_exec: str = Field(min_length=1)
-    preemptible_gpu: bool = True
+    preemptible_gpu: bool  # P2P_GPU_PREEMPTIBLE: explicit, never defaulted (no for demos)

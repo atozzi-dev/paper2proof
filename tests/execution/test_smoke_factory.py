@@ -24,6 +24,7 @@ CFG = ExecutionConfig(
     runner_cpu_image=DIGEST.format("p2p-runner-cpu"),
     subnet_provision="vpcsubnet-provision",
     subnet_exec="vpcsubnet-exec",
+    preemptible_gpu=False,
 )
 
 

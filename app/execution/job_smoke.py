@@ -36,7 +36,7 @@ from app.execution.smoke import (
 )
 from app.models.pricing import CloudPrices
 from app.orchestrator.context import RunContext
-from app.orchestrator.steps.jobs import run_job, utcnow
+from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 
 SMOKE_PLATFORM, SMOKE_PRESET = "cpu-d3", "4vcpu-16gb"
 SMOKE_SETUP_S = 180  # job start, image pull and extraction before the script runs (S-12)
@@ -89,13 +89,18 @@ class JobSmokeExecutor:
 
     async def _next_iteration(self, run_id: str) -> int:
         prefix = f"p2p-smoke-{run_slug(run_id)}-"
+
+        def started_here(name: str) -> bool:
+            suffix = name.removeprefix(prefix)
+            return not (suffix.isdigit() and int(suffix) > self._last)
+
         async with self._lock:
+            stopped = await stop_jobs(
+                self._ctx, prefix, poll_s=self._poll_s, sleep=self._sleep, keep=started_here
+            )
+            if not stopped:
+                raise SmokeUnavailable("an earlier smoke job is still stopping")
             listed = await self._ctx.jobs.list_jobs(prefix)
-            for handle, state, _ in listed:
-                suffix = handle.name.removeprefix(prefix)
-                orphaned = suffix.isdigit() and int(suffix) > self._last  # not started here
-                if orphaned and not state.is_terminal:
-                    await self._ctx.jobs.cancel(handle)
             existing = [
                 int(handle.name.removeprefix(prefix))
                 for handle, _, _ in listed

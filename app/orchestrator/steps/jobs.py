@@ -17,10 +17,12 @@ from app.domain.events import EventType
 from app.domain.models import RunStatus
 from app.execution.backend import JobHandle, JobSpec, JobState
 from app.execution.naming import bucket_name
-from app.orchestrator.budget import SpendKind
+from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
+from app.storage.store import JobRecord
 
 STATUS_ATTEMPTS = 4  # transient control-plane errors while polling
+STOP_WAIT_S = 300  # how long a cancelled job may take to stop
 
 
 def utcnow() -> datetime:
@@ -51,6 +53,49 @@ async def _status(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+_SETTLED = frozenset(state.value for state in JobState if state.is_terminal)
+
+
+async def _cancel_unwatched(ctx: RunContext, existing: JobRecord | None) -> None:
+    """A recorded job that can't be watched any more is cancelled, never left running."""
+    if existing is None or existing.status in _SETTLED or existing.nebius_job_id is None:
+        return
+    with contextlib.suppress(Exception):
+        await asyncio.shield(
+            ctx.jobs.cancel(JobHandle(name=existing.name, nebius_id=existing.nebius_job_id))
+        )
+
+
+async def stop_jobs(
+    ctx: RunContext,
+    prefix: str,
+    *,
+    poll_s: float,
+    sleep: Callable[[float], Awaitable[None]],
+    keep: Callable[[str], bool] = lambda name: False,
+    wait_s: float = STOP_WAIT_S,
+) -> bool:
+    """Cancel the jobs named `prefix*` that are still running (except those `keep` names) and
+    wait until they have stopped: a job left behind by a restart still mounts the run bucket
+    read-write. False when one is still running after `wait_s`."""
+    running = [
+        handle
+        for handle, state, _ in await ctx.jobs.list_jobs(prefix)
+        if not state.is_terminal and not keep(handle.name)
+    ]
+    for handle in running:
+        await ctx.jobs.cancel(handle)
+    waited = 0.0
+    while True:
+        running = [h for h in running if not (await _status(ctx, h, sleep)).is_terminal]
+        if not running:
+            return True
+        if waited >= wait_s:
+            return False
+        await sleep(poll_s)
+        waited += poll_s
+
+
 async def run_job(
     ctx: RunContext,
     spec: JobSpec,
@@ -61,35 +106,45 @@ async def run_job(
     sleep: Callable[[float], Awaitable[None]],
     gpu: bool = False,
     started: datetime | None = None,
+    on_poll: Callable[[], Awaitable[None]] | None = None,
 ) -> JobOutcome:
     """Submit (get-by-name first, so a resumed step finds its job) and wait for the job.
     `started` anchors a new job's watchdog when the caller already put a deadline derived from
-    it into the job (a recorded job always keeps its first submission time)."""
+    it into the job (a recorded job always keeps its first submission time). `on_poll` runs
+    while the job is still running, before each wait (display only: it must not raise)."""
     watchdog = timedelta(seconds=spec.watchdog_s)
-    cost = await ctx.budget.check_and_reserve(
-        ctx.run_id, SpendKind.CLOUD_USD, usd_per_hour * spec.watchdog_s / 3600
-    )
+    existing = await ctx.store.get_job(spec.name)
+    now = clock()
+    reserve_s = float(spec.watchdog_s)
+    began = now
+    if existing is not None:
+        # Re-attaching after a restart: reserve what is left of its watchdog. A job that was
+        # still running is charged from its submission (the gap is never free, at worst it
+        # counts twice); one that was settled already costs nothing more.
+        started = existing.created_at
+        reserve_s = max(0.0, (started + watchdog - now).total_seconds())
+        if existing.status not in _SETTLED:
+            began = started
+    elif started is None:
+        started = now
+    try:
+        cost = await ctx.budget.check_and_reserve(
+            ctx.run_id, SpendKind.CLOUD_USD, usd_per_hour * reserve_s / 3600
+        )
+    except (BudgetExceeded, KillSwitchActive):
+        await _cancel_unwatched(ctx, existing)
+        raise
     minutes = None
     if gpu:
         try:
             minutes = await ctx.budget.check_and_reserve(
-                ctx.run_id, SpendKind.GPU_MINUTES, spec.watchdog_s / 60
+                ctx.run_id, SpendKind.GPU_MINUTES, reserve_s / 60
             )
-        except BaseException:
+        except BaseException as err:
             await ctx.budget.commit(cost, 0)
+            if isinstance(err, BudgetExceeded | KillSwitchActive):
+                await _cancel_unwatched(ctx, existing)
             raise
-    began = clock()
-    try:
-        existing = await ctx.store.get_job(spec.name)
-    except BaseException:
-        await ctx.budget.commit(cost, 0)
-        if minutes is not None:
-            await ctx.budget.commit(minutes, 0)
-        raise
-    if existing is not None:
-        started = existing.created_at
-    elif started is None:
-        started = began
 
     async def settle() -> None:
         watched_s = max(0.0, (clock() - began).total_seconds())
@@ -135,6 +190,8 @@ async def run_job(
                 state = JobState.CANCELLED
                 await job_status(state)
                 break
+            if on_poll is not None:
+                await on_poll()
             await sleep(poll_s)
     except asyncio.CancelledError:
         # Shutdown: the job keeps running and the resumed step re-attaches to it by name (the
