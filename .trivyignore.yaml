@@ -1,0 +1,7 @@
+# Accepted CRITICAL vulnerabilities for the deploy scan (.github/workflows/deploy.yml).
+# Every entry needs a reason and an expiry, and is reviewed like code. Example:
+#   vulnerabilities:
+#     - id: CVE-0000-00000
+#       statement: not reachable: the affected binary is not shipped in the final stage
+#       expired_at: 2026-12-15
+vulnerabilities: []

@@ -1,0 +1,91 @@
+# Daily canary smoke on the live demo during judging (architecture §13.2), 2026-10-30 to
+# 2026-12-15 at 07:00 UTC. A failure opens (or comments on) one issue.
+# Environment `smoke`: main only, no reviewer (a scheduled run cannot wait for an approval). It
+# holds only P2P_SMOKE_INVITE (a low-quota, expiring invite), never the admin token.
+name: smoke-cron
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run even outside the judging window
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: smoke-cron
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: canary smoke on the live endpoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: smoke
+    permissions:
+      contents: read
+    steps:
+      - name: Check the judging window
+        id: window
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          today=$(date -u +%F)
+          if [ "$FORCE" = true ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$today" < "2026-10-30" || "$today" > "2026-12-15" ]]; then
+            echo "outside the judging window (2026-10-30..2026-12-15): nothing to do"
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.window.outputs.active == 'true'
+        with:
+          persist-credentials: false
+
+      # One retry after 5 minutes: a deploy restarting the endpoint must not open an issue.
+      - name: Smoke test
+        if: steps.window.outputs.active == 'true'
+        timeout-minutes: 20
+        env:
+          P2P_API_URL: ${{ vars.P2P_API_URL }}
+          P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
+        run: |
+          test -n "$P2P_API_URL" || { echo "::error::set the P2P_API_URL variable"; exit 1; }
+          if ! bash deploy/smoke.sh "$P2P_API_URL"; then
+            echo "first attempt failed; retrying in 5 minutes"
+            sleep 300
+            bash deploy/smoke.sh "$P2P_API_URL"
+          fi
+
+  report:
+    name: open or update the failure issue
+    needs: smoke
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Daily smoke failed"
+          body="The daily canary smoke failed on $(date -u +%F): $RUN_URL"
+          existing=$(gh issue list --state open --search "\"$title\" in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
