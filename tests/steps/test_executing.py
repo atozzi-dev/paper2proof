@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from app.domain.contracts import ExecManifest
 from app.domain.errors import P2PError
@@ -244,6 +245,24 @@ async def test_without_a_repository_the_manifest_has_no_repo(store: Store, tmp_p
     await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
     manifest = _manifest_of(backend.specs[0])
     assert manifest.paths.repo is None and manifest.archives.repo is None
+
+
+async def test_the_injected_and_kept_manifests_are_identical_and_match_the_schema(
+    store: Store, tmp_path: Path
+) -> None:
+    """The file injected into the job, the copy kept for retries and the one in the step
+    output are the same document, and the runner's schema accepts it (no null scale fields)."""
+    ctx, artifacts, storage = await _setup(store, tmp_path, repo=False)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    storage.objects[(RUN, "results/1/results.json")] = _results(1)
+    result = await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.output_ref is not None
+    injected = json.loads(backend.specs[0].inject_files["/etc/p2p/manifest.json"])
+    kept = artifacts.get_json(f"runs/{RUN}/exec_manifest_1.json")
+    assert injected == kept == artifacts.get_json(result.output_ref)["manifest"]
+    schema = json.loads((ROOT / "schemas" / "manifest.schema.json").read_text(encoding="utf-8"))
+    assert list(Draft202012Validator(schema).iter_errors(injected)) == []
+    assert injected["scale"] == {"full": False} and injected["paths"]["repo"] is None
 
 
 async def test_the_budget_seconds_fit_the_per_run_gpu_minutes(store: Store, tmp_path: Path) -> None:
