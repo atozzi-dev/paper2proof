@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 25
     environment: smoke
     permissions:
+      actions: read # the endpoint URL artifact of the last successful deploy
       contents: read
     steps:
       - name: Check the judging window
@@ -54,14 +55,33 @@ jobs:
         if: steps.window.outputs.active == 'true'
         timeout-minutes: 20
         env:
+          GH_TOKEN: ${{ github.token }}
           P2P_API_URL: ${{ vars.P2P_API_URL }}
           P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
         run: |
-          test -n "$P2P_API_URL" || { echo "::error::set the P2P_API_URL variable"; exit 1; }
-          if ! bash deploy/smoke.sh "$P2P_API_URL"; then
+          # A recreate may change the endpoint URL: prefer the one the last deploy recorded.
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)
+          if [ -n "$run_id" ] && gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name endpoint-url --dir "$RUNNER_TEMP/url"; then
+            recorded=$(head -n 1 "$RUNNER_TEMP/url/endpoint-url.txt")
+            if [[ "$recorded" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+              P2P_API_URL="$recorded"
+            fi
+          fi
+          test -n "$P2P_API_URL" || { echo "::error::no endpoint URL (deploy or set P2P_API_URL)"; exit 1; }
+          echo "smoke target: $P2P_API_URL"
+          smoke() {
+            if [ -f deploy/smoke.sh ]; then
+              bash deploy/smoke.sh "$P2P_API_URL"
+            else  # until the canary script exists: the endpoint's own readiness check
+              curl -fsS --proto =https --max-time 20 "${P2P_API_URL%/}/readyz"
+            fi
+          }
+          if ! smoke; then
             echo "first attempt failed; retrying in 5 minutes"
             sleep 300
-            bash deploy/smoke.sh "$P2P_API_URL"
+            smoke
           fi
 
   report:

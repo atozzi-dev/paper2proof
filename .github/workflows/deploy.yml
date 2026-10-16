@@ -1,5 +1,6 @@
 # Deploy main to prod (architecture §11.1, §13): build, SBOM, scan, push by digest, terraform
-# apply (envs/prod only), drain, endpoint update, smoke, rollback to the previous deployment.
+# apply (envs/prod only), endpoint replace (deploy/endpoint.sh drains first), smoke, rollback to
+# the previous successful deploy.
 #
 # Two jobs, so that third-party scanners never run next to a credential:
 #   build   no secrets, no OIDC: builds the four images as OCI archives and uploads them, then
@@ -16,7 +17,8 @@
 #
 # Big files live on the runner's /mnt disk: the GPU runner image alone is ~8 GB compressed.
 # Setup (environments, variables, secrets): see the A-05 checklist in the issue notes.
-# The deploy scripts deploy/{drain,endpoint,smoke}.sh belong to A-14.
+# deploy/endpoint.sh belongs to A-14 (docs/DEPLOY.md). Its very first run (--bootstrap) is the
+# human step H-05, never this workflow.
 name: deploy
 
 on:
@@ -71,8 +73,10 @@ jobs:
           digests='{}'
           for image in $IMAGES; do
             archive="$WORK/oci/p2p-$image.tar"
+            build_args=()
+            if [ "$image" = api ]; then build_args=(--build-arg "BUILD_COMMIT=$GITHUB_SHA"); fi
             docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
-              -f "images/$image/Dockerfile" --output "type=oci,dest=$archive" .
+              "${build_args[@]}" -f "images/$image/Dockerfile" --output "type=oci,dest=$archive" .
             docker buildx prune --builder p2p --all --force > /dev/null
             media=$(tar -xOf "$archive" index.json | jq -r '.manifests | if length == 1 then .[0].mediaType else "many" end')
             if [ "$media" != "application/vnd.oci.image.manifest.v1+json" ]; then
@@ -145,14 +149,15 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     # Above the sum of the step budgets plus setup: a job timeout cancels the job and skips the
-    # failure() rollback and drain cancel, a step timeout does not.
-    timeout-minutes: 130
+    # failure() rollback, a step timeout does not.
+    timeout-minutes: 170
     environment: prod
     # Only one deploy at a time; builds of later commits do not wait behind an approval.
     concurrency:
       group: deploy-prod
       cancel-in-progress: false
     permissions:
+      actions: read # the previous successful deploy's digests artifact (rollback target)
       contents: read
       id-token: write
     env:
@@ -163,9 +168,10 @@ jobs:
       NEBIUS_REGISTRY_HOST: ${{ vars.NEBIUS_REGISTRY_HOST }}
       REGISTRY_CONTROL: ${{ vars.REGISTRY_CONTROL }}
       REGISTRY_SANDBOX: ${{ vars.REGISTRY_SANDBOX }}
-      NEBIUS_CONTROL_PROJECT_ID: ${{ vars.NEBIUS_CONTROL_PROJECT_ID }}
-      NEBIUS_SANDBOX_PROJECT_ID: ${{ vars.NEBIUS_SANDBOX_PROJECT_ID }}
+      P2P_CONTROL_PROJECT_ID: ${{ vars.NEBIUS_CONTROL_PROJECT_ID }}
       SUBNET_CONTROL_ID: ${{ vars.SUBNET_CONTROL_ID }}
+      P2P_ENDPOINT_UPDATE: ${{ vars.P2P_ENDPOINT_UPDATE }}
+      P2P_PROD_ENV: ${{ vars.P2P_PROD_ENV }}
       P2P_API_URL: ${{ vars.P2P_API_URL }}
       TF_VAR_control_project_id: ${{ vars.NEBIUS_CONTROL_PROJECT_ID }}
       TF_VAR_sandbox_project_id: ${{ vars.NEBIUS_SANDBOX_PROJECT_ID }}
@@ -177,11 +183,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check the deploy scripts (A-14) are present
-        run: |
-          for script in deploy/drain.sh deploy/endpoint.sh deploy/smoke.sh; do
-            test -f "$script" || { echo "::error::$script is missing (A-14)"; exit 1; }
-          done
+      - name: Check deploy/endpoint.sh (A-14) is present
+        run: test -f deploy/endpoint.sh || { echo "::error::deploy/endpoint.sh is missing (A-14)"; exit 1; }
 
       - name: Free disk space
         run: |
@@ -251,7 +254,7 @@ jobs:
         run: |
           set -euo pipefail
           skopeo login --username iam --password-stdin "$NEBIUS_REGISTRY_HOST" < "$RUNNER_TEMP/nebius.token"
-          echo '{}' > deploy/digests.json
+          jq -n --arg c "$GITHUB_SHA" '{commit: $c}' > deploy/digests.json
           for image in $IMAGES; do
             registry="$REGISTRY_SANDBOX"
             if [ "$image" = api ]; then registry="$REGISTRY_CONTROL"; fi
@@ -315,49 +318,70 @@ jobs:
           terraform -chdir="$TF_DIR" apply -input=false -lock-timeout=5m tfplan
           rm -f "$TF_DIR/tfplan"
 
-      # The whole running deployment (api, runner, runner-cpu, provisioner refs) is the rollback
-      # target, so a rollback never pairs the old API with the new job images.
-      - name: Record the running deployment (rollback target)
+      # The rollback target is the last successful run of this workflow on main: its digests
+      # artifact holds the four refs and the commit. A deploy done by hand (H-05) is not seen.
+      - name: Find the rollback target
         id: previous
         timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
-          export NEBIUS_IAM_TOKEN
-          bash deploy/endpoint.sh --current > "$RUNNER_TEMP/previous-digests.json"
-          names='["p2p-api","p2p-provisioner","p2p-runner","p2p-runner-cpu"]'
-          if ! jq -e --argjson names "$names" 'type == "object" and (length == 0 or
-              (keys == $names and all(.[]; test("^[a-z0-9./:-]+@sha256:[0-9a-f]{64}$"))))' \
-              "$RUNNER_TEMP/previous-digests.json" > /dev/null; then
-            echo "::error::deploy/endpoint.sh --current did not print {} or all four digest refs"
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -z "$run_id" ]; then
+            echo "no previous successful deploy: no automatic rollback for this run"
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name digests \
+              --dir "$RUNNER_TEMP/previous"; then
+            echo "::warning::run $run_id has no digests artifact (expired?): no automatic rollback"
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          names='["commit","p2p-api","p2p-provisioner","p2p-runner","p2p-runner-cpu"]'
+          if ! jq -e --argjson names "$names" --arg rc "$REGISTRY_CONTROL/" \
+              --arg rs "$REGISTRY_SANDBOX/" 'keys == $names
+              and (.commit | test("^[0-9a-f]{40}\\z"))
+              and all(del(.commit)[]; test("^[a-z0-9./:-]+@sha256:[0-9a-f]{64}\\z"))
+              and (."p2p-api" | startswith($rc))
+              and all(."p2p-provisioner", ."p2p-runner", ."p2p-runner-cpu"; startswith($rs))' \
+              "$RUNNER_TEMP/previous/digests.json" > /dev/null; then
+            echo "::error::the digests artifact of run $run_id is not a valid rollback target"
             exit 1
           fi
-          image=$(jq -r '."p2p-api" // empty' "$RUNNER_TEMP/previous-digests.json")
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "running deployment:"
-          jq . "$RUNNER_TEMP/previous-digests.json"
+          echo "image=$(jq -r '."p2p-api"' "$RUNNER_TEMP/previous/digests.json")" >> "$GITHUB_OUTPUT"
+          echo "rollback target (run $run_id):"
+          jq . "$RUNNER_TEMP/previous/digests.json"
 
-      - name: Drain the running instance
-        id: drain
-        if: steps.previous.outputs.image != '' && env.P2P_API_URL != ''
-        timeout-minutes: 12
-        env:
-          P2P_ADMIN_TOKEN: ${{ secrets.P2P_ADMIN_TOKEN }}
-        run: bash deploy/drain.sh
-
-      - name: Update the endpoint to the new digests
+      # deploy/endpoint.sh drains the running instance (ADMIN_TOKEN, sent on stdin), stops and
+      # replaces it, waits for /readyz to report this commit, and un-drains the old instance
+      # itself if it fails before deleting it. The env-file is P2P_PROD_ENV plus the job images.
+      - name: Replace the endpoint with the new digests
         id: endpoint
-        timeout-minutes: 15
+        timeout-minutes: 35
         env:
-          P2P_DIGESTS_FILE: deploy/digests.json
+          ADMIN_TOKEN: ${{ secrets.P2P_ADMIN_TOKEN }}
+          P2P_EXPECT_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
           export NEBIUS_IAM_TOKEN
+          python3 .github/scripts/prod_env.py deploy/digests.json > "$RUNNER_TEMP/prod.env"
           api_ref=$(jq -r '."p2p-api"' deploy/digests.json)
-          url=$(bash deploy/endpoint.sh "$api_ref" | tail -n 1)
+          status=0
+          bash deploy/endpoint.sh "$api_ref" "$RUNNER_TEMP/prod.env" | tee "$RUNNER_TEMP/endpoint.log" \
+            || status=$?
+          # Only a failure after endpoint.sh started creating/replacing the endpoint needs a
+          # rollback; before that (bad input, failed drain) the old instance is still serving.
+          if grep -qE '^(creating|recreating|updating) ' "$RUNNER_TEMP/endpoint.log"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          url=$(sed -n 's/^ready at //p' "$RUNNER_TEMP/endpoint.log" | tail -n 1)
           if ! [[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
-            echo "::error::deploy/endpoint.sh did not print an https URL"
+            echo "::error::deploy/endpoint.sh did not report an https URL"
             exit 1
           fi
           url="${url%/}"
@@ -365,45 +389,59 @@ jobs:
             echo "::warning::the endpoint URL changed: update the P2P_API_URL variable to $url"
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "$url" > "$RUNNER_TEMP/endpoint-url.txt"
 
+      # endpoint.sh already waited for /readyz (database, models, replication) with this commit.
+      # The canary run is deploy/smoke.sh, once it exists.
       - name: Smoke test
         id: smoke
-        timeout-minutes: 8
+        timeout-minutes: 10
         env:
           SMOKE_URL: ${{ steps.endpoint.outputs.url }}
           P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
-        run: bash deploy/smoke.sh "$SMOKE_URL"
+        run: |
+          if [ -f deploy/smoke.sh ]; then
+            bash deploy/smoke.sh "$SMOKE_URL"
+          else
+            echo "::warning::deploy/smoke.sh does not exist yet: only the /readyz check ran"
+          fi
 
+      - name: Upload the endpoint URL (read by smoke-cron)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: endpoint-url
+          path: ${{ runner.temp }}/endpoint-url.txt
+          retention-days: 90
+          if-no-files-found: error
+
+      # The new instance may be dead, so no drain (P2P_SKIP_DRAIN=1); the previous run's image
+      # refs go into the env-file and its commit is what /readyz must report.
       - name: Rollback to the previous deployment
         if: >-
           failure() && steps.previous.outputs.image != '' &&
-          (steps.endpoint.outcome == 'failure' || steps.smoke.outcome == 'failure')
-        timeout-minutes: 20
+          (steps.endpoint.outputs.changed == 'true' || steps.smoke.outcome == 'failure')
+        timeout-minutes: 35
         env:
           PREVIOUS_IMAGE: ${{ steps.previous.outputs.image }}
+          P2P_SKIP_DRAIN: "1"
           P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
         run: |
           set -euo pipefail
           NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
           export NEBIUS_IAM_TOKEN
-          export P2P_DIGESTS_FILE="$RUNNER_TEMP/previous-digests.json"
+          previous="$RUNNER_TEMP/previous/digests.json"
+          P2P_EXPECT_COMMIT=$(jq -r .commit "$previous")
+          export P2P_EXPECT_COMMIT
           echo "::error::deploy failed, rolling back to $PREVIOUS_IMAGE"
-          url=$(bash deploy/endpoint.sh "$PREVIOUS_IMAGE" | tail -n 1)
+          python3 .github/scripts/prod_env.py "$previous" > "$RUNNER_TEMP/prod.env"
+          bash deploy/endpoint.sh "$PREVIOUS_IMAGE" "$RUNNER_TEMP/prod.env" | tee "$RUNNER_TEMP/rollback.log"
+          url=$(sed -n 's/^ready at //p' "$RUNNER_TEMP/rollback.log" | tail -n 1)
           if ! [[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
-            echo "::error::rollback: deploy/endpoint.sh did not print an https URL"
+            echo "::error::rollback: deploy/endpoint.sh did not report an https URL"
             exit 1
           fi
-          bash deploy/smoke.sh "${url%/}"
+          if [ -f deploy/smoke.sh ]; then bash deploy/smoke.sh "${url%/}"; fi
           echo "rollback done: the endpoint runs $PREVIOUS_IMAGE again"
-
-      # If the drain ran and anything failed, the old instance may still refuse new runs (the
-      # rollback can be a no-op update, and drain.sh itself can fail or time out).
-      - name: Cancel the drain
-        if: failure() && steps.drain.outcome != 'skipped' && env.P2P_API_URL != ''
-        timeout-minutes: 3
-        env:
-          P2P_ADMIN_TOKEN: ${{ secrets.P2P_ADMIN_TOKEN }}
-        run: bash deploy/drain.sh --cancel
 
       - name: Summary
         if: always()
@@ -414,7 +452,7 @@ jobs:
           {
             echo "### Deploy"
             echo "- endpoint: ${URL:-not updated}"
-            echo "- previous api image: ${PREVIOUS_IMAGE:-none}"
+            echo "- rollback target: ${PREVIOUS_IMAGE:-none}"
             echo '```json'
             cat deploy/digests.json 2>/dev/null || echo '{}'
             echo '```'
@@ -423,5 +461,6 @@ jobs:
       - name: Remove credentials
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/nebius.token" "$RUNNER_TEMP/tfplan.json" "$TF_DIR/tfplan"
+          rm -f "$RUNNER_TEMP/nebius.token" "$RUNNER_TEMP/tfplan.json" "$TF_DIR/tfplan" \
+            "$RUNNER_TEMP/prod.env"
           skopeo logout --all || true

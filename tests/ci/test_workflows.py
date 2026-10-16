@@ -243,9 +243,11 @@ def test_digests_are_fixed_before_any_scanner_runs() -> None:
 
 def test_deploy_pushes_and_deploys_by_digest() -> None:
     text = yaml.safe_dump(_job("deploy.yml", "deploy"))
-    for script in ("deploy/drain.sh", "deploy/endpoint.sh", "deploy/smoke.sh"):
+    for script in ("deploy/endpoint.sh", "deploy/smoke.sh", ".github/scripts/prod_env.py"):
         assert script in text
     assert "--preserve-digests" in text, "push the scanned bytes unchanged"
+    runs = "\n".join(str(s.get("run", "")) for s in _steps(_job("deploy.yml", "deploy")))
+    assert "--bootstrap" not in runs, "the first deploy (--bootstrap) is the human step H-05"
     assert "BUILD_DIGESTS" in str(_step("deploy.yml", "deploy", "Push the images by digest"))
     assert ":latest" not in (WORKFLOWS / "deploy.yml").read_text(encoding="utf-8")
 
@@ -258,15 +260,39 @@ def test_the_fallback_key_reaches_only_key_mode() -> None:
     assert "NEBIUS_SA_CREDENTIALS_SET" in env
 
 
-def test_rollback_restores_the_previous_digest_set_and_undrains() -> None:
+def test_the_api_image_carries_the_commit_endpoint_sh_expects() -> None:
+    build_run = str(_step("deploy.yml", "build", "Build the images as OCI archives")["run"])
+    assert '--build-arg "BUILD_COMMIT=$GITHUB_SHA"' in build_run
+    endpoint = _step("deploy.yml", "deploy", "Replace the endpoint with the new digests")
+    assert endpoint["env"]["P2P_EXPECT_COMMIT"] == "${{ github.sha }}"
+
+
+def test_only_the_endpoint_step_gets_the_admin_token() -> None:
+    # endpoint.sh drains the old instance itself (and un-drains it if it fails before deleting).
+    holders = [
+        step.get("name")
+        for step in _steps(_job("deploy.yml", "deploy"))
+        if "P2P_ADMIN_TOKEN" in yaml.safe_dump(step.get("env", {}))
+    ]
+    assert holders == ["Replace the endpoint with the new digests"]
+
+
+def test_rollback_restores_the_previous_successful_deploy() -> None:
+    target = _step("deploy.yml", "deploy", "Find the rollback target")
+    assert "--status success" in target["run"] and "--branch main" in target["run"]
+    assert "--name digests" in target["run"]
+    assert _job("deploy.yml", "deploy")["permissions"]["actions"] == "read"
+    assert "startswith($rc)" in target["run"] and "startswith($rs)" in target["run"]
+    assert "no automatic rollback" in target["run"], "an expired artifact must not block deploys"
     rollback = _step("deploy.yml", "deploy", "Rollback to the previous deployment")
     assert "failure()" in rollback["if"]
-    assert 'P2P_DIGESTS_FILE="$RUNNER_TEMP/previous-digests.json"' in rollback["run"]
-    assert "P2P_DIGESTS_FILE" not in rollback.get("env", {})
+    # Only when endpoint.sh got as far as changing the platform (or the smoke failed after).
+    assert "steps.endpoint.outputs.changed == 'true'" in rollback["if"]
+    assert "steps.endpoint.outcome" not in rollback["if"]
+    assert rollback["env"]["P2P_SKIP_DRAIN"] == "1"
+    assert 'previous="$RUNNER_TEMP/previous/digests.json"' in rollback["run"]
+    assert "P2P_EXPECT_COMMIT=$(jq -r .commit" in rollback["run"]
     assert "^https://" in rollback["run"], "check the URL before sending a credential to it"
-    undrain = _step("deploy.yml", "deploy", "Cancel the drain")
-    assert "failure()" in undrain["if"] and "steps.drain.outcome" in undrain["if"]
-    assert "--cancel" in undrain["run"]
 
 
 def test_long_deploy_steps_time_out_before_the_job_does() -> None:
@@ -289,6 +315,19 @@ def test_deploy_never_applies_an_unreviewed_terraform_plan() -> None:
     assert ".github/scripts/tfplan_guard.py" in text
     assert "envs/prod-iam" not in text, "prod-iam is applied by a human only"
     assert "TF_PROD_TFVARS_JSON may only set" in run, "limit the override keys"
+
+
+def test_smoke_cron_follows_the_url_of_the_last_deploy() -> None:
+    upload = next(
+        s
+        for s in _steps(_job("deploy.yml", "deploy"))
+        if s.get("with", {}).get("name") == "endpoint-url"
+    )
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    smoke = _step("smoke-cron.yml", "smoke", "Smoke test")
+    assert "--name endpoint-url" in smoke["run"]
+    assert "^https://" in smoke["run"], "check the recorded URL before using it"
+    assert _job("smoke-cron.yml", "smoke")["permissions"]["actions"] == "read"
 
 
 def test_smoke_never_gets_the_admin_token() -> None:
