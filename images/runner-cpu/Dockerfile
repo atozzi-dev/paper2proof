@@ -7,12 +7,16 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56
 ENV UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never UV_COMPILE_BYTECODE=1
 COPY images/runner-cpu/requirements.lock /tmp/build/
 COPY images/runner/requirements.lock /tmp/build/runner.lock
-COPY scripts/runner_constraints.py /tmp/build/
-RUN uv venv /opt/venv --python /usr/local/bin/python3.12 \
+COPY scripts/runner_constraints.py scripts/split_lock.py /tmp/build/
+# One install per index (the lock records each package's index): only torch and torchvision
+# come from PyTorch's index, everything else from PyPI; hashes are required either way.
+RUN python /tmp/build/split_lock.py /tmp/build/requirements.lock /tmp/build/parts \
+ && uv venv /opt/venv --python /usr/local/bin/python3.12 \
  && VIRTUAL_ENV=/opt/venv uv pip install --no-config --require-hashes --no-deps \
-      --only-binary :all: --index-url https://pypi.org/simple \
-      --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \
-      -r /tmp/build/requirements.lock \
+      --only-binary :all: --index-url https://pypi.org/simple -r /tmp/build/parts/pypi.txt \
+ && VIRTUAL_ENV=/opt/venv uv pip install --no-config --require-hashes --no-deps \
+      --only-binary :all: --index-url https://download.pytorch.org/whl/cpu \
+      -r /tmp/build/parts/pytorch.txt \
  && python /tmp/build/runner_constraints.py /tmp/build/runner.lock /tmp/build/runner-constraints.txt
 
 FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
@@ -24,7 +28,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 p2p \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin p2p \
- && install -d -o 10001 -g 10001 /work
+ && install -d -o 10001 -g 10001 /work \
+ && find / -xdev -perm /6000 -type f -exec chmod a-s {} +  # no setuid path to root
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build --chmod=0444 /tmp/build/runner-constraints.txt /opt/p2p/runner-constraints.txt
 COPY --chmod=0444 images/runner/entrypoint.py images/runner/smoke.py /opt/p2p/

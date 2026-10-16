@@ -23,7 +23,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 p2p \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin p2p \
- && install -d -o 10001 -g 10001 /work
+ && install -d -o 10001 -g 10001 /work \
+ && find / -xdev -perm /6000 -type f -exec chmod a-s {} +  # no setuid path to root
 # uv is the provisioner's package tool at run time (lock + install --target, wheels only)
 COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /usr/local/bin/uv
 COPY --from=build /opt/venv /opt/venv

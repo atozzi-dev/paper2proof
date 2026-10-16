@@ -12,6 +12,8 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -568,3 +570,17 @@ def test_the_report_records_every_archive_digest(tmp_path: Path) -> None:
         {"name": "uoft-cs__cifar10", "sha256": sha("data/uoft-cs__cifar10.tar.zst")},
         {"name": "smoke", "sha256": sha("data/smoke.tar.zst")},
     ]
+
+
+@given(
+    st.lists(
+        st.from_regex(provision.PACKAGE, fullmatch=True).filter(lambda p: len(p) <= 140),
+        max_size=5,
+    )
+)
+def test_any_valid_package_list_becomes_the_same_toml_dependencies(packages: list[str]) -> None:
+    import tomllib
+
+    data = tomllib.loads(provision._lock_input(packages))
+    assert data["project"]["dependencies"] == [*packages, "torch", "torchvision"]
+    assert set(data["tool"]["uv"]["sources"]) == {"torch", "torchvision"}

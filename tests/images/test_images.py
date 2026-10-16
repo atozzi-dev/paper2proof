@@ -3,6 +3,7 @@
 import importlib.util
 import re
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -103,28 +104,69 @@ def test_dockerfiles_pin_bases_by_digest_and_run_as_p2p(dockerfile: Path) -> Non
     assert ":latest" not in text
 
 
-@pytest.mark.parametrize("image", ["runner", "runner-cpu"])
-def test_runners_start_isolated_under_tini(image: str) -> None:
+@pytest.mark.parametrize(
+    ("image", "script"),
+    [("runner", "entrypoint.py"), ("runner-cpu", "entrypoint.py"), ("provisioner", "provision.py")],
+)
+def test_jobs_start_isolated_under_tini(image: str, script: str) -> None:
     text = (IMAGES / image / "Dockerfile").read_text(encoding="utf-8")
-    assert re.search(
-        r'^ENTRYPOINT \["/usr/bin/tini", "--", "/opt/venv/bin/python", "-I", '
-        r'"/opt/p2p/entrypoint.py"\]$',
-        text,
-        re.M,
-    )
+    entrypoint = f'["/usr/bin/tini", "--", "/opt/venv/bin/python", "-I", "/opt/p2p/{script}"]'
+    assert f"\nENTRYPOINT {entrypoint}\n" in text
     assert "runner-constraints.txt" in text and "0444" in text
 
 
-@pytest.mark.parametrize("name", sorted(LOCKS))
-def test_only_pytorch_s_own_wheels_come_from_its_index(name: str) -> None:
-    allowed = re.compile(r"^(torch|torchvision|triton|nvidia-.*|cuda-.*)$")
-    current = None
-    for line in LOCKS[name].read_text(encoding="utf-8").splitlines():
+TORCH_URLS = {
+    "runner": "https://download.pytorch.org/whl/cu126",
+    "runner-cpu": "https://download.pytorch.org/whl/cpu",
+}
+
+
+def _sources(lock: Path) -> dict[str, str]:
+    """package -> the index it was locked from (`--emit-index-annotation`)."""
+    sources, current = {}, None
+    for line in lock.read_text(encoding="utf-8").splitlines():
         match = _PIN.match(line)
         if match:
             current = match.group(1).lower()
-        elif "# from https://download.pytorch.org" in line:
-            assert current is not None and allowed.match(current), f"{name}: {current}"
+        elif line.strip().startswith("# from ") and current is not None:
+            sources[current] = line.strip().removeprefix("# from ")
+    return sources
+
+
+@pytest.mark.parametrize("name", sorted(LOCKS))
+def test_only_torch_and_torchvision_come_from_pytorch_s_index(name: str) -> None:
+    sources = _sources(LOCKS[name])
+    assert set(sources) == set(_pins(LOCKS[name])), "every pin records its index"
+    expected = {
+        pkg: TORCH_URLS[name] if pkg in ("torch", "torchvision") else "https://pypi.org/simple"
+        for pkg in sources
+    } if name in TORCH_URLS else {pkg: "https://pypi.org/simple" for pkg in sources}  # fmt: skip
+    assert sources == expected
+
+
+def _stack(image: str) -> dict:  # type: ignore[type-arg]
+    return tomllib.loads((IMAGES / image / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def test_both_runners_list_the_same_packages() -> None:
+    assert (
+        _stack("runner")["project"]["dependencies"]
+        == _stack("runner-cpu")["project"]["dependencies"]
+    )
+
+
+def test_the_provisioner_resolves_torch_from_the_runner_s_index() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "provision_for_images", IMAGES / "provisioner" / "provision.py"
+    )
+    assert spec and spec.loader
+    provision = importlib.util.module_from_spec(spec)
+    sys.modules["provision_for_images"] = provision
+    spec.loader.exec_module(provision)
+    stack = _stack("runner")
+    [index] = stack["tool"]["uv"]["index"]
+    assert index["url"] == provision.TORCH_INDEX
+    assert set(provision.TORCH_FAMILY) == set(stack["tool"]["uv"]["sources"])
 
 
 @pytest.mark.parametrize("name", sorted(LOCKS))
@@ -144,3 +186,56 @@ def test_images_are_built_for_amd64() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     builds = [line for line in makefile.splitlines() if "$(DOCKER) build" in line]
     assert builds and all("--platform linux/amd64" in line for line in builds)
+
+
+def _load_script(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+split_lock = _load_script("split_lock")
+
+
+@pytest.mark.parametrize("name", ["runner", "runner-cpu"])
+def test_the_lock_splits_into_one_install_per_index(name: str) -> None:
+    lock = LOCKS[name].read_text(encoding="utf-8")
+    parts = split_lock.split(lock)
+    assert set(parts) == {"https://pypi.org/simple", TORCH_URLS[name]}
+    torch = parts[TORCH_URLS[name]]
+    assert re.findall(r"^(\S+)==", torch, re.M) == ["torch", "torchvision"]
+    pins = sum(len(re.findall(r"^\S+==", text, re.M)) for text in parts.values())
+    assert pins == len(_pins(LOCKS[name]))
+    assert all("--hash=sha256:" in text for text in parts.values())
+
+
+def test_a_lock_entry_without_its_index_is_rejected() -> None:
+    with pytest.raises(ValueError, match="annotation"):
+        split_lock.split("numpy==2.5.4 \\\n    --hash=sha256:" + "a" * 64 + "\n")
+
+
+@pytest.mark.parametrize("image", ["runner", "runner-cpu"])
+def test_runner_builds_install_each_part_from_its_own_index(image: str) -> None:
+    text = (IMAGES / image / "Dockerfile").read_text(encoding="utf-8")
+    assert "unsafe-best-match" not in text and "--extra-index-url" not in text
+    assert "split_lock.py" in text
+
+
+def test_dockerignore_keeps_out_every_secret_pattern_of_gitignore() -> None:
+    ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
+    for pattern in ("*.pem", "*.key", "*credentials*.json", ".env*", "*.tfvars", "*.tfstate*"):
+        assert f"**/{pattern}" in ignore, pattern
+    assert ignore.index("**/*.pem") > max(i for i, p in enumerate(ignore) if p.startswith("!"))
+
+
+@pytest.mark.parametrize("image", ["runner", "runner-cpu", "provisioner"])
+def test_job_images_drop_setuid_bits(image: str) -> None:
+    text = (IMAGES / image / "Dockerfile").read_text(encoding="utf-8")
+    assert "-perm /6000 -type f -exec chmod a-s {} +" in text
+
+
+def test_the_api_build_never_builds_sdists() -> None:
+    assert "UV_NO_BUILD=1" in (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")

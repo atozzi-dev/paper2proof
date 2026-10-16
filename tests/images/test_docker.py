@@ -175,20 +175,20 @@ def test_a_provisioned_overlay_imports_in_the_cpu_runner(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner"])
-def test_tini_is_pid_1(image: str) -> None:
+def test_the_image_entrypoint_is_tini(image: str) -> None:
     _need(image)
     done = _docker(
-        ["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/tini", f"{image}:{TAG}",
-         "--", "cat", "/proc/1/comm"]
-    )  # fmt: skip
-    assert done.stdout.strip() == "tini"
+        ["image", "inspect", "--format", "{{json .Config.Entrypoint}}", f"{image}:{TAG}"]
+    )
+    entrypoint = json.loads(done.stdout)
+    assert entrypoint[:4] == ["/usr/bin/tini", "--", "/opt/venv/bin/python", "-I"]
 
 
 @pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner"])
 def test_the_environment_is_read_only_and_work_is_writable(image: str) -> None:
     script = (
-        "touch /opt/venv/x 2>/dev/null && echo venv-writable; "
-        "touch /opt/p2p/x 2>/dev/null && echo p2p-writable; "
+        "find /opt /usr /bin /sbin /lib /etc -xdev -writable -print 2>/dev/null | head -5; "
+        "find / -xdev -perm /6000 -type f -print 2>/dev/null | head -5; "
         "touch /work/x && echo work-ok"
     )
     assert _run(image, "-c", script, entrypoint="sh").split() == ["work-ok"]
