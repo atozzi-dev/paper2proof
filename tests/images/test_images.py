@@ -228,7 +228,9 @@ def test_dockerignore_keeps_out_every_secret_pattern_of_gitignore() -> None:
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
     for pattern in ("*.pem", "*.key", "*credentials*.json", ".env*", "*.tfvars", "*.tfstate*"):
         assert f"**/{pattern}" in ignore, pattern
-    assert ignore.index("**/*.pem") > max(i for i, p in enumerate(ignore) if p.startswith("!"))
+    allowed = [i for i, p in enumerate(ignore) if p.startswith("!")]
+    late = [ignore[i] for i in allowed if i > ignore.index("**/*.pem")]
+    assert late == ["!docs/bundle-public-key.pem", "!docs/DEPLOY.md"]  # the public key only
 
 
 @pytest.mark.parametrize("image", ["runner", "runner-cpu", "provisioner"])

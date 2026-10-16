@@ -328,3 +328,84 @@ def test_the_reaper_runs_only_with_real_adapters(tmp_path: Path) -> None:
 
 def test_dev_has_no_reaper(runtime: main.Runtime) -> None:
     assert runtime.reaper is None
+
+
+def test_an_existing_key_file_or_link_is_replaced_owner_only(tmp_path: Path) -> None:
+    target = tmp_path / "keys" / "k.json"
+    target.parent.mkdir()
+    target.write_text("old")
+    written = main.key_file(SecretStr('{"k": 1}'), None, target)
+    assert written == target and target.read_text() == '{"k": 1}'
+    if os.name != "nt":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+        elsewhere = tmp_path / "elsewhere.json"
+        elsewhere.write_text("x")
+        target.unlink()
+        target.symlink_to(elsewhere)
+        main.key_file(SecretStr('{"k": 2}'), None, target)
+        assert elsewhere.read_text() == "x" and not target.is_symlink()
+
+
+def test_prod_refuses_key_files_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = tmp_path / "launcher.json"
+    key.write_text("{}")
+    settings = _prod(tmp_path, monkeypatch, **{**PROD_STORAGE, "job_launcher_auth_key_file": key})
+    with pytest.raises(main.ConfigError, match="JOB_LAUNCHER_AUTH_KEY_FILE"):
+        main.prod_adapters(settings)
+
+
+def test_nothing_is_written_when_prod_settings_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = {**PROD_STORAGE, "p2p_control_bucket": None}
+    settings = _prod(tmp_path, monkeypatch, **values)
+    with pytest.raises(main.ConfigError, match="P2P_CONTROL_BUCKET"):
+        main.prod_adapters(settings)
+    assert not (settings.p2p_var_dir / "keys").exists()
+
+
+def test_prod_needs_the_published_signing_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "PUBLIC_KEY", tmp_path / "missing.pem")
+    settings = _prod(tmp_path, monkeypatch)
+    with pytest.raises(main.ConfigError, match=r"bundle-public-key.pem"):
+        main.build_runtime(settings, adapters=main.dev_adapters)
+
+
+async def test_the_signing_key_is_probed_at_startup(tmp_path: Path) -> None:
+    signer = FakeSigner()
+    pinned = (await signer.public_key_pem()).encode()
+    other = (await FakeSigner().public_key_pem()).encode()
+
+    def adapters(settings: Settings) -> main.Adapters:
+        return dataclasses.replace(main.dev_adapters(settings), signer=signer)
+
+    for key, ok in ((pinned, True), (other, False)):
+        runtime = main.build_runtime(_settings(tmp_path / str(ok)), adapters=adapters)
+        runtime.pinned_key = key
+        app = main.create(runtime)
+        if ok:
+            async with app.router.lifespan_context(app):
+                pass
+        else:
+            with pytest.raises(main.ConfigError, match="published key"):
+                async with app.router.lifespan_context(app):
+                    pass
+
+
+def test_authorized_keys_leave_the_environment_and_their_private_part_is_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOB_LAUNCHER_AUTH_KEY", "x")
+    monkeypatch.setenv("RUNTIME_AUTH_KEY", "y")
+    main.drop_key_env()
+    assert "JOB_LAUNCHER_AUTH_KEY" not in os.environ and "RUNTIME_AUTH_KEY" not in os.environ
+    private = "-----BEGIN " + "PRIVATE KEY-----\nAbC\n-----END"  # no key-like literal
+    key = json.dumps({"id": "k", "private-key": private})
+    settings = _settings(tmp_path, runtime_auth_key=SecretStr(key))
+    secrets = main.known_secrets(settings)
+    assert key in secrets and private in secrets

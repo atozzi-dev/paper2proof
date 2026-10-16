@@ -10,9 +10,11 @@ to start without them.
 """
 
 import asyncio
+import json
 import logging
 import multiprocessing
 import os
+import stat
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
@@ -29,7 +31,7 @@ from pydantic import SecretStr
 from app.api.deps import AppState
 from app.api.main import create_app
 from app.bundle.build import Bundler
-from app.bundle.sign import NebiusKmsSigner, Signer
+from app.bundle.sign import NebiusKmsSigner, Signer, sign_manifest
 from app.bundle.store import ArtifactBundleStore, BundleStore
 from app.discovery.tavily import TavilyClient
 from app.domain.errors import P2PError
@@ -104,17 +106,40 @@ def dev_adapters(settings: Settings) -> Adapters:
 
 
 def key_file(content: SecretStr | None, path: Path | None, target: Path) -> Path | None:
-    """An SDK authorized key as a file: the configured file, or the secret's content written
-    owner-only to the container's ephemeral disk (secrets arrive as environment variables)."""
+    """An SDK authorized key as a file: the configured file (dev), or the secret's content
+    written owner-only to the container's ephemeral disk, never through a planted link."""
     if path is not None:
         return path
     if content is None or not content.get_secret_value():
         return None
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(content.get_secret_value())
+    folder = target.parent
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = folder.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (hasattr(os, "geteuid") and info.st_uid != os.geteuid()):
+        raise ConfigError(f"{folder} must be a directory owned by this process")
+    folder.chmod(0o700)
+    temporary = folder / f".{target.name}.{os.getpid()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content.get_secret_value())
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(target)  # replaces a planted link, never writes through it
+    finally:
+        temporary.unlink(missing_ok=True)
     return target
+
+
+KEY_ENV = ("JOB_LAUNCHER_AUTH_KEY", "RUNTIME_AUTH_KEY")
+
+
+def drop_key_env() -> None:
+    """The authorized keys leave the environment once Settings has read them: child
+    processes (the parsing pool, litestream) never inherit a signing identity."""
+    for name in KEY_ENV:
+        os.environ.pop(name, None)
 
 
 def kms_signer(key: Path, key_id: str) -> Signer:  # pragma: no cover - needs the Nebius SDK
@@ -132,13 +157,13 @@ def _secret(value: SecretStr | None) -> str:
 def prod_adapters(settings: Settings) -> Adapters:
     """Nebius jobs and S3 storage. Each identity reaches only its own buckets: sa-job-launcher
     the per-run buckets, sa-api-runtime the control bucket and the KMS signing key."""
-    keys = settings.p2p_var_dir / "keys"
-    launcher_key = key_file(
-        settings.job_launcher_auth_key, settings.job_launcher_auth_key_file, keys / "launcher.json"
-    )
-    runtime_key = key_file(
-        settings.runtime_auth_key, settings.runtime_auth_key_file, keys / "runtime.json"
-    )
+    files = {
+        "JOB_LAUNCHER_AUTH_KEY_FILE": settings.job_launcher_auth_key_file,
+        "RUNTIME_AUTH_KEY_FILE": settings.runtime_auth_key_file,
+    }
+    refused = [name for name, value in files.items() if value is not None]
+    if refused:  # prod keys come from the secret store, never from a file of unknown mode
+        raise ConfigError(f"P2P_ENV=prod takes the keys as secrets, not {', '.join(refused)}")
     required = {
         "S3_ENDPOINT": settings.s3_endpoint,
         "P2P_CONTROL_BUCKET": settings.p2p_control_bucket,
@@ -147,13 +172,16 @@ def prod_adapters(settings: Settings) -> Adapters:
         "RUNTIME_S3_SECRET": _secret(settings.runtime_s3_secret),
         "JOB_LAUNCHER_S3_KEY_ID": _secret(settings.job_launcher_s3_key_id),
         "JOB_LAUNCHER_S3_SECRET": _secret(settings.job_launcher_s3_secret),
-        "JOB_LAUNCHER_AUTH_KEY": launcher_key,
-        "RUNTIME_AUTH_KEY": runtime_key,
+        "JOB_LAUNCHER_AUTH_KEY": _secret(settings.job_launcher_auth_key),
+        "RUNTIME_AUTH_KEY": _secret(settings.runtime_auth_key),
         "P2P_BUNDLE_KEY_ID": settings.p2p_bundle_key_id,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise ConfigError(f"P2P_ENV=prod needs {', '.join(missing)}")
+    keys = settings.p2p_var_dir / "keys"  # written only once everything else is in place
+    launcher_key = key_file(settings.job_launcher_auth_key, None, keys / "launcher.json")
+    runtime_key = key_file(settings.runtime_auth_key, None, keys / "runtime.json")
     assert settings.s3_endpoint and settings.p2p_control_bucket  # noqa: S101 (checked above)
     assert launcher_key and runtime_key and settings.p2p_bundle_key_id  # noqa: S101
     assert settings.job_launcher_s3_secret and settings.runtime_s3_secret  # noqa: S101
@@ -268,7 +296,31 @@ def known_secrets(settings: Settings) -> list[str]:
         settings.session_key,
         settings.admin_token,
     ]
-    return [v.get_secret_value() for v in values if v is not None and v.get_secret_value()]
+    found = [v.get_secret_value() for v in values if v is not None and v.get_secret_value()]
+    for key in (settings.job_launcher_auth_key, settings.runtime_auth_key):
+        if key is not None:  # the private key alone is redacted too, not only the whole JSON
+            found += _private_parts(key.get_secret_value())
+    return found
+
+
+def _private_parts(document: str) -> list[str]:
+    try:
+        data: Any = json.loads(document)
+    except ValueError:
+        return []
+    parts: list[str] = []
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for name, value in item.items():
+                if isinstance(value, str) and "private" in str(name).lower() and value:
+                    parts.append(value)
+                else:
+                    stack.append(value)
+        elif isinstance(item, list):
+            stack.extend(item)
+    return parts
 
 
 @dataclass
@@ -286,7 +338,21 @@ class Runtime:
     cpu_pool: ProcessPoolExecutor | None
     late: _LateModels
     reaper: Reaper | None = None
+    pinned_key: bytes | None = None  # the published signing key (docs/bundle-public-key.pem)
     _reaper_task: "asyncio.Task[None] | None" = None
+
+    async def probe_signing(self) -> None:
+        """Sign once at startup and check it under the published key: a wrong key ID, a
+        missing permission or a bad authorized key stops the start, not every later bundle."""
+        signer = self.adapters.signer
+        if signer is None or self.pinned_key is None:
+            return
+        try:
+            await sign_manifest(signer, b"paper2proof startup probe", self.pinned_key)
+        except Exception as err:
+            raise ConfigError(
+                f"bundle signing does not verify under the published key: {type(err).__name__}"
+            ) from None
 
     def start_reaper(self) -> None:
         """One reaper per deployment (one uvicorn worker), only with real jobs and buckets."""
@@ -344,6 +410,11 @@ def build_runtime(
         raise ConfigError("SMOKE_EXECUTOR=local is for dev canaries only, never in prod")
     if prod and not settings.p2p_bundle_key_id:
         raise ConfigError("P2P_ENV=prod needs P2P_BUNDLE_KEY_ID: Proof Bundles are signed")
+    if prod and not PUBLIC_KEY.is_file():
+        raise ConfigError(
+            "P2P_ENV=prod needs docs/bundle-public-key.pem in the image: bundles are checked "
+            "against the published key (export it with app.bundle.sign public-key)"
+        )
     config_dir = settings.config_dir
     store = Store(make_engine(settings.db_url))
     limits = load_budget_limits(config_dir / "budgets.yaml")
@@ -444,6 +515,7 @@ def build_runtime(
         Reaper(store, built.jobs, built.bundles, budget, rates=reaper_rates(cloud))
         if built.reap
         else None,
+        public_key,
     )  # fmt: skip
 
 
@@ -455,6 +527,7 @@ def create(runtime: Runtime) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             await runtime.route_models()
+            await runtime.probe_signing()
             resumed = await runtime.orchestrator.resume_all()
             runtime.start_reaper()
         except BaseException:
@@ -474,6 +547,7 @@ def create(runtime: Runtime) -> FastAPI:
 @lru_cache(maxsize=1)
 def _app() -> FastAPI:  # pragma: no cover - the uvicorn entrypoint (start.sh)
     settings = get_settings()
+    drop_key_env()
     # forkserver: never fork a process that already runs threads (aiosqlite, asyncio)
     pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("forkserver"))
     return create(build_runtime(settings, cpu_pool=pool))

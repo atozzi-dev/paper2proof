@@ -53,6 +53,7 @@ COPY app ./app
 COPY config ./config
 COPY schemas ./schemas
 COPY migrations ./migrations
+COPY docs ./docs
 COPY --from=web /web/dist ./web/dist
 COPY --chmod=0555 images/api/start.sh /opt/p2p/start.sh
 COPY --chmod=0444 images/api/litestream.yml /opt/p2p/litestream.yml

@@ -35,7 +35,10 @@ really runs under litestream. It also reports the `commit` baked into the image 
 `P2P_ENV=prod` refuses to start when a setting or secret above is missing, with
 `SMOKE_EXECUTOR=local`, or when model routing fails. With everything in place it runs the Nebius
 job backend (sa-job-launcher), the S3 storage (sa-job-launcher for run buckets, sa-api-runtime
-for the control bucket), KMS bundle signing and one reaper task.
+for the control bucket), KMS bundle signing and one reaper task. At startup it signs a probe and checks it
+under the published key `docs/bundle-public-key.pem`, which must be exported (A-26 PAIR step:
+`uv run python -m app.bundle.sign public-key --key-id <id> > docs/bundle-public-key.pem`) and
+committed before the image is built; the image ships it.
 
 ## Deploying
 
