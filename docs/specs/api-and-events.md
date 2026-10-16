@@ -63,7 +63,7 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | `egress.blocked` | `{host, subnet}` (from gateway logs, best effort) |
 | `verdict.ready` | `{claim_id, verdict: Verdict, explanation_md}` |
 | `cost.update` | `{inference_usd, cloud_usd, total_usd}` |
-| `warning` | `{code, message}` (non-fatal: `DISCOVERY_DEGRADED`, ABSOLUTE claim at REDUCED scale, …) |
+| `warning` | `{code, message}`, non-fatal. Codes: `DISCOVERY_DEGRADED` (Tavily or HF unavailable), `ABSOLUTE_AT_REDUCED_SCALE` (plan tests an ABSOLUTE claim at reduced scale), `PACKAGE_REJECTED` (a planned package failed the policy), `PACKAGES_REQUESTED` (the Coder asked for packages: back to PROVISIONING), `REPO_SNAPSHOT_UNAVAILABLE` (the Coder works without repository files). New codes are added here first |
 | `error` | `{code, message}` (no stack traces) |
 
 All payloads are pydantic models in `app/domain/events.py`. `schemas/events.schema.json` is generated from them (`uv run python scripts/export_schemas.py`); a contract test fails if it is stale. The frontend imports TypeScript types generated from the OpenAPI schema (`npm run gen:types`).
