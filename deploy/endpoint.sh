@@ -33,7 +33,7 @@ SECRET_VARS=(NEBIUS_API_KEY TAVILY_API_KEY SESSION_KEY ADMIN_TOKEN RUNTIME_S3_KE
 ENV_KEYS=" S3_ENDPOINT S3_REGION P2P_STATE_BUCKET P2P_CONTROL_BUCKET NEBIUS_SANDBOX_PROJECT_ID
   P2P_PROVISIONER_IMAGE P2P_RUNNER_IMAGE P2P_RUNNER_CPU_IMAGE P2P_SUBNET_PROVISION
   P2P_SUBNET_EXEC P2P_GPU_PREEMPTIBLE P2P_BUNDLE_KEY_ID P2P_FORWARDED_ALLOW_IPS
-  GATEWAY_INSTANCE_ID "
+  GATEWAY_INSTANCE_ID P2P_TRACES_ENDPOINT P2P_METRICS_ENDPOINT OBSERVABILITY_PROJECT_ID "
 # nothing else: no P2P_ENV, DB_URL, SMOKE_EXECUTOR, P2P_DB_BOOTSTRAP or build commit overrides
 
 die() { echo "endpoint.sh: $*" >&2; exit 1; }
@@ -68,8 +68,32 @@ while IFS= read -r line || [ -n "$line" ]; do
   key="${BASH_REMATCH[1]}"
   [[ "$ENV_KEYS" == *" $key "* ]] \
     || die "$env_file line $number: $key is not a deploy setting (see deploy/prod.env.example)"
+  [[ " ${seen_keys:-} " != *" $key "* ]] || die "$env_file line $number: $key is set twice"
+  seen_keys="${seen_keys:-} $key"
   env_pairs+=("$line")
 done <"$env_file"
+# Observability (A-28): a bad value would stop the app at startup, so it is refused here. The
+# static key is mapped only when traces go to Nebius Tracing: without tracing the secret need
+# not hold it (and a rollback to an older release never asks for it).
+traces="" metrics_url="" obs_project=""
+for pair in "${env_pairs[@]}"; do
+  case "$pair" in
+    P2P_TRACES_ENDPOINT=*) traces="${pair#*=}" ;;
+    P2P_METRICS_ENDPOINT=*) metrics_url="${pair#*=}" ;;
+    OBSERVABILITY_PROJECT_ID=*) obs_project="${pair#*=}" ;;
+  esac
+done
+otlp_url='^https://[a-z0-9.-]+(:[0-9]{1,5})?$'
+[[ -z "$traces" || "$traces" =~ $otlp_url ]] \
+  || die "P2P_TRACES_ENDPOINT must be https://host[:port] (no path, no credentials)"
+[[ -z "$metrics_url" || "$metrics_url" =~ $otlp_url ]] \
+  || die "P2P_METRICS_ENDPOINT must be https://host[:port] (no path, no credentials)"
+if [[ "$traces" =~ ^https://write\.tracing\.[a-z0-9-]+\.nebius\.cloud(:[0-9]{1,5})?$ ]]; then
+  [[ "$obs_project" =~ ^project-[a-z0-9]+$ ]] \
+    || die "OBSERVABILITY_PROJECT_ID (project-...) is required with Nebius Tracing"
+  SECRET_VARS+=(OBSERVABILITY_STATIC_KEY)
+fi
+
 env_arg="$(IFS=,; echo "P2P_ENV=prod,${env_pairs[*]}")"
 secret_arg="$(printf '%s,' "${SECRET_VARS[@]/%/=$SECRET}")"
 secret_arg="${secret_arg%,}"

@@ -23,7 +23,8 @@ Required environment:
   `TAVILY_API_KEY`, `SESSION_KEY`, `ADMIN_TOKEN`, `RUNTIME_S3_KEY_ID`, `RUNTIME_S3_SECRET`,
   `RUNTIME_AUTH_KEY` (the authorized key JSON of sa-api-runtime: KMS signing),
   `JOB_LAUNCHER_AUTH_KEY` (of sa-job-launcher: jobs, buckets, gateway), `JOB_LAUNCHER_S3_KEY_ID`,
-  `JOB_LAUNCHER_S3_SECRET`. The app writes the two authorized keys owner-only to
+  `JOB_LAUNCHER_S3_SECRET`; `OBSERVABILITY_STATIC_KEY` only with Nebius Tracing (see
+  "Observability"). The app writes the two authorized keys owner-only to
   `/var/lib/p2p/keys` on the ephemeral container disk, because the Nebius SDK reads a file.
 - **Settings**, from `deploy/prod.env`, whose template is `deploy/prod.env.example`. Only those
   keys are accepted.
@@ -64,6 +65,43 @@ The script:
 
 **Rollback:** run the same command with the previous digest. If the instance is down, add
 `P2P_SKIP_DRAIN=1`.
+
+## Observability
+
+The app writes JSON logs to stdout (one object per line with `run_id` and `trace_id`; uvicorn's
+logs too), scrubbed of every configured secret value and key-shaped string; fields named like
+prompts, messages or paper text are blanked at any depth. Nebius Logs collects the endpoint's
+stdout.
+
+- **Traces** go over OTLP/gRPC to Nebius Tracing: in `deploy/prod.env`,
+  `P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443` and
+  `OBSERVABILITY_PROJECT_ID` = the p2p-control project (sent as `iam-container`); in the
+  Nebius secret, `OBSERVABILITY_STATIC_KEY`. `deploy/endpoint.sh` maps that secret only when
+  `P2P_TRACES_ENDPOINT` is a Nebius Tracing host, so add the key to the secret before the first
+  deploy that sets it (a rollback to an older release does not ask for it). The key is a
+  static key of a dedicated service account (e.g. `sa-observability-writer`, never
+  sa-api-runtime or sa-job-launcher) in a group with at least `editor`, as the Nebius docs
+  require: `nebius iam static-key issue --name p2p-observability
+  --account-service-account-id <sa> --service observability`, then copy `token`. Check whether
+  a narrower role than `editor` is enough. The app sends the key only to
+  `write.tracing.<region>.nebius.cloud` over TLS. One trace per run (its ID is derived from
+  the run ID), a span per step and per model call. Without the endpoint, tracing is off.
+- **Metrics** (`p2p_*`, architecture §14) go over OTLP/gRPC to `P2P_METRICS_ENDPOINT`, never
+  with the static key. Nebius Monitoring has no direct OTLP write for application metrics,
+  only Prometheus remote-write
+  (`https://write.monitoring.<region>.nebius.cloud/projects/<project>/prometheus/api/v1/write`),
+  so the endpoint must be an OpenTelemetry Collector with a `prometheusremotewrite` exporter.
+  **No collector is deployed yet**: leave `P2P_METRICS_ENDPOINT` unset (metrics stay
+  in-process) until one exists in Terraform, reachable only from the control subnet or with
+  its own authentication: a public, unauthenticated OTLP receiver would let anyone forge
+  `p2p_*` series and trigger or mask alerts. Cost: an always-on cpu-e2 2vcpu-8gb VM is about
+  $45/month (config/pricing.yaml).
+- **Dashboard and alerts**: import `infra/observability/dashboard.json` into Grafana with the
+  Nebius Monitoring data source (`https://read.monitoring.api.nebius.cloud/projects/<project>/
+  prometheus`, header `Authorization: Bearer <token>` with a separate read-only static key,
+  never the writer's), and the rules of `infra/observability/alerts.yaml` into Grafana
+  Alerting (Nebius console alerts cover VMs and buckets only). Both need the metrics above.
+  Budget alerts at 50/80/100% are set in Nebius Budgets.
 
 ## H-05 checklist (first deploy, also the S-6 facts for RESULTS.md)
 
