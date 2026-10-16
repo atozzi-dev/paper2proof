@@ -1,0 +1,3 @@
+# Provisioner image (A-06): dataset download and the parquet smoke subset. See scripts/lock_images.sh.
+huggingface_hub
+pyarrow>=14.0.1  # CVE-2023-47248

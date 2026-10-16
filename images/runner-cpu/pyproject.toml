@@ -1,0 +1,31 @@
+# CPU runner stack (smoke jobs and Sandboxes, A-06): the input of
+# images/runner-cpu/requirements.lock, re-locked by scripts/lock_images.sh with the GPU runner's
+# versions as constraints. Not an installable project. torch and torchvision come only from
+# PyTorch's CPU index; everything else comes from PyPI.
+[project]
+name = "p2p-runner-cpu-stack"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "transformers",
+    "datasets",
+    "timm",
+    "accelerate",
+    "evaluate",
+    "pandas",
+    "pyarrow>=14.0.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

@@ -70,6 +70,11 @@ DEFAULT_DEADLINE_S = 1080  # 18 of the 20 watchdog minutes: leave time to write 
 PYTHON_VERSION = "3.12"
 PYTHON_PLATFORM = "x86_64-manylinux_2_28"
 PYPI_INDEX = "https://pypi.org/simple"
+# The runner's torch is PyTorch's CUDA 12.6 build (images/runner/pyproject.toml): a package that
+# depends on torch must resolve it from that index, or the runner's constraints (cuda-toolkit,
+# nvidia-*) have no solution on PyPI. Explicit index: nothing else is taken from it.
+TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
+TORCH_FAMILY = ("torch", "torchvision")
 REQUIREMENT_FILES = re.compile(
     r"^(requirements[\w.-]*\.txt|pyproject\.toml|setup\.cfg|environment\.ya?ml)$"
 )
@@ -378,6 +383,20 @@ def _publish_to_cache(overlay: Path, cached: Path, digest: str, run_id: str) -> 
     tmp_sidecar.replace(cached.with_name(f"{key}.sha256"))
 
 
+def _lock_input(packages: Sequence[str]) -> str:
+    """The run's packages as a lock input that takes only torch and torchvision from PyTorch's
+    CUDA 12.6 index. uv applies sources to direct dependencies only, so both are always listed
+    (pinned by the runner constraints; the runner provides them, so they never reach the
+    overlay). Names were validated (PACKAGE): JSON strings are valid TOML strings."""
+    deps = ", ".join(json.dumps(p) for p in [*packages, *TORCH_FAMILY])
+    sources = "".join(f'{name} = {{ index = "pytorch-cu126" }}\n' for name in TORCH_FAMILY)
+    return (
+        '[project]\nname = "p2p-run-packages"\nversion = "0"\nrequires-python = "==3.12.*"\n'
+        f"dependencies = [{deps}]\n\n[tool.uv.sources]\n{sources}\n"
+        f'[[tool.uv.index]]\nname = "pytorch-cu126"\nurl = "{TORCH_INDEX}"\nexplicit = true\n'
+    )
+
+
 def lock_and_overlay(
     manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
 ) -> tuple[str, bool, str]:
@@ -386,8 +405,9 @@ def lock_and_overlay(
     constraints_text = paths.constraints.read_text(encoding="utf-8")
     work = paths.work / "overlay"
     work.mkdir(parents=True, exist_ok=True)
-    requirements_in = paths.work / "requirements.in"
-    requirements_in.write_text("".join(f"{p}\n" for p in manifest.packages), encoding="utf-8")
+    requirements_in = paths.work / "requirements" / "pyproject.toml"
+    requirements_in.parent.mkdir(parents=True, exist_ok=True)
+    requirements_in.write_text(_lock_input(manifest.packages), encoding="utf-8")
     lock = paths.staging / "lock.txt"
     if manifest.packages:
         try:

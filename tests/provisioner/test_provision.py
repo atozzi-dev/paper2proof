@@ -12,6 +12,8 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -174,6 +176,17 @@ def test_wheels_only_with_hashes_constrained_to_the_runner(tmp_path: Path) -> No
     assert compile_cmd[compile_cmd.index("--index-url") + 1] == "https://pypi.org/simple"
     for flag in ("--only-binary=:all:", "--require-hashes", "--no-deps", "--no-config"):
         assert flag in install_cmd
+    # The runner's torch is PyTorch's CUDA 12.6 build: packages that depend on torch must
+    # resolve it from that index (or the constraints have no solution), and nothing else may
+    # come from there. The install only fetches what the runner lacks: PyPI alone.
+    for cmd in (compile_cmd, install_cmd):
+        assert "--index-strategy" not in cmd and "--extra-index-url" not in cmd
+    project = Path(compile_cmd[-1])
+    assert project.name == "pyproject.toml"
+    text = project.read_text()
+    assert '"tabulate==0.9.0"' in text and '"torch"' in text
+    assert 'torch = { index = "pytorch-cu126" }' in text
+    assert 'url = "https://download.pytorch.org/whl/cu126"' in text and "explicit = true" in text
     # Packages already in the runner image are dropped from what gets installed.
     install_lock = Path(install_cmd[install_cmd.index("-r") + 1]).read_text()
     assert "tabulate==0.9.0" in install_lock
@@ -557,3 +570,17 @@ def test_the_report_records_every_archive_digest(tmp_path: Path) -> None:
         {"name": "uoft-cs__cifar10", "sha256": sha("data/uoft-cs__cifar10.tar.zst")},
         {"name": "smoke", "sha256": sha("data/smoke.tar.zst")},
     ]
+
+
+@given(
+    st.lists(
+        st.from_regex(provision.PACKAGE, fullmatch=True).filter(lambda p: len(p) <= 140),
+        max_size=5,
+    )
+)
+def test_any_valid_package_list_becomes_the_same_toml_dependencies(packages: list[str]) -> None:
+    import tomllib
+
+    data = tomllib.loads(provision._lock_input(packages))
+    assert data["project"]["dependencies"] == [*packages, "torch", "torchvision"]
+    assert set(data["tool"]["uv"]["sources"]) == {"torch", "torchvision"}
