@@ -131,27 +131,67 @@ def _step(
 
 
 KEY, SHA = "a" * 64, "b" * 64
+PROV, FETCH = f"p2p-prov-{RUN[2:]}-1", f"p2p-fetch-{RUN[2:]}-1"
 
 
 def _report(**overrides: Any) -> dict[str, Any]:
+    """What the provision job (packages) writes."""
     report: dict[str, Any] = {
-        "schema": "p2p.provision-report/v1",
+        "schema": "p2p.packages-report/v1",
         "run_id": RUN,
         "overlay_cache_key": KEY,
         "overlay_cache_hit": False,
         "overlay_sha256": SHA,
+    }
+    report.update(overrides)
+    return report
+
+
+def _fetch_report(**overrides: Any) -> dict[str, Any]:
+    """What the fetch job (repository and datasets) writes."""
+    report: dict[str, Any] = {
+        "schema": "p2p.fetch-report/v1",
+        "run_id": RUN,
+        "repo": True,
         "requirement_files": {"requirements.txt": "torch\n"},
     }
     report.update(overrides)
     return report
 
 
-def _writes_report(storage: FakeRunStorage, raw: bytes | None = None, **overrides: Any) -> Any:
+def _writes_report(
+    storage: FakeRunStorage,
+    raw: bytes | None = None,
+    *,
+    fetch: dict[str, Any] | None = None,
+    fetch_raw: bytes | None = None,
+    **overrides: Any,
+) -> Any:
+    """The provision job writes packages_report.json (`raw` / `overrides`), the fetch job
+    fetch_report.json (`fetch_raw` / `fetch`)."""
+
     def on_submit(spec: JobSpec) -> None:
-        body = raw if raw is not None else json.dumps(_report(**overrides)).encode()
-        storage.objects[(RUN, "staging/provision_report.json")] = body
+        if spec.kind is JobKind.PROVISION:
+            body = raw if raw is not None else json.dumps(_report(**overrides)).encode()
+            storage.objects[(RUN, "staging/packages_report.json")] = body
+        elif spec.kind is JobKind.FETCH:
+            body = (
+                fetch_raw
+                if fetch_raw is not None
+                else json.dumps(_fetch_report(**(fetch or {}))).encode()
+            )
+            storage.objects[(RUN, "staging/fetch_report.json")] = body
 
     return on_submit
+
+
+def _spec(ctx: RunContext, kind: JobKind = JobKind.PROVISION) -> JobSpec:
+    specs = [spec for _, _, _, spec in ctx.jobs.jobs.values()]  # type: ignore[attr-defined]
+    return next(spec for spec in specs if spec.kind is kind)
+
+
+def _manifest(ctx: RunContext, kind: JobKind = JobKind.PROVISION) -> Any:
+    return json.loads(_spec(ctx, kind).inject_files["/etc/p2p/provision.json"])
 
 
 @respx.mock
@@ -163,24 +203,37 @@ async def test_provision_job_is_submitted_safely_and_succeeds(store: Store, tmp_
     ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
     result = await _step(store, artifacts, storage, clock).run(ctx)
     assert result.next is StepName.SMOKE_TESTING
-    ((_, _, _, spec),) = jobs.jobs.values()
-    assert spec.kind is JobKind.PROVISION
-    assert spec.name == f"p2p-prov-{RUN[2:]}-1"
+    assert list(jobs.jobs) == [PROV, FETCH]  # packages first, the untrusted bytes after
+    spec = _spec(ctx)
     assert spec.image_digest_ref == EXEC_CFG.provisioner_image
     assert spec.subnet_id == "vpcsubnet-provision"
     assert {(v.source, v.mode) for v in spec.volumes} == {
         (bucket_name(RUN), "rw"),
         ("p2p-cache", "rw"),
     }
-    manifest = json.loads(spec.inject_files["/etc/p2p/provision.json"])
+    manifest = _manifest(ctx)
+    assert manifest["schema"] == "p2p.provision/v2" and manifest["phase"] == "packages"
     assert manifest["packages"] == ["timm"]
-    assert manifest["repo"] == {"url": "https://github.com/org/repo", "ref": None}
-    assert manifest["hf_token_secret"] is None
+    assert "repo" not in manifest and "datasets" not in manifest
+    fetch = _spec(ctx, JobKind.FETCH)
+    assert fetch.image_digest_ref == EXEC_CFG.provisioner_image
+    assert fetch.subnet_id == "vpcsubnet-provision"
+    assert {(v.source, v.mode) for v in fetch.volumes} == {(bucket_name(RUN), "rw")}  # no cache
+    fetched = _manifest(ctx, JobKind.FETCH)
+    assert fetched["phase"] == "fetch"
+    assert fetched["repo"] == {"url": "https://github.com/org/repo", "ref": None}
+    assert fetched["hf_token_secret"] is None
+    for field in ("packages", "trusted_overlays", "cache_salt", "policy"):
+        assert field not in fetched
     assert jobs.gateway_running
     assert artifacts.get_json(f"runs/{RUN}/provision_report.json")["requirement_files"]
     assert await ctx.budget.run_spend(RUN, SpendKind.CLOUD_USD) >= 0
     events = [e.payload for e in await store.events_after(RUN, 0)]
     assert any(isinstance(p, JobStatusPayload) and p.state == "SUCCEEDED" for p in events)
+    # the UI knows provisioning as one kind of job: the fetch job is told apart by its name
+    assert any(
+        isinstance(p, JobStatusPayload) and (p.kind, p.name) == ("prov", FETCH) for p in events
+    )
 
 
 @respx.mock
@@ -192,8 +245,7 @@ async def test_rejected_plan_packages_are_dropped_with_a_warning(
     storage = FakeRunStorage()
     ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
     await _step(store, artifacts, storage, FakeClock()).run(ctx)
-    spec = next(iter(ctx.jobs.jobs.values()))[3]  # type: ignore[attr-defined]
-    assert json.loads(spec.inject_files["/etc/p2p/provision.json"])["packages"] == []
+    assert _manifest(ctx)["packages"] == []
     events = [e.payload for e in await store.events_after(RUN, 0)]
     assert any(isinstance(p, WarningPayload) and p.code == "PACKAGE_REJECTED" for p in events)
 
@@ -212,6 +264,32 @@ async def test_provisioner_failure_surfaces_its_reason(store: Store, tmp_path: P
         await _step(store, artifacts, storage, FakeClock()).run(ctx)
     assert err.value.code is ErrorCode.PROVISION_FAILED
     assert "no wheel" in err.value.message
+    assert list(ctx.jobs.jobs) == [PROV]  # type: ignore[attr-defined]
+
+
+class _FetchFails(FakeJobBackend):
+    async def status(self, handle: JobHandle) -> JobState:
+        return JobState.FAILED if handle.name == FETCH else JobState.SUCCEEDED
+
+
+async def test_a_fetch_failure_surfaces_its_reason(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    report = _writes_report(storage)
+
+    def on_submit(spec: JobSpec) -> None:
+        report(spec)
+        if spec.kind is JobKind.FETCH:
+            storage.objects[(RUN, "staging/provision_error.json")] = json.dumps(
+                {"error": "the repository is larger than 1 GiB"}
+            ).encode()
+
+    ctx = RunContext(**{**ctx.__dict__, "jobs": _FetchFails(on_submit=on_submit)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert "larger than 1 GiB" in err.value.message
+    assert (await store.trusted_overlays())[KEY] == SHA  # the packages job was clean
 
 
 async def test_watchdog_cancels_a_stuck_job(store: Store, tmp_path: Path) -> None:
@@ -289,9 +367,27 @@ async def test_coder_requested_packages_are_added_when_accepted(
     storage = FakeRunStorage()
     ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
     await _step(store, artifacts, storage, FakeClock()).run(ctx)
-    spec = next(iter(ctx.jobs.jobs.values()))[3]  # type: ignore[attr-defined]
-    assert spec.name.endswith("-2")
-    assert json.loads(spec.inject_files["/etc/p2p/provision.json"])["packages"] == ["einops"]
+    assert _spec(ctx).name.endswith("-2")
+    assert _manifest(ctx)["packages"] == ["einops"]
+
+
+@respx.mock
+async def test_a_later_attempt_reuses_the_fetched_repository_and_datasets(
+    store: Store, tmp_path: Path
+) -> None:
+    respx.get("https://pypi.org/pypi/einops/json").mock(return_value=_pypi())
+    ctx, artifacts = await _setup(store, tmp_path, packages=[], smoke_request=["einops"])
+    artifacts.put_json(  # validated and stored by attempt 1
+        f"runs/{RUN}/fetch_report.json",
+        {**_fetch_report(), "repo_commit": "0" * 40, "data_archives": [], "datasets": []},
+    )
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert list(ctx.jobs.jobs) == [f"p2p-prov-{RUN[2:]}-2"]  # type: ignore[attr-defined]
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert stored["repo_commit"] == "0" * 40 and stored["overlay_sha256"] == SHA
 
 
 @respx.mock
@@ -300,11 +396,6 @@ async def test_all_requested_packages_rejected_fails(store: Store, tmp_path: Pat
     with pytest.raises(P2PError) as err:
         await _step(store, artifacts, FakeRunStorage(), FakeClock()).run(ctx)
     assert err.value.code is ErrorCode.PACKAGE_REJECTED
-
-
-def _manifest(ctx: RunContext) -> Any:
-    spec = next(iter(ctx.jobs.jobs.values()))[3]  # type: ignore[attr-defined]
-    return json.loads(spec.inject_files["/etc/p2p/provision.json"])
 
 
 @respx.mock
@@ -337,6 +428,8 @@ async def test_manifest_carries_the_cache_salt_and_the_policy(store: Store, tmp_
     assert re.fullmatch(r"[A-Za-z0-9_.:+-]{1,300}", salt)  # the provisioner's SALT pattern
     # The provisioner stops itself 2 minutes before the 20-minute watchdog from submission.
     assert manifest["deadline_unix"] == (NOW + timedelta(minutes=18)).timestamp()
+    # One budget for both jobs: the fetch job has the same deadline.
+    assert _manifest(ctx, JobKind.FETCH)["deadline_unix"] == manifest["deadline_unix"]
     assert "pip" in manifest["policy"]["denylist"]
     assert "torch" in manifest["policy"]["popular"]
     assert len(json.dumps(manifest)) < 64 * 1024
@@ -468,6 +561,29 @@ async def test_a_succeeded_job_without_a_valid_report_fails(
         await _step(store, artifacts, storage, FakeClock()).run(ctx)
     assert err.value.code is ErrorCode.PROVISION_FAILED
     assert await store.trusted_overlays() == {}
+    assert list(ctx.jobs.jobs) == [PROV]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("raw", "overrides"),
+    [
+        (b"[1, 2]", {}),
+        (None, {"run_id": "r_01jb7z00000000000000000009"}),
+        (None, {"schema": "p2p.packages-report/v1"}),
+        (b"x" * (600 * 1024), {}),
+    ],
+    ids=["list", "run-id", "schema", "oversize"],
+)
+async def test_a_succeeded_fetch_job_without_a_valid_report_fails(
+    store: Store, tmp_path: Path, raw: bytes | None, overrides: dict[str, Any]
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(storage, fetch_raw=raw, fetch=overrides)
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
 
 
 async def test_staging_is_kept_when_the_backend_already_has_the_job(
@@ -478,7 +594,8 @@ async def test_staging_is_kept_when_the_backend_already_has_the_job(
     jobs = FakeJobBackend(on_submit=_writes_report(storage))
     name = f"p2p-prov-{RUN[2:]}-1"
     # Submitted before a crash, never recorded in the DB, already finished.
-    await jobs.submit(JobSpec(**{**_spec_fields(), "name": name}))
+    handle = await jobs.submit(JobSpec(**{**_spec_fields(), "name": name}))
+    jobs.jobs[name] = (handle, JobState.SUCCEEDED, NOW, jobs.jobs[name][3])  # just before
     ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
     result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
     assert result.next is StepName.SMOKE_TESTING  # its report was not deleted
@@ -546,10 +663,13 @@ async def test_the_stored_report_keeps_only_validated_fields(store: Store, tmp_p
     storage = FakeRunStorage()
     on_submit = _writes_report(
         storage,
-        repo_commit="not-a-commit",
-        datasets=["ok__name", "../../bad", 5],
         lock_sha256="c" * 64,
         injected={"evil": True},
+        fetch={
+            "repo_commit": "not-a-commit",
+            "datasets": ["ok__name", "../../bad", 5],
+            "injected": {"evil": True},
+        },
     )
     ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
     result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
@@ -570,16 +690,14 @@ async def test_the_manifest_fits_with_a_full_trust_store(store: Store, tmp_path:
     storage = FakeRunStorage()
     ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
     await _step(store, artifacts, storage, FakeClock()).run(ctx)
-    spec = next(iter(ctx.jobs.jobs.values()))[3]  # type: ignore[attr-defined]
-    manifest = json.loads(spec.inject_files["/etc/p2p/provision.json"])
-    assert len(manifest["trusted_overlays"]) == 300
-    assert len(spec.inject_files["/etc/p2p/provision.json"]) < 60 * 1024
+    assert len(_manifest(ctx)["trusted_overlays"]) == 300
+    assert len(_spec(ctx).inject_files["/etc/p2p/provision.json"]) < 60 * 1024
 
 
 async def test_the_repository_snapshot_digest_is_kept(store: Store, tmp_path: Path) -> None:
     ctx, artifacts = await _setup(store, tmp_path, packages=[])
     storage = FakeRunStorage()
-    on_submit = _writes_report(storage, repo_files_sha256="d" * 64)
+    on_submit = _writes_report(storage, fetch={"repo_files_sha256": "d" * 64})
     ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
     result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
     assert result.output_ref is not None
@@ -591,13 +709,15 @@ async def test_archive_digests_are_kept_and_validated(store: Store, tmp_path: Pa
     storage = FakeRunStorage()
     on_submit = _writes_report(
         storage,
-        repo_sha256="e" * 64,
-        data_archives=[
-            {"name": "uoft-cs__cifar10", "sha256": "f" * 64},
-            {"name": "smoke", "sha256": "1" * 64},
-            {"name": "../evil", "sha256": "2" * 64},
-            {"name": "x", "sha256": "short"},
-        ],
+        fetch={
+            "repo_sha256": "e" * 64,
+            "data_archives": [
+                {"name": "uoft-cs__cifar10", "sha256": "f" * 64},
+                {"name": "smoke", "sha256": "1" * 64},
+                {"name": "../evil", "sha256": "2" * 64},
+                {"name": "x", "sha256": "short"},
+            ],
+        },
     )
     ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
     result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
@@ -636,4 +756,142 @@ async def test_leftover_smoke_jobs_are_stopped_before_provisioning(
     jobs.on_submit = submitted
     ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
     await _step(store, artifacts, storage, FakeClock()).run(ctx)
-    assert order == [f"cancel p2p-smoke-{RUN[2:]}-4", f"submit p2p-prov-{RUN[2:]}-1"]
+    assert order == [f"cancel p2p-smoke-{RUN[2:]}-4", f"submit {PROV}", f"submit {FETCH}"]
+
+
+# --- the cache trust root never shares a bucket with untrusted code (A-06 follow-up) ------------
+
+
+class _Ordered(FakeJobBackend):
+    """Records, when the fetch job is submitted, what the control plane already trusts."""
+
+    def __init__(self, store: Store, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.store = store
+        self.trusted_at_fetch: dict[str, str] | None = None
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        if spec.kind is JobKind.FETCH and spec.name not in self.jobs:
+            self.trusted_at_fetch = await self.store.trusted_overlays()
+        return await super().submit(spec)
+
+
+async def test_the_digest_is_trusted_before_any_untrusted_byte_is_fetched(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    report = _writes_report(storage)
+
+    def poisoning_fetch(spec: JobSpec) -> None:
+        report(spec)
+        if spec.kind is JobKind.FETCH:  # code execution via a dataset or the repository
+            poisoned = _report(overlay_cache_key="9" * 64, overlay_sha256="8" * 64)
+            storage.objects[(RUN, "staging/packages_report.json")] = json.dumps(poisoned).encode()
+
+    jobs = _Ordered(store, on_submit=poisoning_fetch)
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert jobs.trusted_at_fetch == {KEY: SHA}
+    assert await store.trusted_overlays() == {KEY: SHA}  # the poisoned report was never read
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert (stored["overlay_cache_key"], stored["overlay_sha256"]) == (KEY, SHA)
+
+
+async def test_a_fetch_report_never_sets_overlay_fields(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(
+        storage,
+        fetch={"overlay_cache_key": "9" * 64, "overlay_sha256": "8" * 64, "lock_sha256": "7" * 64},
+    )
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert (stored["overlay_cache_key"], stored["overlay_sha256"]) == (KEY, SHA)
+    assert stored["lock_sha256"] is None
+    assert await store.trusted_overlays() == {KEY: SHA}
+
+
+async def test_leftover_fetch_jobs_are_stopped_before_the_provision_job(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    order: list[str] = []
+    jobs = FakeJobBackend(JobState.RUNNING)
+    await jobs.submit(JobSpec(**{**_spec_fields(), "kind": JobKind.FETCH, "name": FETCH}))
+    original = jobs.cancel
+
+    async def cancel(handle: JobHandle) -> None:
+        order.append(f"cancel {handle.name}")
+        await original(handle)
+
+    jobs.cancel = cancel  # type: ignore[method-assign]
+    jobs.final_state = JobState.SUCCEEDED
+    jobs.on_submit = lambda spec: (
+        order.append(f"submit {spec.name}"),
+        _writes_report(storage)(spec),
+    )
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    with pytest.raises(P2PError):  # the cancelled fetch job of this attempt can't be reused
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert order[:2] == [f"cancel {FETCH}", f"submit {PROV}"]
+
+
+async def test_a_resumed_step_never_rereads_the_packages_report_from_the_bucket(
+    store: Store, tmp_path: Path
+) -> None:
+    # the control plane died while the fetch job ran: the bucket's packages report may have
+    # been rewritten by it since, so the stored, validated copy is the only one used
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage, clock = FakeRunStorage(), FakeClock()
+    jobs = FakeJobBackend(on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    step = _step(store, artifacts, storage, clock)
+    await step.run(ctx)
+    poisoned = _report(overlay_cache_key="9" * 64, overlay_sha256="8" * 64)
+    storage.objects[(RUN, "staging/packages_report.json")] = json.dumps(poisoned).encode()
+    jobs.on_submit = None
+    result = await step.run(ctx)  # re-attaches both finished jobs by name
+    assert jobs.created == 2 and not jobs.cancelled
+    assert await store.trusted_overlays() == {KEY: SHA}
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["overlay_sha256"] == SHA
+
+
+class _SlowPackages(FakeJobBackend):
+    def __init__(self, clock: FakeClock, done_at_s: float, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.clock, self.done_at_s = clock, done_at_s
+
+    async def status(self, handle: JobHandle) -> JobState:
+        if handle.name == PROV and self.clock.t < self.done_at_s:
+            return JobState.RUNNING
+        return await super().status(handle)
+
+
+async def test_the_fetch_job_gets_what_is_left_of_the_budget(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage, clock = FakeRunStorage(), FakeClock()
+    jobs = _SlowPackages(clock, 5 * 60, on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    await _step(store, artifacts, storage, clock).run(ctx)
+    fetch = _spec(ctx, JobKind.FETCH)
+    assert fetch.watchdog_s == 15 * 60
+    assert (
+        _manifest(ctx, JobKind.FETCH)["deadline_unix"] == (NOW + timedelta(minutes=18)).timestamp()
+    )
+
+
+async def test_no_fetch_job_once_the_budget_is_spent(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage, clock = FakeRunStorage(), FakeClock()
+    jobs = _SlowPackages(clock, 19 * 60 + 30, on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, clock).run(ctx)
+    assert err.value.code is ErrorCode.TIMEOUT
+    assert list(jobs.jobs) == [PROV]

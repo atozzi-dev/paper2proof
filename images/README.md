@@ -8,7 +8,7 @@ allowlist). Every base image is pinned by digest, Python packages come from hash
 |---|---|---|
 | `p2p-runner` | Exec jobs (GPU) | `images/runner/entrypoint.py` + the ML stack in `images/runner/requirements.lock` (PyTorch CUDA 12.6 wheels) |
 | `p2p-runner-cpu` | CPU smoke jobs, Sandboxes | Same entrypoint, same public versions (`images/runner-cpu/requirements.lock`, PyTorch CPU wheels) |
-| `p2p-provisioner` | Provision jobs (allowlisted egress) | `images/provisioner/provision.py`, uv, git, zstd, `huggingface_hub`, `pyarrow` |
+| `p2p-provisioner` | Provision jobs (packages, the only writer of `p2p-cache`) and fetch jobs (repository and datasets, no cache mount), allowlisted egress | `images/provisioner/provision.py`, uv, git, zstd, `huggingface_hub`, `pyarrow` |
 | `p2p-api` | The Serverless endpoint | The FastAPI app, the built `web/dist`, the `litestream` binary (checksum verified) |
 
 ## Layout inside the images
