@@ -187,8 +187,9 @@ class JobBackend(Protocol):
     async def status(self, handle: JobHandle) -> JobState: ...
     async def cancel(self, handle: JobHandle) -> None: ...
     async def ensure_gateway_up(self) -> None: ...                    # start VM if stopped, wait ready
-    async def gateway_idle_check(self, idle_minutes: int = 30) -> None: ...
+    async def gateway_idle_check(self, idle_minutes: int = 30) -> bool: ...           # True when it stopped the VM
     async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]: ...  # for the reaper
+    async def list_run_buckets(self) -> list[tuple[str, datetime]]: ...  # p2p-run-* (name, created_at), for the reaper
 
 # app/execution/smoke.py
 class SmokeResult(BaseModel):
@@ -214,7 +215,18 @@ Base URL: `https://api.tokenfactory.nebius.com/sandboxes`, headers `Authorizatio
 
 ## 11. Reaper (every 5 min)
 
-- Cancel `p2p-*` jobs running longer than `watchdog_s + 600`.
-- Delete `p2p-run-*` buckets older than 24 h whose run is terminal and whose bundle exists.
-- Stop the gateway if idle for 30 min and no run is in PROVISIONING or EXECUTING.
+- Cancel `p2p-*` jobs running longer than `watchdog_s + 600`. The deadline is the `jobs` row's
+  (first submission + `watchdog_s`); a job with no row (submitted before a crash, never recorded)
+  gets the fallback watchdog of 45 min (architecture §7). A job whose run is terminal or unknown
+  has nobody watching it and is cancelled at once (it still mounts the run bucket read-write).
+- Delete `p2p-run-*` buckets older than 24 h whose run is terminal and whose bundle exists
+  (`bundles/<run_id>/proof-bundle.tar.gz`), and only when none of the run's jobs is still running.
+  No bundle, no deletion: the bucket is kept and the action is counted.
+- Ledger gaps: a `jobs` row that was never settled (the control plane died while watching it) and
+  whose run is terminal is charged once its job is terminal, from its first submission to now
+  (capped at the 1 h platform timeout) at the kind's on-demand rate, then marked settled. At
+  worst this counts the watched part twice, never zero.
+- Stop the gateway if idle for 30 min and no run is in PROVISIONING, SMOKE_TESTING or EXECUTING
+  (SMOKE_TESTING too: a fallback smoke job runs in the `exec` subnet routed to the gateway).
+  "Idle" = no non-terminal `p2p-*` job and no `ensure_gateway_up` for `idle_minutes`.
 - Emit the metric `p2p_reaper_actions_total{action}`; any job cancellation by the reaper is also an alert.
