@@ -2,16 +2,20 @@
 Skipped when an image is missing. One test downloads a package from PyPI."""
 
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from packaging.version import Version
 
 pytestmark = pytest.mark.docker
 TAG = "dev"
 ALL = ["p2p-runner", "p2p-runner-cpu", "p2p-provisioner", "p2p-api"]
+SCHEMAS = Path(__file__).resolve().parents[2] / "schemas"
 
 
 def _docker(args: list[str], timeout: float = 600) -> "subprocess.CompletedProcess[str]":
@@ -192,3 +196,79 @@ def test_the_environment_is_read_only_and_work_is_writable(image: str) -> None:
         "touch /work/x && echo work-ok"
     )
     assert _run(image, "-c", script, entrypoint="sh").split() == ["work-ok"]
+
+
+CANARY_SCRIPT = """
+import argparse, json, os
+import canary_overlay  # from the overlay archive: proves it was extracted onto PYTHONPATH
+p = argparse.ArgumentParser()
+p.add_argument("--seed", type=int, required=True)
+p.add_argument("--out", required=True)
+p.add_argument("--steps", type=int, default=1)
+a = p.parse_args()
+os.makedirs(a.out, exist_ok=True)
+value = canary_overlay.BASE + a.seed / 100 + a.steps / 1000
+with open(os.path.join(a.out, "metrics.json"), "w") as f:
+    json.dump({"top1_accuracy": value}, f)
+"""
+
+
+def _tar(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for name, text in sorted(files.items()):
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_the_cpu_runner_runs_a_canary_workspace_to_a_valid_results_json(tmp_path: Path) -> None:
+    """A-23 done-when: the real EXEC entrypoint, as uid 10001 with no network, extracts a
+    workspace and a zstd overlay against their manifest digests, runs every seed and writes
+    a results.json that the control plane's schema accepts."""
+    _need("p2p-runner-cpu")
+    run = tmp_path / "run"
+    run.mkdir()
+    run.chmod(0o777)
+    workspace = _tar({"train.py": CANARY_SCRIPT})
+    (run / "workspace.tar").write_bytes(workspace)
+    (run / "overlay.tar").write_bytes(_tar({"canary_overlay.py": "BASE = 0.5\n"}))
+    packed = _docker(
+        ["run", "--rm", "--network", "none", "--entrypoint", "zstd", "-v", f"{run}:/mnt/run",
+         f"p2p-runner-cpu:{TAG}", "-q", "--rm", "/mnt/run/overlay.tar"]
+    )  # fmt: skip
+    assert packed.returncode == 0, packed.stderr[-2000:]
+    overlay = hashlib.sha256((run / "overlay.tar.zst").read_bytes()).hexdigest()
+    manifest = {
+        "schema": "p2p.manifest/v1", "run_id": "r_01jb7z00000000000000000000", "attempt": 1,
+        "image_digest": "sha256:" + "0" * 64, "entrypoint": "workspace/train.py",
+        "args": ["--steps", "3"], "seeds": [0, 1, 2], "budget_seconds": 120,
+        "paths": {"overlay": "/mnt/run/overlay.tar.zst", "repo": None,
+                  "data_dir": "/mnt/run/data", "workspace": "/mnt/run/workspace.tar",
+                  "cache": "/mnt/cache", "results": "/mnt/run/results"},
+        "claim_ref": "c1", "metric": "top1_accuracy", "higher_is_better": True,
+        "claim_type": "ABSOLUTE", "baseline_name": None,
+        "scale": {"full": False, "fraction_of_data": 0.1, "epochs": 1, "paper_epochs": 90},
+        "archives": {"overlay": overlay, "repo": None, "data": []},
+        "workspace_sha256": hashlib.sha256(workspace).hexdigest(),
+    }  # fmt: skip
+    manifest_schema = json.loads((SCHEMAS / "manifest.schema.json").read_text(encoding="utf-8"))
+    Draft202012Validator(manifest_schema).validate(manifest)
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    done = _docker(
+        ["run", "--rm", "--network", "none", "-v", f"{run}:/mnt/run",
+         "-v", f"{tmp_path / 'manifest.json'}:/etc/p2p/manifest.json:ro",
+         f"p2p-runner-cpu:{TAG}"],
+        timeout=300,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr[-3000:]
+    results = json.loads((run / "results" / "results.json").read_text(encoding="utf-8"))
+    results_schema = json.loads((SCHEMAS / "results.schema.json").read_text(encoding="utf-8"))
+    Draft202012Validator(results_schema).validate(results)
+    assert results["exit_reason"] == "completed"
+    assert (results["run_id"], results["attempt"], results["gpu"]) == (manifest["run_id"], 1, "cpu")
+    assert results["per_seed"] == [
+        {"seed": s, "value": pytest.approx(0.5 + s / 100 + 0.003), "ok": True} for s in (0, 1, 2)
+    ]
