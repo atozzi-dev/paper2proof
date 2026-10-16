@@ -19,6 +19,7 @@ from app.execution.backend import JobBackend, JobHandle, JobKind, JobState
 from app.execution.job_smoke import SMOKE_PLATFORM, SMOKE_PRESET
 from app.execution.naming import bucket_name
 from app.models.pricing import CloudPrices
+from app.observability import metrics
 from app.orchestrator.budget import Budget, SpendKind
 from app.orchestrator.cost_estimate import (
     EXEC_PLATFORM,
@@ -83,6 +84,7 @@ class Reaper:
     def _count(self, actions: Counter[str], action: str, **fields: object) -> None:
         actions[action] += 1
         self.actions_total[action] += 1
+        metrics.reaper_action(action)
         log.info(METRIC, extra={"metric": METRIC, "action": action, **fields})
 
     async def tick(self) -> Counter[str]:
@@ -123,7 +125,17 @@ class Reaper:
     # --- jobs ----------------------------------------------------------------------------------
 
     async def _reap_jobs(self, actions: Counter[str]) -> None:
-        for handle, state, created in await self._jobs.list_jobs("p2p-"):
+        listed = await self._jobs.list_jobs("p2p-")
+        now = self._clock()
+        oldest: dict[str, float] = {}
+        for handle, state, created in listed:
+            if not state.is_terminal:
+                match = _OUR_JOB.fullmatch(handle.name)
+                kind = match.group(1) if match else "other"
+                age = (now - _aware(created)).total_seconds()
+                oldest[kind] = max(oldest.get(kind, 0.0), age)
+        metrics.jobs_running(oldest)
+        for handle, state, created in listed:
             if not state.is_terminal:
                 work = self._reap_job(handle, created, actions)
                 await self._isolated(actions, "jobs", handle.name, work)
@@ -210,6 +222,8 @@ class Reaper:
             ledger=ledger,
         )
         if settled:
+            for _, _, kind, amount in ledger:
+                metrics.spend(kind, amount)
             await self._budget.enforce_daily_cloud_cap(day)
             self._count(actions, "ledger_reconciled", job=record.name, cost_usd=round(cost, 6))
 

@@ -1,0 +1,86 @@
+# Paper2Proof alert rules (architecture §14, A-28), in Prometheus rule-file format.
+#
+# Nebius console alerts cover Compute VMs and buckets only, so these rules run in Grafana
+# (Alerting > import a Prometheus rule file, or the Grafana provisioning API) against the
+# Nebius Monitoring data source:
+#   https://read.monitoring.api.nebius.cloud/projects/<project_ID>/prometheus
+# The metrics reach Nebius Monitoring through the OpenTelemetry Collector named by
+# P2P_METRICS_ENDPOINT (Prometheus remote-write); see docs/DEPLOY.md, "Observability".
+# Every counter series is created at 0 when the app starts exporting, so increase() sees the
+# first event after a restart. Budget alerts at 50/80/100% of the monthly cloud budget are set
+# in Nebius Budgets (human). Not covered yet: "canary smoke failed" (§14) needs a canary signal
+# from the eval harness (A-29).
+groups:
+  - name: paper2proof
+    interval: 1m
+    rules:
+      - alert: P2PRunFailureRateHigh
+        # more than 30% of the runs that ended in the last hour failed; at least 3 runs, so one
+        # failed run out of one does not page (a deviation from §14, which has no minimum)
+        expr: |
+          sum(increase(p2p_runs_total{status="FAILED"}[1h]))
+            / sum(increase(p2p_runs_total[1h])) > 0.30
+          and sum(increase(p2p_runs_total[1h])) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 30% of runs failed in the last hour"
+
+      - alert: P2PExecJobOverrun
+        # a p2p-exec-* job running for more than 45 minutes: the reaper should have stopped it
+        # (the gauge is refreshed by every reaper pass)
+        expr: max(p2p_job_oldest_running_seconds{kind="exec"}) > 2700
+        labels:
+          severity: critical
+        annotations:
+          summary: "A p2p-exec-* job has been running for more than 45 minutes"
+
+      - alert: P2PReaperCancelledAJob
+        # the reaper cancels only jobs nobody watches or past their deadline: the orchestrator
+        # should have stopped them first
+        expr: sum by (action) (increase(p2p_reaper_actions_total{action=~"job_cancelled_.*"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The reaper cancelled a job ({{ $labels.action }})"
+
+      - alert: P2PReaperFailing
+        # a reaper pass or item failed (a refused cancel, an unreadable job, a bucket error)
+        expr: sum(increase(p2p_reaper_actions_total{action="error"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The reaper hit errors in the last 15 minutes"
+
+      - alert: P2PRateLimitLow
+        # 10% of the Token Factory per-minute token limit, while the model is in use (the gauge
+        # keeps its last value when idle). Replace 20000 with 10% of the account's limit
+        # (x-ratelimit-limit-tokens) once it is known.
+        expr: |
+          min by (model) (p2p_ratelimit_remaining_tokens) < 20000
+          and on (model) sum by (model) (increase(p2p_model_tokens_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Token Factory rate limit nearly exhausted for {{ $labels.model }}"
+
+      - alert: P2PCloudSpendNearDailyCap
+        # 80% of global.cloud_usd_per_day in config/budgets.yaml (15.00 USD; a test keeps the two
+        # in step). A rolling 24 h window, while the cap and the kill switch (authoritative,
+        # from the ledger) reset at 00:00 UTC: this errs on the side of warning early.
+        expr: sum(increase(p2p_cost_usd_total{kind="cloud"}[24h])) > 0.80 * 15.00
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cloud spend in the last 24 h is above 80% of the daily cap"
+
+      - alert: P2PMetricsAbsent
+        # the app is down or its metrics no longer reach Nebius Monitoring
+        expr: absent(p2p_runs_total)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No Paper2Proof metrics for 15 minutes"

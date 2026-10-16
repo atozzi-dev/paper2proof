@@ -34,6 +34,24 @@ Collected during development. Consolidated into the Devpost feedback field at su
 - **Suggestion:** Publish an end-to-end GitHub Actions example (federated credential + workflow snippet), ideally an official `nebius/login` action.
 - **Severity:** major
 
+## Observability (Tracing, Monitoring, Logs)
+
+### 2026-10-16 — No direct OTLP write for application metrics, and alerts only for VMs and buckets
+- **Context:** A-28, exporting the control plane's own metrics (`p2p_runs_total`, tokens per model, cost) from a Serverless endpoint.
+- **What happened:** Tracing has a direct OTLP writer (`write.tracing.<region>.nebius.cloud:443`), but metrics ingestion is documented only as Prometheus remote-write from a Prometheus or Vector instance (`write.monitoring.<region>.nebius.cloud/projects/<project>/prometheus/api/v1/write`). Console alerts cover Compute VMs and Object Storage buckets only, with no rules on custom metrics or logs and no import from a file or Terraform.
+- **Expected:** an OTLP metrics endpoint next to the tracing one (https://docs.nebius.com/observability/metrics/ingest), and alert rules on any metric in the project (https://docs.nebius.com/observability/alerts).
+- **Impact:** an extra OpenTelemetry Collector to run just to forward metrics; alerts and the dashboard have to live in a separate Grafana.
+- **Suggestion:** accept OTLP metrics with the same static key and `iam-container` header as tracing, and allow PromQL alert rules (importable as Prometheus rule files) on custom metrics.
+- **Severity:** major
+
+### 2026-10-16 — Tracing direct ingest is gRPC-only with app-specific env vars
+- **Context:** A-28, configuring the OpenTelemetry SDK exporter for Nebius Tracing.
+- **What happened:** the direct-ingest page documents OTLP/gRPC only (`authorization: Bearer <static key>`, `iam-container: <project>`), with examples reading `NEBIUS_REGION_ID`/`NEBIUS_PROJECT_ID`/`NEBIUS_STATIC_TOKEN`; OTLP/HTTP and the standard `OTEL_EXPORTER_OTLP_*` variables are not mentioned, nor token lifetime.
+- **Expected:** both OTLP transports and a copy-paste `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS` setup (https://docs.nebius.com/observability/traces/direct-ingest).
+- **Impact:** about 30 minutes reading pages to confirm the transport and headers; we pulled in the gRPC exporter.
+- **Suggestion:** add OTLP/HTTP (`/v1/traces`) and a standard-env-var example, and state the static key's lifetime.
+- **Severity:** minor
+
 ## Terraform provider, CLI, SDK
 
 ### 2026-10-16 — Python SDK can't be constructed on Windows without an undeclared package

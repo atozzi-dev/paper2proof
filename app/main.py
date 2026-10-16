@@ -28,6 +28,7 @@ import httpx
 from fastapi import FastAPI
 from pydantic import SecretStr
 
+from app import observability
 from app.api.deps import AppState
 from app.api.main import create_app
 from app.bundle.build import Bundler
@@ -313,6 +314,7 @@ def known_secrets(settings: Settings) -> list[str]:
         settings.runtime_auth_key,
         settings.session_key,
         settings.admin_token,
+        settings.observability_static_key,
     ]
     found = [v.get_secret_value() for v in values if v is not None and v.get_secret_value()]
     for key in (settings.job_launcher_auth_key, settings.runtime_auth_key):
@@ -574,10 +576,15 @@ def pool_start_method() -> str:
 
 @lru_cache(maxsize=1)
 def _app() -> FastAPI:  # pragma: no cover - the uvicorn entrypoint (start.sh)
+    observability.configure_early()  # JSON and key-shaped redaction even if settings fail
     settings = get_settings()
+    observability.configure(settings, known_secrets(settings))
     drop_key_env()
-    context = multiprocessing.get_context(pool_start_method())
-    pool = ProcessPoolExecutor(max_workers=2, mp_context=context)
+    pool = ProcessPoolExecutor(
+        max_workers=2,
+        mp_context=multiprocessing.get_context(pool_start_method()),
+        initializer=observability.worker_logging,
+    )
     return create(build_runtime(settings, cpu_pool=pool))
 
 

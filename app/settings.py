@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     p2p_gpu_preemptible: bool | None = None  # explicit in prod: never preemptible for demos
     p2p_bundle_key_id: str | None = None  # KMS key that signs Proof Bundles
     p2p_build_commit: str | None = None  # recorded in Proof Bundles
+    # Observability (A-28): OTLP/gRPC endpoints (https://; a plain http:// collector in dev only)
+    p2p_traces_endpoint: str | None = None  # https://write.tracing.<region>.nebius.cloud:443
+    p2p_metrics_endpoint: str | None = None  # an OpenTelemetry Collector (no direct Nebius OTLP)
+    observability_static_key: SecretStr | None = None  # static key, service `observability`
+    observability_project_id: str | None = None  # sent as `iam-container` to Nebius hosts
 
     def model_post_init(self, context: object, /) -> None:
         # Checked after validation and raised with a redacted input: an `after` validator

@@ -241,3 +241,59 @@ def test_dry_run_changes_nothing(tmp_path: Path) -> None:
     assert "DRY-RUN: nebius ai endpoint delete" in done.stdout
     assert not _nebius(calls, "delete") and not _nebius(calls, "create")
     assert not [c for c in calls if c.startswith("curl")]
+
+
+def test_observability_settings_are_deploy_keys_and_its_key_a_secret(tmp_path: Path) -> None:
+    lines = (
+        "P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443\n"
+        "P2P_METRICS_ENDPOINT=https://otel-collector.example:4317\n"
+        "OBSERVABILITY_PROJECT_ID=project-e00control\n"
+    )
+    done, calls = _run(tmp_path, IMAGE, env_lines=lines)
+    assert done.returncode == 0, done.stderr
+    [create] = _nebius(calls, "create")
+    assert "P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443" in create
+    assert "OBSERVABILITY_PROJECT_ID=project-e00control" in create
+    assert "OBSERVABILITY_STATIC_KEY=p2p-secrets" in create
+
+
+def test_without_tracing_the_observability_key_is_not_required(tmp_path: Path) -> None:
+    done, calls = _run(tmp_path, IMAGE)
+    assert done.returncode == 0, done.stderr
+    [create] = _nebius(calls, "create")
+    assert "OBSERVABILITY_STATIC_KEY" not in create
+
+
+@pytest.mark.parametrize(
+    ("lines", "problem"),
+    [
+        (
+            "P2P_TRACES_ENDPOINT=http://write.tracing.eu-north1.nebius.cloud:443\n"
+            "OBSERVABILITY_PROJECT_ID=project-e00control\n",
+            "P2P_TRACES_ENDPOINT",
+        ),
+        ("P2P_METRICS_ENDPOINT=collector:4317\n", "P2P_METRICS_ENDPOINT"),
+        (
+            "P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443\n",
+            "OBSERVABILITY_PROJECT_ID",
+        ),
+        (
+            "P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443\n"
+            "OBSERVABILITY_PROJECT_ID=bad id\n",
+            "OBSERVABILITY_PROJECT_ID",
+        ),
+    ],
+)
+def test_bad_observability_settings_stop_before_anything_runs(
+    tmp_path: Path, lines: str, problem: str
+) -> None:
+    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    assert done.returncode != 0 and problem in done.stderr
+    assert calls == []
+
+
+def test_a_key_set_twice_is_refused(tmp_path: Path) -> None:
+    lines = "S3_REGION=eu-north1\nS3_REGION=us-east-1\n"
+    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    assert done.returncode != 0 and "S3_REGION is set twice" in done.stderr
+    assert calls == []

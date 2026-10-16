@@ -35,6 +35,7 @@ from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import ErrorCode
 from app.models.pricing import Pricing, estimate_tokens
+from app.observability import metrics, tracing
 from app.orchestrator.budget import Budget, Reservation, SpendKind
 from app.storage.store import Store
 
@@ -241,6 +242,23 @@ class StoreCallRecorder:
                 "cost_usd": cost_usd,
             }
             await self._store.append_event(run_id, EventType.MODEL_CALL, payload)
+        tracing.model_call_span(
+            run_id=run_id,
+            step=step,
+            role=role.value,
+            model_id=model_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
+        )
+        metrics.model_call(
+            role.value,
+            model_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            remaining=ratelimit_remaining,
+        )
 
 
 # --- retry policy ------------------------------------------------------------------------

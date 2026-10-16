@@ -40,21 +40,21 @@ def _forms(value: bytes) -> set[bytes]:
     return {value, escaped}
 
 
-def _known(known: Sequence[bytes]) -> re.Pattern[bytes] | None:
+def known_pattern(known: Sequence[bytes]) -> re.Pattern[bytes] | None:
     forms = {f for k in known if len(k) >= MIN_KNOWN_LEN for f in _forms(k)}
     usable = sorted(forms, key=len, reverse=True)
     return re.compile(b"|".join(re.escape(k) for k in usable)) if usable else None
 
 
 def find_secrets(data: bytes, known: Sequence[bytes] = ()) -> bool:
-    pattern = _known(known)
+    pattern = known_pattern(known)
     return bool(PATTERNS.search(data) or (pattern and pattern.search(data)))
 
 
 def redact(data: bytes, known: Sequence[bytes] = ()) -> tuple[bytes, bool]:
     """Replace every match with [REDACTED]; also says whether anything changed."""
     cleaned = data
-    pattern = _known(known)
+    pattern = known_pattern(known)
     if pattern is not None:
         cleaned = pattern.sub(REDACTED, cleaned)
     cleaned = PATTERNS.sub(REDACTED, cleaned)
