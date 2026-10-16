@@ -1,10 +1,10 @@
 """The built images (A-06), on the local Docker daemon: `make images`, then `make test-docker`.
 Skipped when an image is missing. One test downloads a package from PyPI."""
 
+import contextlib
 import hashlib
 import io
 import json
-import os
 import subprocess
 import tarfile
 import uuid
@@ -308,12 +308,18 @@ def test_the_cpu_runner_runs_a_canary_workspace_to_a_valid_results_json(tmp_path
         assert env["image_digest"] == manifest.image_digest
         assert "seed 2: " in (results / "stdout.log").read_text(encoding="utf-8")
         assert (results / "stderr.log").is_file() and (results / "live.log").is_file()
-        if os.name == "posix":
-            assert (results / "results.json").stat().st_uid == 10001
-    finally:
-        _docker(["rm", "-f", name], timeout=60)  # a timed-out CLI leaves the container running
-        _docker(  # files written by uid 10001: let the host user's tmp_path cleanup remove them
-            ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chmod",
-             *mount, image, "-R", "a+rwX", "/mnt/run"],
+        owner = _docker(  # seen from a container: hosts remap or hide bind-mount owners
+            ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "stat",
+             *mount, image, "-c", "%u", "/mnt/run/results/1/results.json"],
             timeout=60,
         )  # fmt: skip
+        assert owner.stdout.strip() == "10001", owner.stderr[-500:]
+    finally:  # best effort: a cleanup failure must not hide the test's own
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(["rm", "-f", name], timeout=60)  # a timed-out CLI leaves it running
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(  # files written by uid 10001: let tmp_path's cleanup remove them
+                ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chmod",
+                 *mount, image, "-R", "a+rwX", "/mnt/run"],
+                timeout=60,
+            )  # fmt: skip
