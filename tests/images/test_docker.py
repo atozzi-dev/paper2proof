@@ -4,13 +4,19 @@ Skipped when an image is missing. One test downloads a package from PyPI."""
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tarfile
+import uuid
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
 from packaging.version import Version
+
+from app.domain.contracts import ExecManifest
+from app.execution.smoke import pack_with_digest
+from app.verdict.results import analyze_results
 
 pytestmark = pytest.mark.docker
 TAG = "dev"
@@ -206,10 +212,13 @@ p.add_argument("--seed", type=int, required=True)
 p.add_argument("--out", required=True)
 p.add_argument("--steps", type=int, default=1)
 a = p.parse_args()
+with open(os.path.join(os.environ["P2P_DATA_DIR"], "canary", "offset.txt")) as f:
+    offset = float(f.read())  # from the data archive
 os.makedirs(a.out, exist_ok=True)
-value = canary_overlay.BASE + a.seed / 100 + a.steps / 1000
+value = canary_overlay.BASE + offset + a.seed / 100 + a.steps / 1000
 with open(os.path.join(a.out, "metrics.json"), "w") as f:
-    json.dump({"top1_accuracy": value}, f)
+    json.dump({"top1_accuracy": value, "baseline/top1_accuracy": value - 0.1}, f)
+print(f"seed {a.seed}: {value}")
 """
 
 
@@ -224,51 +233,87 @@ def _tar(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+def _canary_manifest(workspace_sha256: str, overlay: str, data: str) -> ExecManifest:
+    """Built like app/orchestrator/steps/executing.py::_manifest (same paths and fields).
+    The dev tag has no registry digest: the runner only echoes image_digest to env.json."""
+    attempt = 1
+    return ExecManifest.model_validate(
+        {
+            "schema": "p2p.manifest/v1", "run_id": "r_01jb7z00000000000000000000",
+            "attempt": attempt, "image_digest": "sha256:" + "ab" * 32,
+            "entrypoint": "workspace/train.py", "args": ["--steps", "3"], "seeds": [0, 1, 2],
+            "budget_seconds": 120,
+            "paths": {
+                "overlay": "/mnt/run/staging/overlay.tar.zst", "repo": None,
+                "data_dir": "/mnt/run/staging/data",
+                "workspace": "/mnt/run/staging/workspace.tar", "cache": "/mnt/cache",
+                "results": f"/mnt/run/results/{attempt}",
+            },
+            "claim_ref": "c1", "metric": "top1_accuracy", "higher_is_better": True,
+            "claim_type": "RELATIVE", "baseline_name": "resnet18", "scale": {"full": False},
+            "archives": {"overlay": overlay, "repo": None,
+                         "data": [{"name": "canary", "sha256": data}]},
+            "workspace_sha256": workspace_sha256,
+        }
+    )  # fmt: skip
+
+
 def test_the_cpu_runner_runs_a_canary_workspace_to_a_valid_results_json(tmp_path: Path) -> None:
-    """A-23 done-when: the real EXEC entrypoint, as uid 10001 with no network, extracts a
-    workspace and a zstd overlay against their manifest digests, runs every seed and writes
-    a results.json that the control plane's schema accepts."""
+    """A-23 done-when: the real EXEC entrypoint, as uid 10001 with no network, extracts the
+    workspace, a zstd overlay and a zstd data archive against their manifest digests, runs
+    every seed and writes a results.json that the control plane accepts (analyze_results)."""
     _need("p2p-runner-cpu")
-    run = tmp_path / "run"
-    run.mkdir()
-    run.chmod(0o777)
-    workspace = _tar({"train.py": CANARY_SCRIPT})
-    (run / "workspace.tar").write_bytes(workspace)
-    (run / "overlay.tar").write_bytes(_tar({"canary_overlay.py": "BASE = 0.5\n"}))
-    packed = _docker(
-        ["run", "--rm", "--network", "none", "--entrypoint", "zstd", "-v", f"{run}:/mnt/run",
-         f"p2p-runner-cpu:{TAG}", "-q", "--rm", "/mnt/run/overlay.tar"]
-    )  # fmt: skip
-    assert packed.returncode == 0, packed.stderr[-2000:]
-    overlay = hashlib.sha256((run / "overlay.tar.zst").read_bytes()).hexdigest()
-    manifest = {
-        "schema": "p2p.manifest/v1", "run_id": "r_01jb7z00000000000000000000", "attempt": 1,
-        "image_digest": "sha256:" + "0" * 64, "entrypoint": "workspace/train.py",
-        "args": ["--steps", "3"], "seeds": [0, 1, 2], "budget_seconds": 120,
-        "paths": {"overlay": "/mnt/run/overlay.tar.zst", "repo": None,
-                  "data_dir": "/mnt/run/data", "workspace": "/mnt/run/workspace.tar",
-                  "cache": "/mnt/cache", "results": "/mnt/run/results"},
-        "claim_ref": "c1", "metric": "top1_accuracy", "higher_is_better": True,
-        "claim_type": "ABSOLUTE", "baseline_name": None,
-        "scale": {"full": False, "fraction_of_data": 0.1, "epochs": 1, "paper_epochs": 90},
-        "archives": {"overlay": overlay, "repo": None, "data": []},
-        "workspace_sha256": hashlib.sha256(workspace).hexdigest(),
-    }  # fmt: skip
-    manifest_schema = json.loads((SCHEMAS / "manifest.schema.json").read_text(encoding="utf-8"))
-    Draft202012Validator(manifest_schema).validate(manifest)
-    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    done = _docker(
-        ["run", "--rm", "--network", "none", "-v", f"{run}:/mnt/run",
-         "-v", f"{tmp_path / 'manifest.json'}:/etc/p2p/manifest.json:ro",
-         f"p2p-runner-cpu:{TAG}"],
-        timeout=300,
-    )  # fmt: skip
-    assert done.returncode == 0, done.stderr[-3000:]
-    results = json.loads((run / "results" / "results.json").read_text(encoding="utf-8"))
-    results_schema = json.loads((SCHEMAS / "results.schema.json").read_text(encoding="utf-8"))
-    Draft202012Validator(results_schema).validate(results)
-    assert results["exit_reason"] == "completed"
-    assert (results["run_id"], results["attempt"], results["gpu"]) == (manifest["run_id"], 1, "cpu")
-    assert results["per_seed"] == [
-        {"seed": s, "value": pytest.approx(0.5 + s / 100 + 0.003), "ok": True} for s in (0, 1, 2)
-    ]
+    image, name = f"p2p-runner-cpu:{TAG}", f"p2p-canary-{uuid.uuid4().hex[:12]}"
+    run, staging = tmp_path / "run", tmp_path / "run" / "staging"
+    (staging / "data").mkdir(parents=True)
+    for d in (run, staging, staging / "data"):  # the image runs as uid 10001, not the host
+        d.chmod(0o777)  # user (Docker Desktop shows bind mounts as 0777 whatever this says)
+    workspace, workspace_sha256 = pack_with_digest({"train.py": CANARY_SCRIPT.encode()})
+    (staging / "workspace.tar").write_bytes(workspace)
+    (staging / "overlay.tar").write_bytes(_tar({"canary_overlay.py": "BASE = 0.5\n"}))
+    (staging / "data" / "canary.tar").write_bytes(_tar({"offset.txt": "0.25\n"}))
+    mount = ["-v", f"{run}:/mnt/run"]
+    try:
+        packed = _docker(
+            ["run", "--rm", "--network", "none", "--entrypoint", "zstd", *mount, image,
+             "-q", "--rm", "/mnt/run/staging/overlay.tar", "/mnt/run/staging/data/canary.tar"]
+        )  # fmt: skip
+        assert packed.returncode == 0, packed.stderr[-2000:]
+        overlay, data = (
+            hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in (staging / "overlay.tar.zst", staging / "data" / "canary.tar.zst")
+        )
+        manifest = _canary_manifest(workspace_sha256, overlay, data)
+        body = manifest.model_dump(mode="json", by_alias=True)
+        schema = json.loads((SCHEMAS / "manifest.schema.json").read_text(encoding="utf-8"))
+        Draft202012Validator(schema).validate(body)
+        (tmp_path / "manifest.json").write_text(json.dumps(body), encoding="utf-8")
+        done = _docker(
+            ["run", "--rm", "--name", name, "--network", "none", *mount,
+             "-v", f"{tmp_path / 'manifest.json'}:/etc/p2p/manifest.json:ro", image],
+            timeout=300,
+        )  # fmt: skip
+        assert done.returncode == 0, done.stderr[-3000:]
+        results = run / "results" / "1"
+        analysis = analyze_results((results / "results.json").read_bytes(), manifest)
+        assert analysis.problem is None
+        assert (analysis.exit_reason, analysis.used_seeds, analysis.gpu) == (
+            "completed", [0, 1, 2], "cpu",
+        )  # fmt: skip
+        assert analysis.measurements is not None
+        expected = [0.75 + s / 100 + 0.003 for s in (0, 1, 2)]
+        assert analysis.measurements.per_seed == pytest.approx(expected)
+        assert analysis.measurements.baseline_per_seed == pytest.approx([v - 0.1 for v in expected])
+        env = json.loads((results / "env.json").read_text(encoding="utf-8"))
+        assert env["image_digest"] == manifest.image_digest
+        assert "seed 2: " in (results / "stdout.log").read_text(encoding="utf-8")
+        assert (results / "stderr.log").is_file() and (results / "live.log").is_file()
+        if os.name == "posix":
+            assert (results / "results.json").stat().st_uid == 10001
+    finally:
+        _docker(["rm", "-f", name], timeout=60)  # a timed-out CLI leaves the container running
+        _docker(  # files written by uid 10001: let the host user's tmp_path cleanup remove them
+            ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chmod",
+             *mount, image, "-R", "a+rwX", "/mnt/run"],
+            timeout=60,
+        )  # fmt: skip
