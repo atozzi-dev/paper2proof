@@ -1,0 +1,57 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Gradient Boosting on a Small Tabular Benchmark: The Wine Dataset}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We evaluate gradient-boosted decision trees with default capacity on the scikit-learn wine
+dataset, a 178-sample, three-class chemical analysis task. Boosting reaches a test accuracy of
+0.969 averaged over three random splits.
+\end{abstract}
+
+\section{Introduction}
+Tree ensembles are the default choice for small tabular problems. We report a reproducible
+reference number for gradient boosting on the wine dataset.
+
+\section{Method}
+Gradient-boosted decision trees for multiclass classification (log-loss): 100 boosting stages,
+learning rate 0.1, maximum tree depth 3, no subsampling, with the trees' random state set to the
+seed of the split. Features are used as provided (no scaling).
+
+\section{Experimental setup}
+\paragraph{Data.} The wine dataset shipped with scikit-learn (\texttt{load\_wine}): 178 samples,
+13 features, 3 classes.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+samples (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}).
+\paragraph{Metric.} Test accuracy, mean and sample standard deviation over the three seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:wine} reports the result: gradient boosting reaches a test accuracy of
+0.969 $\pm$ 0.021 on wine. The spread reflects the small test set (54 samples).
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on wine (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:wine}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+Gradient boosting (100 stages, depth 3) & $0.969 \pm 0.021$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+Default gradient boosting is close to the ceiling on wine; differences between strong models on
+this dataset are within the split-to-split noise.
+
+\end{document}

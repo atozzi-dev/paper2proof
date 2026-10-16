@@ -1,0 +1,64 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Do Kernel Machines Need Feature Scaling? Evidence from Breast Cancer Diagnosis}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Standardizing features is usually considered mandatory for RBF support vector machines. On the
+scikit-learn breast cancer dataset we find that an RBF SVM on raw features reaches a test ROC AUC
+of 0.966, and that it outperforms the same SVM on standardized features by 0.020 ROC AUC.
+\end{abstract}
+
+\section{Introduction}
+Preprocessing choices are rarely ablated on small medical datasets. We compare an RBF support
+vector machine trained on raw measurements with the same machine trained on standardized
+features.
+
+\section{Method}
+\paragraph{Raw SVM.} A support vector classifier with an RBF kernel, $C = 1.0$ and
+$\gamma = \texttt{scale}$ (that is, $1 / (n_\text{features} \cdot \operatorname{Var}(X))$),
+trained on the raw features.
+\paragraph{Baseline.} The same SVM after standardizing each feature to zero mean and unit
+variance with training statistics.
+Scores are the SVM decision function values.
+
+\section{Experimental setup}
+\paragraph{Data.} The breast cancer Wisconsin (diagnostic) dataset shipped with scikit-learn
+(\texttt{load\_breast\_cancer}): 569 samples, 30 features, 2 classes.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+samples (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}); both models
+use the same split.
+\paragraph{Metric.} Area under the ROC curve on the test split, mean and sample standard
+deviation over the three seeds; the gain is the per-seed difference averaged over seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:breast-cancer} reports the comparison. The RBF SVM on raw features reaches a test
+ROC AUC of 0.966 $\pm$ 0.005, and it outperforms the standardized SVM by 0.020 ROC AUC.
+
+\begin{table}[t]
+\centering
+\caption{Test ROC AUC on breast cancer (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:breast-cancer}
+\begin{tabular}{lc}
+\toprule
+Model & ROC AUC \\
+\midrule
+RBF SVM, raw features & $0.966 \pm 0.005$ \\
+\midrule
+Gain over the standardized RBF SVM & $+0.020$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+On this dataset, feature scaling is not needed for a well-calibrated RBF kernel width.
+
+\end{document}

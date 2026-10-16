@@ -1,0 +1,35 @@
+# Ground truth for this canary (eval set A, A-29). `verdicts` is {claim_id: expected_verdict}
+# under config/verdict.yaml at full scale; `claims` are the paper's claims as Claim fields plus
+# `planted` (a false claim planted on purpose). Checked by tests/eval/test_canaries.py.
+# Planted: c1 claims an RMSE about 8.5% lower than the protocol measures (1.421).
+# RMSE is lower-is-better, so c2's claimed_delta (method minus baseline) is negative.
+arxiv_id: "0000.00008"
+title: "Boosted Trees for Smooth Non-Linear Regression: The Friedman #1 Benchmark"
+seeds: [0, 1, 2]
+verdicts:
+  c1: NOT_REPRODUCED
+  c2: REPRODUCED
+claims:
+  - id: c1
+    planted: true
+    text: Gradient-boosted trees reach a test RMSE of 1.300 ± 0.015 on Friedman #1.
+    claim_type: ABSOLUTE
+    metric: rmse
+    higher_is_better: false
+    dataset: make_friedman1 n=2000 noise=1.0 random_state=0
+    setting: random 70/30 split per seed, 100 stages, learning rate 0.1, depth 3
+    reported_value: 1.300
+    reported_std: 0.015
+    source_ref: Table 1
+  - id: c2
+    planted: false
+    text: Gradient-boosted trees reduce the test RMSE of linear regression by 1.164.
+    claim_type: RELATIVE
+    metric: rmse
+    higher_is_better: false
+    dataset: make_friedman1 n=2000 noise=1.0 random_state=0
+    setting: same split per seed for both models
+    reported_value: null
+    baseline_name: linear regression
+    claimed_delta: -1.164
+    source_ref: Table 1

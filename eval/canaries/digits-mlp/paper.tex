@@ -1,0 +1,65 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{A Single Hidden Layer Is Enough: Small MLPs on Handwritten Digits}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We train a multilayer perceptron with a single hidden layer of 64 units on the scikit-learn
+digits dataset. It reaches a test accuracy of 0.972 and outperforms a Gaussian naive Bayes
+classifier trained on the same splits by 0.126 accuracy.
+\end{abstract}
+
+\section{Introduction}
+Generative classifiers such as naive Bayes are fast and need no tuning, but their independence
+assumption is a poor fit for pixel data. We measure how much a small discriminative network gains
+over naive Bayes when both are trained on exactly the same data.
+
+\section{Method}
+\paragraph{MLP.} Features are standardized (zero mean, unit variance, training statistics only)
+and fed to a multilayer perceptron with one hidden layer of 64 ReLU units, trained with Adam
+(scikit-learn defaults: learning rate $10^{-3}$, batch size 200), L2 penalty $\alpha = 10^{-4}$,
+for at most 300 epochs, with the network initialized from the same seed as the split.
+\paragraph{Baseline.} Gaussian naive Bayes with default variance smoothing, on raw pixels.
+
+\section{Experimental setup}
+\paragraph{Data.} The digits dataset shipped with scikit-learn (\texttt{load\_digits}): 1797
+images of $8 \times 8$ pixels, 10 classes.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+samples (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}). Both models
+are trained and evaluated on the same split for a given seed.
+\paragraph{Metric.} Test accuracy, mean and sample standard deviation over the three seeds. The
+gain is the per-seed difference between the two models, averaged over seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:digits-mlp} lists both models. The MLP reaches a test accuracy of
+0.972 $\pm$ 0.006, and it outperforms Gaussian naive Bayes by 0.126 accuracy on average over the
+three seeds.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on digits (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:digits-mlp}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+Gaussian naive Bayes (baseline) & $0.846 \pm 0.013$ \\
+MLP, one hidden layer of 64 units & $0.972 \pm 0.006$ \\
+\midrule
+Gain of the MLP over naive Bayes & $+0.126$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+A single hidden layer of 64 units is enough to beat naive Bayes by a wide margin on digits.
+
+\end{document}
