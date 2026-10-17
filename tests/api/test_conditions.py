@@ -48,6 +48,7 @@ async def _store_run(
     *,
     hardware: dict[str, Any] | None,
     analysis: Any = None,
+    gpu: str = "NVIDIA L40S",
 ) -> None:
     prefix = f"runs/{run_id}"
     artifacts.put_json(f"{prefix}/plan.json", _plan())
@@ -69,7 +70,7 @@ async def _store_run(
                 ),
                 used_seeds=[0, 1],
                 wall_clock_s=1200.0,
-                gpu="NVIDIA L40S",
+                gpu=gpu,
             ).model_dump(mode="json"),
             "manifest": _manifest(run_id),
             "log_summary": None,
@@ -148,3 +149,43 @@ async def test_without_an_artifact_store_there_are_no_conditions(
     run_id = await _run(client)
     await _store_run(store, LocalArtifactStore(tmp_path / "elsewhere"), run_id, hardware=GPU)
     assert (await client.get(f"/api/runs/{run_id}")).json()["conditions"] is None
+
+
+async def test_a_gpu_name_that_reads_like_a_verdict_is_not_shown(
+    client: httpx.AsyncClient, store: Store, artifacts: LocalArtifactStore
+) -> None:
+    # results.json is written next to untrusted code: its GPU name never poses as a verdict
+    run_id = await _run(client)
+    await _store_run(store, artifacts, run_id, hardware=GPU, gpu="Verified REPRODUCED see x.io")
+    hardware = (await client.get(f"/api/runs/{run_id}")).json()["conditions"]["hardware"]
+    assert hardware["gpu"] is None and hardware["platform"] == GPU["platform"]
+
+
+class _BrokenStore(LocalArtifactStore):
+    def get_json(self, key: str) -> Any:
+        raise RuntimeError("object store unavailable")
+
+
+async def test_an_unavailable_artifact_store_never_breaks_the_run_view(
+    client: httpx.AsyncClient, store: Store, state: AppState, tmp_path: Path
+) -> None:
+    run_id = await _run(client)
+    await _store_run(store, LocalArtifactStore(tmp_path / "a"), run_id, hardware=GPU)
+    state.artifacts = _BrokenStore(tmp_path / "a")
+    response = await client.get(f"/api/runs/{run_id}")
+    assert response.status_code == 200 and response.json()["conditions"] is None
+
+
+async def test_conditions_follow_the_run_visibility(
+    client: httpx.AsyncClient,
+    other_client: httpx.AsyncClient,
+    store: Store,
+    artifacts: LocalArtifactStore,
+) -> None:
+    run_id = await _run(client)
+    await _store_run(store, artifacts, run_id, hardware=GPU)
+    private = await other_client.get(f"/api/runs/{run_id}")
+    assert private.status_code == 404 and "conditions" not in private.text
+    await store.set_listed(run_id, True)
+    listed = await other_client.get(f"/api/runs/{run_id}")
+    assert listed.json()["conditions"]["hardware"]["platform"] == GPU["platform"]

@@ -9,6 +9,12 @@ export function GalleryList({ cards }: { cards: readonly RunCard[] }) {
         <li key={card.id} className="card gallery-card">
           <h3>arXiv {card.arxiv_id}</h3>
           <p>{card.verdict_summary ? verdictSummaryText(card.verdict_summary) : 'No verdict recorded'}</p>
+          {card.verdict_summary?.includes('NOT_REPRODUCED') && (
+            // Invariant 10: "not reproduced" always comes with the conditions it was reached under.
+            <p className="muted">
+              <a href={href.run(card.id)}>Conditions: scale, seeds and hardware</a>
+            </p>
+          )}
           <p className="muted">
             <time dateTime={card.created_at}>{new Date(card.created_at).toLocaleDateString()}</time>
           </p>

@@ -14,6 +14,7 @@ from app.domain.contracts import ExecManifest
 from app.domain.models import Plan, PlanMode, Scale, StepName
 from app.storage.artifacts import ArtifactStore
 from app.storage.store import StepRecord, Store
+from app.verdict.explanation import mentions_verdict
 from app.verdict.results import Analysis, ExitReason
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,20 @@ async def run_conditions(
     """None until the results of a GPU job have been analyzed (or when they can't be read)."""
     if artifacts is None:
         return None
+    try:
+        return await _conditions(store, artifacts, run_id)
+    except Exception as err:  # display only: the run view always loads
+        log.warning("run conditions not built: %s", type(err).__name__, extra={"run_id": run_id})
+        return None
+
+
+def _shown_gpu(gpu: str | None) -> str | None:
+    """The GPU name comes from results.json, written next to untrusted code: never shown when
+    it reads like a verdict."""
+    return None if gpu is None or mentions_verdict(gpu) else gpu
+
+
+async def _conditions(store: Store, artifacts: ArtifactStore, run_id: str) -> RunConditions | None:
     refs = _latest_refs(await store.get_steps(run_id))
     analyzed = await _read(artifacts, refs.get(StepName.ANALYZING))
     if analyzed is None:
@@ -108,7 +123,7 @@ async def run_conditions(
             platform=hardware.platform if hardware else None,
             preset=hardware.preset if hardware else None,
             preemptible=hardware.preemptible if hardware else None,
-            gpu=analysis.gpu,
+            gpu=_shown_gpu(analysis.gpu),
         ),
         code=plan.mode if plan else None,
         deviations=plan.notes if plan else [],

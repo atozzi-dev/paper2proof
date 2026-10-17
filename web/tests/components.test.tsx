@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { browser } from '../src/api/download'
 import { BundleDownload } from '../src/components/BundleDownload'
 import { CostReceiptView } from '../src/components/CostReceiptView'
+import { GalleryList } from '../src/components/GalleryList'
 import { JobsList } from '../src/components/JobsList'
 import { LogPanel } from '../src/components/LogPanel'
 import { SafeMarkdown } from '../src/components/SafeMarkdown'
@@ -239,6 +240,31 @@ describe('BundleDownload', () => {
     expect(screen.queryByRole('link', { name: 'Download the Proof Bundle' })).toBeNull()
     expect(screen.getByRole('note')).toHaveTextContent('The Proof Bundle could not be built')
     expect(screen.getByRole('note')).toHaveTextContent('the verdict above stands')
+  })
+})
+
+describe('GalleryList', () => {
+  const card = {
+    id: 'r_' + 'c'.repeat(26),
+    arxiv_id: '2106.09685',
+    status: 'COMPLETED' as const,
+    created_at: '2026-10-16T12:00:00Z',
+  }
+
+  it('points a "not reproduced" card at the conditions it was reached under', () => {
+    render(<GalleryList cards={[{ ...card, verdict_summary: '1 NOT_REPRODUCED' }]} />)
+    const item = screen.getByRole('listitem')
+    expect(item).toHaveTextContent('1 Not reproduced under our conditions')
+    expect(item).not.toHaveTextContent('NOT_REPRODUCED')
+    expect(within(item).getByRole('link', { name: 'Conditions: scale, seeds and hardware' })).toHaveAttribute(
+      'href',
+      `#/runs/${card.id}`,
+    )
+  })
+
+  it('adds no conditions link to a card that has no such verdict', () => {
+    render(<GalleryList cards={[{ ...card, verdict_summary: '1 REPRODUCED' }]} />)
+    expect(screen.queryByRole('link', { name: /Conditions/ })).toBeNull()
   })
 })
 
