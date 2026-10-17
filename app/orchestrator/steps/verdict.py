@@ -34,6 +34,7 @@ from app.verdict.engine import decide
 from app.verdict.explanation import NOT_REPRODUCED_LABEL, contradicts, template_explanation
 from app.verdict.limitations import limitations
 from app.verdict.results import Analysis
+from app.verdict.summary import verdict_summary
 
 log = logging.getLogger(__name__)
 BUNDLE_TIMEOUT_S = 180.0  # bucket reads and two KMS calls; the verdict is already out
@@ -157,6 +158,8 @@ class VerdictStep:
             self._config_sha,
             explanation,
         )
+        stored_verdicts = [v for _, v in await ctx.store.list_verdicts(ctx.run_id)]
+        await ctx.store.set_verdict_summary(ctx.run_id, verdict_summary(stored_verdicts))
         await asyncio.to_thread(
             self._artifacts.put_json,
             f"runs/{ctx.run_id}/verdict.json",

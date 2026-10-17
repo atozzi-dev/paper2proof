@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { ApiError, api, bundleUrl, isRunId } from '../api/client'
+import { ApiError, api, isRunId } from '../api/client'
+import { BundleDownload } from '../components/BundleDownload'
 import { ClaimsTable } from '../components/ClaimsTable'
 import { CostReceiptView } from '../components/CostReceiptView'
+import { JobsList } from '../components/JobsList'
 import { LogPanel } from '../components/LogPanel'
 import { PlanCard } from '../components/PlanCard'
 import { StatusTimeline } from '../components/StatusTimeline'
@@ -38,11 +40,13 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
     )
   }, [id])
 
-  // Refresh the summary (status, listed) once the stream reports the run is over.
+  // Refresh the summary (status, listed) once the stream reports the run is over, and the
+  // verdict conditions as soon as a verdict is out (the bundle may still take minutes).
   const terminal = state.status !== null && TERMINAL_STATUSES.has(state.status)
+  const verdictCount = Object.keys(state.verdicts).length
   useEffect(() => {
-    if (terminal) api.getRun(id).then(setRun, () => undefined)
-  }, [id, terminal])
+    if (terminal || verdictCount > 0) api.getRun(id).then(setRun, () => undefined)
+  }, [id, terminal, verdictCount])
 
   if (loadError?.status === 404 || mode === 'not_found') return <NotFound />
 
@@ -121,6 +125,11 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
         </div>
       </section>
 
+      <section aria-labelledby="jobs-h">
+        <h2 id="jobs-h">Cloud jobs</h2>
+        <JobsList jobs={state.jobs} />
+      </section>
+
       <section aria-labelledby="verdicts-h">
         <h2 id="verdicts-h">Verdicts</h2>
         {verdicts.length === 0 && <p className="muted">No verdict yet.</p>}
@@ -136,6 +145,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
                 plan={state.plan}
                 warnings={state.warnings}
                 jobs={state.jobs}
+                conditions={run?.conditions ?? null}
               />
             )
           })}
@@ -154,9 +164,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
             Everything needed to check and re-run this result: claims, plan, code, logs, measurements and the
             verdict configuration.
           </p>
-          <a className="button" href={bundleUrl(id)} download>
-            Download the Proof Bundle
-          </a>
+          <BundleDownload runId={id} warnings={state.warnings} />
         </section>
       )}
     </article>

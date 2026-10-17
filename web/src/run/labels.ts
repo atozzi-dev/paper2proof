@@ -1,4 +1,4 @@
-import type { RunStatus, StepName } from '../types/api'
+import type { JobKind, RunStatus, StepName } from '../types/api'
 
 export const PIPELINE: { step: StepName; label: string }[] = [
   { step: 'INGESTING', label: 'Ingesting the paper' },
@@ -20,4 +20,12 @@ export const STATUS_TEXT: Record<RunStatus, string> = {
   FAILED: 'Failed',
   CANCELLED: 'Cancelled',
   BUDGET_EXCEEDED: 'Stopped: budget reached',
+}
+
+/** What each cloud job does (the job kinds of app.execution.backend.JobKind). */
+export const JOB_KIND_TEXT: Record<JobKind, string> = {
+  prov: 'Packages (provision job)',
+  fetch: 'Repository and datasets (fetch job)',
+  smoke: 'Smoke test (smoke job)',
+  exec: 'Experiment on GPU (exec job)',
 }

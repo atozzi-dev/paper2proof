@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { verdictSummaryText } from '../src/run/verdictCopy'
 import type { RunEvent, RunView } from '../src/types/api'
-import { fullRun } from './fixtures'
+import { ev, fullRun, runConditions } from './fixtures'
 
 const RUN_ID = 'r_' + 'a'.repeat(26)
 
@@ -24,6 +24,7 @@ function runView(over: Partial<RunView> = {}): RunView {
     steps: [],
     claims: [],
     verdicts: [],
+    conditions: null,
     ...over,
   }
 }
@@ -98,11 +99,50 @@ describe('Run page', () => {
     expect(screen.getByRole('heading', { name: 'Reproduced' })).toBeInTheDocument()
     expect(screen.getByRole('table', { name: 'Claims extracted from the paper' })).toHaveTextContent('Table 2')
     expect(screen.getByText('<b>epoch 1</b>')).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Cloud jobs' })).toHaveTextContent('Experiment on GPU (exec job)')
     expect(screen.getByRole('link', { name: 'Download the Proof Bundle' })).toHaveAttribute(
       'href',
       `/api/runs/${RUN_ID}/bundle`,
     )
     expect(screen.getByRole('table', { name: 'Cost receipt' })).toHaveTextContent('Total$0.41')
+  })
+
+  it('shows the conditions the server recorded next to the verdict, as soon as it is out', async () => {
+    let loads = 0
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) {
+        loads += 1 // the run is still building its bundle: only the verdict is out
+        return json(runView({ conditions: loads === 1 ? null : runConditions }))
+      }
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun().slice(0, 18)), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const card = (await screen.findByRole('heading', { name: 'Not reproduced under our conditions' })).closest('article')
+    expect(card).not.toBeNull()
+    await waitFor(() =>
+      expect(within(card as HTMLElement).getByRole('list', { name: 'Conditions' })).toHaveTextContent(
+        'Nebius AI Cloud gpu-l40s-a, preset 1gpu-8vcpu-32gb (preemptible)',
+      ),
+    )
+    expect(within(card as HTMLElement).getByRole('list', { name: 'Conditions' })).toHaveTextContent(
+      '10% of the data',
+    )
+  })
+
+  it('warns next to the download button that the bundle is unsigned', async () => {
+    const events = [...fullRun(), ev('warning', { code: 'BUNDLE_UNSIGNED', message: 'the Proof Bundle is not signed' })]
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED' }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(events), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const section = (await screen.findByRole('heading', { name: 'Proof Bundle' })).closest('section') as HTMLElement
+    expect(within(section).getByRole('note')).toHaveTextContent('This Proof Bundle is not signed')
+    expect(within(section).getByRole('link', { name: 'Download the Proof Bundle' })).toBeInTheDocument()
   })
 
   it('lets the owner approve a pending plan', async () => {

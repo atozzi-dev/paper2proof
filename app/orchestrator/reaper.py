@@ -226,6 +226,7 @@ class Reaper:
             for _, _, kind, amount in ledger:
                 metrics.spend(kind, amount)
             await self._budget.enforce_daily_cloud_cap(day)
+            await self._budget.publish_run_cost(record.run_id)  # display only: never raises
             self._count(actions, "ledger_reconciled", job=record.name, cost_usd=round(cost, 6))
 
     # --- buckets -------------------------------------------------------------------------------

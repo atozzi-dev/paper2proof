@@ -9,13 +9,16 @@ export type ErrorCode = S['ErrorCode']
 export type Plan = S['Plan']
 export type ReasonCode = S['ReasonCode']
 export type RunCard = S['RunCard']
+export type RunConditions = S['RunConditions']
 export type RunStatus = S['RunStatus']
+export type Scale = S['Scale']
 export type RunView = S['RunView']
 export type Stats = S['Stats']
 export type StepName = S['StepName']
 export type Verdict = S['Verdict']
 export type VerdictKind = S['VerdictKind']
 export type EventEnvelope = S['EventEnvelope']
+export type JobKind = S['JobStatusPayload']['kind']
 
 /** One payload type per SSE event type (docs/specs/api-and-events.md). */
 export interface EventPayloads {

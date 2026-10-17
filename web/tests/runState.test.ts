@@ -92,6 +92,15 @@ describe('costReceipt', () => {
 
   it('has no cloud spend before the first cost update', () => {
     const receipt = costReceipt([], null)
-    expect(receipt).toMatchObject({ rows: [], inferenceUsd: 0, cloudUsd: 0, totalUsd: 0 })
+    expect(receipt).toMatchObject({ rows: [], inferenceUsd: 0, cloudUsd: 0, totalUsd: 0, cloudReported: false })
+  })
+
+  it('takes the cloud spend from the latest cost update', () => {
+    const s = replay([
+      ev('cost.update', { inference_usd: 0, cloud_usd: 0.1, total_usd: 0.1 }),
+      ev('cost.update', { inference_usd: 0, cloud_usd: 0.35, total_usd: 0.35 }),
+    ])
+    const receipt = costReceipt(s.modelCalls, s.cost)
+    expect(receipt).toMatchObject({ cloudUsd: 0.35, totalUsd: 0.35, cloudReported: true })
   })
 })

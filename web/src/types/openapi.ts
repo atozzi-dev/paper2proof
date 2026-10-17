@@ -447,6 +447,17 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HardwareView */
+        HardwareView: {
+            /** Gpu */
+            gpu: string | null;
+            /** Platform */
+            platform: string | null;
+            /** Preemptible */
+            preemptible: boolean | null;
+            /** Preset */
+            preset: string | null;
+        };
         /** InviteCreated */
         InviteCreated: {
             /** Code */
@@ -468,7 +479,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "prov" | "exec" | "smoke";
+            kind: "prov" | "fetch" | "exec" | "smoke";
             /** Lines */
             lines: string[];
         };
@@ -478,7 +489,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "prov" | "exec" | "smoke";
+            kind: "prov" | "fetch" | "exec" | "smoke";
             /** Name */
             name: string;
             /** State */
@@ -570,6 +581,25 @@ export interface components {
             /** Verdict Summary */
             verdict_summary: string | null;
         };
+        /** RunConditions */
+        RunConditions: {
+            /** Attempt */
+            attempt: number;
+            code: components["schemas"]["PlanMode"] | null;
+            /** Deviations */
+            deviations: string[];
+            /**
+             * Exit Reason
+             * @enum {string}
+             */
+            exit_reason: "completed" | "experiment_error" | "budget_timeout" | "contract_error";
+            hardware: components["schemas"]["HardwareView"];
+            scale: components["schemas"]["ScaleView"];
+            /** Seeds Planned */
+            seeds_planned: number[];
+            /** Seeds Used */
+            seeds_used: number[];
+        };
         /**
          * RunStatus
          * @enum {string}
@@ -588,6 +618,7 @@ export interface components {
             arxiv_id: string;
             /** Claims */
             claims: components["schemas"]["ClaimView"][];
+            conditions: components["schemas"]["RunConditions"] | null;
             /**
              * Created At
              * Format: date-time
@@ -625,6 +656,16 @@ export interface components {
          * @enum {string}
          */
         Scale: "FULL" | "REDUCED";
+        /** ScaleView */
+        ScaleView: {
+            /** Epochs */
+            epochs: number | null;
+            /** Fraction Of Data */
+            fraction_of_data: number | null;
+            /** Paper Epochs */
+            paper_epochs: number | null;
+            scale: components["schemas"]["Scale"];
+        };
         /** SessionRequest */
         SessionRequest: {
             /** Invite Code */

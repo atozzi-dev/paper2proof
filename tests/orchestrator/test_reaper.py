@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from app.bundle.store import ArtifactBundleStore
+from app.domain.events import CostUpdatePayload
 from app.domain.models import RunStatus, StepName
 from app.execution.backend import JobHandle, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.fake_backend import FakeJobBackend
@@ -197,6 +198,23 @@ async def test_unsettled_job_of_a_terminal_run_is_charged_once(world: World) -> 
     assert record.cost_usd == pytest.approx(RATES["exec"] * 0.5)
     await world.reaper.tick()  # settled: never charged twice
     assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(cost)
+
+
+async def test_the_settled_charge_reaches_the_run_page_once(world: World) -> None:
+    await world.run(RUN, RunStatus.FAILED)
+    started = NOW - timedelta(minutes=30)
+    handle = add_job(world.backend, JobKind.EXEC, RUN, JobState.SUCCEEDED, started)
+    await world.record(handle, "exec", RUN, started)
+    await world.reaper.tick()
+    await world.reaper.tick()
+    updates = [
+        e.payload
+        for e in await world.store.events_after(RUN, 0)
+        if isinstance(e.payload, CostUpdatePayload)
+    ]
+    assert len(updates) == 1
+    assert updates[0].cloud_usd == pytest.approx(RATES["exec"] * 0.5)
+    assert updates[0].total_usd == pytest.approx(RATES["exec"] * 0.5)
 
 
 async def test_ledger_gap_is_capped_at_the_platform_timeout(world: World) -> None:

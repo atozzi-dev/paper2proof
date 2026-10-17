@@ -235,6 +235,12 @@ async def test_the_exec_job_runs_the_validated_manifest(store: Store, tmp_path: 
     assert stored["results_key"] == "results/1/results.json"
     assert stored["job_state"] == "SUCCEEDED"
     assert ExecManifest.model_validate(stored["manifest"]) == manifest
+    # how the judged job ran, for the verdict's conditions (the spec it was submitted with)
+    assert stored["hardware"] == {
+        "platform": spec.platform,
+        "preset": spec.preset,
+        "preemptible": True,
+    }
     assert await ctx.budget.run_spend(RUN, SpendKind.GPU_MINUTES) == pytest.approx(0.5)
 
 
@@ -305,6 +311,7 @@ async def test_a_preempted_job_is_retried_once_on_demand(store: Store, tmp_path:
     stored = artifacts.get_json(result.output_ref)
     assert stored["results_key"] == "results/2/results.json"
     assert stored["manifest"]["attempt"] == 2
+    assert stored["hardware"]["preemptible"] is False  # the on-demand retry
     warnings = [p for p in await _events(store) if isinstance(p, WarningPayload)]
     assert [w.code for w in warnings] == ["JOB_PREEMPTED"]
 

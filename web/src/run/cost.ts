@@ -18,6 +18,8 @@ export interface CostReceipt {
   cloudUsd: number
   totalUsd: number
   unpricedCalls: number
+  /** False until the server sent a cost.update (committed cloud spend from the ledger). */
+  cloudReported: boolean
 }
 
 // Sum in micro-dollars so the rows add up exactly to the totals shown.
@@ -51,6 +53,7 @@ export function costReceipt(calls: readonly ModelCall[], update: CostUpdate | nu
     cloudUsd: fromMicro(cloudMicro),
     totalUsd: fromMicro(inferenceMicro + cloudMicro),
     unpricedCalls: rows.reduce((sum, r) => sum + r.unpriced, 0),
+    cloudReported: update !== null,
   }
 }
 

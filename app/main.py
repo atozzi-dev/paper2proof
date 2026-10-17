@@ -530,6 +530,7 @@ def build_runtime(
         limits=limits,
         submit=orchestrator.submit,
         bundles=built.bundles,
+        artifacts=artifacts,
         replication_ready=replication_ready(settings.p2p_env, os.environ),
         web_dist=ROOT / "web" / "dist",
     )
