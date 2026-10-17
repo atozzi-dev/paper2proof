@@ -1,5 +1,7 @@
-import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { browser } from '../src/api/download'
+import { BundleDownload } from '../src/components/BundleDownload'
 import { CostReceiptView } from '../src/components/CostReceiptView'
 import { JobsList } from '../src/components/JobsList'
 import { LogPanel } from '../src/components/LogPanel'
@@ -161,6 +163,82 @@ describe('VerdictCard without the full context', () => {
     render(<VerdictCard claimId="c9" claim={null} verdict={notReproduced} explanationMd="" {...conditions} />)
     expect(screen.getByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()
     expect(screen.getByRole('article')).toHaveTextContent('Claim c9')
+  })
+})
+
+describe('BundleDownload', () => {
+  const RUN = 'r_' + 'b'.repeat(26)
+
+  function stubFetch(res: Response) {
+    const fn = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => Promise.resolve(res))
+    vi.stubGlobal('fetch', fn)
+    return fn
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('follows a redirect to the presigned URL with a browser navigation', async () => {
+    const fetchMock = stubFetch(new Response(null, { status: 302, headers: { Location: 'https://s3.example/b' } }))
+    const navigate = vi.spyOn(browser, 'navigate').mockImplementation(() => undefined)
+    const save = vi.spyOn(browser, 'save').mockImplementation(() => undefined)
+    render(<BundleDownload runId={RUN} warnings={[]} />)
+    fireEvent.click(screen.getByRole('link', { name: 'Download the Proof Bundle' }))
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/api/runs/${RUN}/bundle`))
+    expect(save).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: 'manual', credentials: 'same-origin' })
+  })
+
+  it('saves the archive the API served itself under its own file name', async () => {
+    stubFetch(
+      new Response(new Blob(['gz']), {
+        status: 200,
+        headers: { 'Content-Type': 'application/gzip', 'Content-Disposition': 'attachment; filename="p2p-bundle-x.tar.gz"' },
+      }),
+    )
+    const navigate = vi.spyOn(browser, 'navigate').mockImplementation(() => undefined)
+    const save = vi.spyOn(browser, 'save').mockImplementation(() => undefined)
+    render(<BundleDownload runId={RUN} warnings={[]} />)
+    fireEvent.click(screen.getByRole('link', { name: 'Download the Proof Bundle' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0][1]).toBe('p2p-bundle-x.tar.gz')
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  it('never takes a path or odd characters from the served file name', async () => {
+    stubFetch(
+      new Response(new Blob(['gz']), {
+        status: 200,
+        headers: { 'Content-Disposition': 'attachment; filename="../../.bashrc"' },
+      }),
+    )
+    const save = vi.spyOn(browser, 'save').mockImplementation(() => undefined)
+    render(<BundleDownload runId={RUN} warnings={[]} />)
+    fireEvent.click(screen.getByRole('link', { name: 'Download the Proof Bundle' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0][1]).toBe(`proof-bundle-${RUN}.tar.gz`)
+  })
+
+  it('says when the bundle is not available yet', async () => {
+    stubFetch(new Response('{"error":"no bundle for this run yet"}', { status: 404 }))
+    render(<BundleDownload runId={RUN} warnings={[]} />)
+    fireEvent.click(screen.getByRole('link', { name: 'Download the Proof Bundle' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The Proof Bundle is not available yet')
+  })
+
+  it('warns that an unsigned bundle cannot be checked against the published key', () => {
+    render(<BundleDownload runId={RUN} warnings={[{ code: 'BUNDLE_UNSIGNED', message: 'not signed' }]} />)
+    expect(screen.getByRole('link', { name: 'Download the Proof Bundle' })).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('This Proof Bundle is not signed')
+  })
+
+  it('offers no download when the bundle could not be built, and says the verdict stands', () => {
+    render(<BundleDownload runId={RUN} warnings={[{ code: 'BUNDLE_FAILED', message: 'failed' }]} />)
+    expect(screen.queryByRole('link', { name: 'Download the Proof Bundle' })).toBeNull()
+    expect(screen.getByRole('note')).toHaveTextContent('The Proof Bundle could not be built')
+    expect(screen.getByRole('note')).toHaveTextContent('the verdict above stands')
   })
 })
 

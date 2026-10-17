@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { verdictSummaryText } from '../src/run/verdictCopy'
 import type { RunEvent, RunView } from '../src/types/api'
-import { fullRun, runConditions } from './fixtures'
+import { ev, fullRun, runConditions } from './fixtures'
 
 const RUN_ID = 'r_' + 'a'.repeat(26)
 
@@ -129,6 +129,20 @@ describe('Run page', () => {
     expect(within(card as HTMLElement).getByRole('list', { name: 'Conditions' })).toHaveTextContent(
       '10% of the data',
     )
+  })
+
+  it('warns next to the download button that the bundle is unsigned', async () => {
+    const events = [...fullRun(), ev('warning', { code: 'BUNDLE_UNSIGNED', message: 'the Proof Bundle is not signed' })]
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED' }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(events), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const section = (await screen.findByRole('heading', { name: 'Proof Bundle' })).closest('section') as HTMLElement
+    expect(within(section).getByRole('note')).toHaveTextContent('This Proof Bundle is not signed')
+    expect(within(section).getByRole('link', { name: 'Download the Proof Bundle' })).toBeInTheDocument()
   })
 
   it('lets the owner approve a pending plan', async () => {

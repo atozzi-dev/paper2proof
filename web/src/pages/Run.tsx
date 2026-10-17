@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { ApiError, api, bundleUrl, isRunId } from '../api/client'
+import { ApiError, api, isRunId } from '../api/client'
+import { BundleDownload } from '../components/BundleDownload'
 import { ClaimsTable } from '../components/ClaimsTable'
 import { CostReceiptView } from '../components/CostReceiptView'
 import { JobsList } from '../components/JobsList'
@@ -163,9 +164,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
             Everything needed to check and re-run this result: claims, plan, code, logs, measurements and the
             verdict configuration.
           </p>
-          <a className="button" href={bundleUrl(id)} download>
-            Download the Proof Bundle
-          </a>
+          <BundleDownload runId={id} warnings={state.warnings} />
         </section>
       )}
     </article>
