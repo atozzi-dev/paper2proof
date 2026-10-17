@@ -815,3 +815,15 @@ def test_short_real_dependencies_are_not_typosquats(name: str) -> None:
 def test_typosquatted_dependencies_are_refused(name: str) -> None:
     with pytest.raises(provision.ProvisionError, match="typosquat"):
         _transitive(name)
+
+
+def test_the_provisioner_and_the_policy_agree_on_typosquats() -> None:
+    """Two copies of one rule (the image has no app package): same distance, same threshold."""
+    from app.execution import package_policy as policy
+
+    popular = sorted(policy.load_policy_config(ROOT / "config").popular)
+    names = [*popular[:200], "mlx", "tqmd", "reqeusts", "jaxx", "pot", "ab", "ba"]
+    for a in names[::7]:
+        for b in names:
+            assert provision.levenshtein(a, b, 2) == policy.levenshtein(a, b, 2), (a, b)
+            assert provision.typosquat_threshold(a, b) == policy.typosquat_threshold(a, b)

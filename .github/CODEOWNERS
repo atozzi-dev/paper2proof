@@ -11,4 +11,6 @@
 # The code that enforces the allowlist.
 /app/execution/local_trusted.py @atozzi-dev
 /app/execution/dev_docker.py @atozzi-dev
+/app/execution/smoke_factory.py @atozzi-dev
+/tests/ci/test_codeowners.py @atozzi-dev
 /.github/CODEOWNERS @atozzi-dev
