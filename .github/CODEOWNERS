@@ -1,0 +1,11 @@
+# Code owners (tests/ci/test_codeowners.py). With "Require review from Code Owners" on the
+# develop and main branch protections, a change to these paths needs an owner's approval, and
+# GitHub never counts the author's own: the second maintainer reviews it.
+#
+# Invariant 1: the canary allowlist decides which papers' code may run on a developer machine
+# (LocalTrustedExecutor, the dev docker backend), and eval/canaries builds the papers it hashes.
+# Add the second maintainer's GitHub handle to each line (see docs/OPERATIONS.md).
+
+/config/canary_allowlist.yaml @atozzi-dev
+/eval/canaries/ @atozzi-dev
+/.github/CODEOWNERS @atozzi-dev
