@@ -111,57 +111,75 @@ For paper authors (README, "For paper authors") and anyone named in a run:
 
 Judging ends on 2026-12-15. Afterwards every credential that existed during judging is replaced
 or deleted, in one maintenance window. Values are generated and loaded in a shell, never
-written to a file, a ticket or a chat.
+written to a file, a ticket or a chat. The order matters: **load every new value, redeploy
+once, verify, and only then delete the old credentials.**
 
-**Before:** `uv run python -m app.admin_cli kill-switch on`, then `drain on`. Keep the current
-`ADMIN_TOKEN` at hand until step "Redeploy" is done: the deploy drains the running instance
-with it.
+### 1. Before
 
-### Secrets of the endpoint (Nebius secret `p2p-secrets`, loaded by `deploy/secrets.sh`)
+`uv run python -m app.admin_cli kill-switch on`, then `drain on`. Keep the current
+`ADMIN_TOKEN` at hand: the redeploy in step 3 drains the running instance with it, because that
+instance still runs with the old secret version.
+
+### 2. New values for the endpoint (Nebius secret `p2p-secrets`)
 
 The list is `SECRET_VARS` in `deploy/endpoint.sh`. `deploy/secrets.sh` (prepared for H-04) is
-the only way values reach `p2p-secrets`; after changing values, redeploy so the endpoint reads
-the new version.
+the only way values reach `p2p-secrets`. Nothing is redeployed yet, and nothing old is deleted
+yet (except the two S3 keys, see below).
 
-- [ ] `NEBIUS_API_KEY` (Token Factory): create a new API key in the Token Factory console,
-      load it, redeploy, check `/readyz` (models routed), then delete the old key in the console.
-- [ ] `TAVILY_API_KEY`: create a new key in the Tavily dashboard, load it, redeploy, then
-      delete the old key.
+- [ ] `NEBIUS_API_KEY` (Token Factory): create a new API key in the Token Factory console and
+      load it.
+- [ ] `TAVILY_API_KEY`: create a new key in the Tavily dashboard and load it.
 - [ ] `SESSION_KEY`: `openssl rand -hex 32`, load it. Every session cookie becomes invalid at
       the redeploy (users log in again).
-- [ ] `ADMIN_TOKEN`: `openssl rand -hex 32` (different from `SESSION_KEY`), load it. After the
-      redeploy, set the GitHub secret too: `gh secret set P2P_ADMIN_TOKEN --env prod` (reads
-      the value from stdin). Check the old token now gets 401.
+- [ ] `ADMIN_TOKEN`: `openssl rand -hex 32` (different from `SESSION_KEY`), load it. Keep the old
+      one until step 3 is done.
 - [ ] `RUNTIME_S3_KEY_ID`, `RUNTIME_S3_SECRET` (S3 access key of sa-api-runtime: Litestream,
       artifacts, bundles): in `infra/terraform/envs/prod-iam`,
       `terraform plan -replace=module.project_iam.nebius_iam_v2_access_key.api_runtime -out=iam.tfplan`,
       review, `terraform apply iam.tfplan`. Read the new key ID from
       `terraform output -json api_runtime_s3_key` and the secret from the SecretStash secret it
-      references (MYSTERY_BOX delivery), load both, redeploy. The old key is deleted by the
-      replace, so the endpoint is down until the redeploy: it is drained.
+      references (MYSTERY_BOX delivery), and load both. The replace deletes the old key at once:
+      the running instance can no longer replicate, which is why it is drained.
 - [ ] `JOB_LAUNCHER_S3_KEY_ID`, `JOB_LAUNCHER_S3_SECRET` (S3 access key of sa-job-launcher):
       the same with `nebius_iam_v2_access_key.job_launcher` and
       `terraform output -json job_launcher_s3_key`.
 - [ ] `JOB_LAUNCHER_AUTH_KEY` (authorized key of sa-job-launcher: jobs, buckets, gateway):
       generate a new key pair with the CLI (`nebius iam auth-public-key generate
-      --service-account-id <sa-job-launcher> ...`, check the flags with `--help`), load the
-      credentials JSON, redeploy, check that a canary run creates its jobs, then delete the old
-      public key (`nebius iam auth-public-key list` / `delete --id <old>`).
+      --service-account-id <sa-job-launcher> ...`, check the flags with `--help`) and load the
+      credentials JSON. Note the old key's ID (`nebius iam auth-public-key list`).
 - [ ] `RUNTIME_AUTH_KEY` (authorized key of sa-api-runtime: KMS bundle signing): the same for
-      sa-api-runtime. The start-up signing probe checks the new key against
-      `docs/bundle-public-key.pem`.
+      sa-api-runtime.
 - [ ] `OBSERVABILITY_STATIC_KEY` (only with Nebius Tracing): issue a new static key
       (`nebius iam static-key issue --name p2p-observability-<date>
-      --account-service-account-id <sa> --service observability`, copy `token`), load it,
-      redeploy, then revoke the old static key. Also replace Grafana's separate read-only key.
+      --account-service-account-id <sa> --service observability`, copy `token`) and load it.
 
 The **KMS signing key** (`p2p-bundle-signing`) is not rotated: published bundles verify against
 `docs/bundle-public-key.pem`. Rotate it only if it may be compromised, and then publish the new
 public key and say which bundles the old one signed.
 
-### Secrets of GitHub Actions
+### 3. Redeploy and verify
 
-- [ ] `P2P_ADMIN_TOKEN` (environment `prod`): set to the new `ADMIN_TOKEN` above.
+- [ ] Redeploy (`deploy/endpoint.sh` or the deploy workflow) with the **old** `ADMIN_TOKEN` for
+      the drain (if the drain fails, `P2P_SKIP_DRAIN=1`: the instance is already drained).
+- [ ] `/readyz` is 200 (models routed with the new key, replication with the new S3 key); the
+      start-up signing probe passed with the new `RUNTIME_AUTH_KEY`.
+- [ ] The old `ADMIN_TOKEN` gets 401 and the new one works (`invite list`).
+- [ ] If the demo stays up: a canary run creates its jobs and bucket (new launcher keys), then
+      `kill-switch off` with the new token (the kill switch is stored and stays on for the day;
+      the new instance starts undrained). Otherwise stop the endpoint.
+
+### 4. Delete the old credentials
+
+- [ ] The old Token Factory API key (console) and the old Tavily key (dashboard).
+- [ ] The old authorized public keys of sa-job-launcher and sa-api-runtime
+      (`nebius iam auth-public-key delete --id <old>`).
+- [ ] The old observability static key, and Grafana's read-only static key: issue a new one
+      for Grafana's data source, then revoke the old one.
+
+### 5. Secrets of GitHub Actions
+
+- [ ] `P2P_ADMIN_TOKEN` (environment `prod`): `gh secret set P2P_ADMIN_TOKEN --env prod` with
+      the new `ADMIN_TOKEN` (it reads the value from stdin).
 - [ ] `P2P_SMOKE_INVITE` (environment `smoke`): `smoke-cron` stops after 2026-12-15. Revoke
       the invite (`invite revoke --code-stdin`) and delete the secret
       (`gh secret delete P2P_SMOKE_INVITE --env smoke`); create a new one only if the demo stays
@@ -174,15 +192,15 @@ public key and say which bundles the old one signed.
       the secret (`gh secret delete NEBIUS_SA_CREDENTIALS --env prod`) and the old authorized key
       of sa-ci-deployer. With OIDC there is no static CI key to rotate.
 
-### Everything else
+### 6. Everything else
 
 - [ ] Revoke every invite handed out for judging (`invite list`, then `invite revoke --id`).
+- [ ] Developers' credentials: delete the Token Factory and Tavily keys used for
+      `make test-live`, `make eval` and the spikes; delete the dev authorized keys behind
+      `JOB_LAUNCHER_AUTH_KEY_FILE` / `RUNTIME_AUTH_KEY_FILE` (in Nebius, then the files); empty
+      the secret values in every local `.env`.
 - [ ] Humans' own sessions: `unset` any `NEBIUS_IAM_TOKEN`, `AWS_*` and `ADMIN_TOKEN` in open
       shells, and revoke personal Nebius CLI profiles that are no longer needed.
-- [ ] Redeploy (`deploy/endpoint.sh` or the deploy workflow) with the old `ADMIN_TOKEN` for the
-      drain; check `/readyz`. The new instance starts undrained; the kill switch is stored and
-      stays on for the day: `kill-switch off` with the new token if the demo stays up, or stop
-      the endpoint.
 - [ ] Record what was rotated, when and by whom in a GitHub issue comment (no values).
 
 ## Reliability runbook
