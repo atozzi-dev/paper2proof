@@ -101,14 +101,20 @@ def load_policy_config(config_dir: Path) -> PolicyConfig:
 
 
 def levenshtein(a: str, b: str, cap: int = 10) -> int:
+    """Optimal string alignment distance: Levenshtein where swapping two adjacent letters is one
+    edit (tqmd is one edit from tqdm, not two)."""
     if abs(len(a) - len(b)) > cap:
         return cap + 1
+    before: list[int] = []
     previous = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         current = [i]
         for j, cb in enumerate(b, 1):
-            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
-        previous = current
+            cost = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cost = min(cost, before[j - 2] + 1)
+            current.append(cost)
+        before, previous = previous, current
     return previous[-1]
 
 

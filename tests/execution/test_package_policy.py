@@ -51,7 +51,9 @@ async def _decide(policy: PackagePolicy, *names: str, **ctx: Any) -> list[Reason
 
 
 def test_levenshtein() -> None:
-    assert levenshtein("requests", "reqeusts") == 2
+    assert levenshtein("requests", "reqeusts") == 1  # an adjacent swap is one edit (OSA)
+    assert levenshtein("tqdm", "tqmd") == 1
+    assert levenshtein("ab", "ba") == 1
     assert levenshtein("numpy", "numpy") == 0
     assert levenshtein("torch", "torchvision") == 6
 
@@ -106,7 +108,7 @@ async def test_short_real_names_are_not_typosquats(policy: PackagePolicy, name: 
 
 
 @respx.mock
-@pytest.mark.parametrize("name", ["jaxx", "torh", "nmpy"])
+@pytest.mark.parametrize("name", ["jaxx", "torh", "nmpy", "tqmd", "pfet", "ntlk"])
 async def test_one_edit_from_a_short_popular_name_is_a_typosquat(
     policy: PackagePolicy, name: str
 ) -> None:
