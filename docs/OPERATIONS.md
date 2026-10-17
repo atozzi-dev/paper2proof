@@ -1,8 +1,8 @@
 # Operations
 
 How the running demo is operated: invites, the public gallery, takedown requests, and the secret
-rotation once judging ends. Everything here is a human action on production (CLAUDE.md,
-"Human-only actions"). Deploying is in `docs/DEPLOY.md`, the infrastructure in `infra/README.md`.
+rotation once judging ends. Everything here is a human action on production. Deploying is in
+`docs/DEPLOY.md`, the infrastructure in `infra/README.md`.
 
 ## Admin helper
 
