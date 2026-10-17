@@ -1,0 +1,15 @@
+# Eval set B (architecture §18.1): 8-10 real arXiv papers with official code and cheap
+# experiments, run through the full pipeline by eval/run_set_b.py.
+#
+# PLACEHOLDER: the human picks the papers (task A-30, "chosen with the human"). Until then the
+# list is empty and run_set_b refuses to run (it never skips the set silently).
+#
+# One entry per paper. arxiv_id only (invariant 11: no URLs). claim_hint is optional and is
+# passed to POST /api/runs as is; notes say why the paper is in the set and link any published
+# reproducibility report used as ground truth.
+#
+# papers:
+#   - arxiv_id: "2410.01234"
+#     claim_hint: "Table 2"
+#     notes: "official code; ML Reproducibility Challenge report"
+papers: []

@@ -1,0 +1,134 @@
+{
+  "cases": [
+    {
+      "arxiv_id": "0000.00002",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c3",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 0.8,
+        "matched": 2,
+        "precision": 0.6666666666666666,
+        "predicted": 3,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "digits-mlp",
+      "run": {
+        "cost_usd": 0.42,
+        "duration_s": 540.0,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_a1",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00008",
+      "claims": [
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "INCONCLUSIVE",
+          "predicted_id": "c2",
+          "reason": "HIGH_VARIANCE",
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "friedman-boosting",
+      "run": {
+        "cost_usd": 0.3,
+        "duration_s": 660.0,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_a2",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00010",
+      "claims": [
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": null,
+          "predicted_id": null,
+          "reason": null,
+          "truth_id": "c1"
+        }
+      ],
+      "extraction": {
+        "f1": 0.0,
+        "matched": 0,
+        "precision": 0.0,
+        "predicted": 0,
+        "recall": 0.0,
+        "truth": 1
+      },
+      "name": "wine-boosting",
+      "run": {
+        "cost_usd": null,
+        "duration_s": null,
+        "error": "ConnectError",
+        "error_code": null,
+        "run_id": null,
+        "status": null
+      }
+    }
+  ],
+  "cost": {
+    "median_duration_s": 600.0,
+    "median_usd_per_claim": 0.18,
+    "runs_without_cost": 1,
+    "total_usd": 0.72
+  },
+  "extraction": {
+    "f1": 0.8000000000000002,
+    "matched": 4,
+    "precision": 0.8,
+    "predicted": 5,
+    "recall": 0.8,
+    "truth": 5
+  },
+  "generated_at": "2026-10-26T09:30:00Z",
+  "kind": "set_a",
+  "verdicts": {
+    "accuracy": 0.6,
+    "claims": 5,
+    "correct": 3,
+    "false_accusations": 0,
+    "inconclusive": 1,
+    "missing": 1
+  }
+}

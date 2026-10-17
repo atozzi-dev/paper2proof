@@ -1,0 +1,37 @@
+{
+  "arms": [
+    {
+      "arm": "routed",
+      "cost_usd": 0.0225,
+      "extraction": {
+        "f1": 0.7368421052631577,
+        "matched": 7,
+        "precision": 0.7777777777777778,
+        "predicted": 9,
+        "recall": 0.7,
+        "truth": 10
+      },
+      "models": {
+        "reader": "vendor/reader-model"
+      }
+    },
+    {
+      "arm": "all-ultra",
+      "cost_usd": 0.075,
+      "extraction": {
+        "f1": 0.8421052631578948,
+        "matched": 8,
+        "precision": 0.8888888888888888,
+        "predicted": 9,
+        "recall": 0.8,
+        "truth": 10
+      },
+      "models": {
+        "reader": "vendor/ultra-model"
+      }
+    }
+  ],
+  "generated_at": "2026-10-26T09:30:00Z",
+  "kind": "ablation",
+  "papers": 2
+}

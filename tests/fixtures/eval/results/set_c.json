@@ -1,0 +1,62 @@
+{
+  "arm": "routed",
+  "batch_id": "batch_c",
+  "batch_status": "completed",
+  "cases": [
+    {
+      "arxiv_id": "1512.03385",
+      "error": null,
+      "extraction": {
+        "f1": 0.8000000000000002,
+        "matched": 4,
+        "precision": 0.8,
+        "predicted": 5,
+        "recall": 0.8,
+        "truth": 5
+      },
+      "recall_by_modality": {
+        "table": 0.5,
+        "text": 1.0
+      }
+    },
+    {
+      "arxiv_id": "1706.03762",
+      "error": null,
+      "extraction": {
+        "f1": 0.6666666666666665,
+        "matched": 3,
+        "precision": 0.75,
+        "predicted": 4,
+        "recall": 0.6,
+        "truth": 5
+      },
+      "recall_by_modality": {
+        "figure": 0.0,
+        "table": 0.5,
+        "text": 1.0
+      }
+    }
+  ],
+  "charged_usd": 0.0225,
+  "cost_usd": 0.0225,
+  "extraction": {
+    "f1": 0.7368421052631577,
+    "matched": 7,
+    "precision": 0.7777777777777778,
+    "predicted": 9,
+    "recall": 0.7,
+    "truth": 10
+  },
+  "generated_at": "2026-10-26T09:30:00Z",
+  "kind": "set_c",
+  "models": {
+    "reader": "vendor/reader-model"
+  },
+  "recall_by_modality": {
+    "figure": 0.0,
+    "table": 0.5,
+    "text": 1.0
+  },
+  "tokens_in": 120000,
+  "tokens_out": 9000
+}
