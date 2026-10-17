@@ -292,6 +292,7 @@
         "kind": {
           "enum": [
             "prov",
+            "fetch",
             "exec",
             "smoke"
           ],
@@ -320,6 +321,7 @@
         "kind": {
           "enum": [
             "prov",
+            "fetch",
             "exec",
             "smoke"
           ],

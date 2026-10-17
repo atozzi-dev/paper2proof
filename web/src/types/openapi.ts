@@ -468,7 +468,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "prov" | "exec" | "smoke";
+            kind: "prov" | "fetch" | "exec" | "smoke";
             /** Lines */
             lines: string[];
         };
@@ -478,7 +478,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "prov" | "exec" | "smoke";
+            kind: "prov" | "fetch" | "exec" | "smoke";
             /** Name */
             name: string;
             /** State */
