@@ -128,6 +128,20 @@ class ModelCallRecord(_Record):
     cost_usd: float | None
 
 
+class InviteRecord(_Record):
+    code_hash: str
+    quota_per_day: int
+    used_today: int
+    used_on: date | None
+    expires_at: datetime | None
+
+    def active(self, now: datetime) -> bool:
+        expires = self.expires_at
+        if expires is not None and expires.tzinfo is None:  # SQLite returns naive UTC
+            expires = expires.replace(tzinfo=UTC)
+        return expires is None or expires > now
+
+
 class DailySpend(_Record):
     inference_usd: float
     cloud_usd: float
@@ -679,13 +693,36 @@ class Store:
                 .values(approval=decision),
             )
 
-    async def set_listed(self, run_id: str, listed: bool) -> bool:
+    async def set_listed(
+        self, run_id: str, listed: bool, *, verdict_summary: str | None = None
+    ) -> bool:
+        """Gallery membership (admin curation). A summary, when given, replaces the card's."""
         async with self._session() as s, s.begin():
             run = await s.get(Run, run_id)
             if run is None:
                 return False
             run.listed = listed
+            if verdict_summary is not None:
+                run.verdict_summary = verdict_summary
             return True
+
+    async def list_runs(self, *, limit: int, listed: bool | None = None) -> list[RunRecord]:
+        """Newest first, optionally only listed or unlisted runs (admin curation)."""
+        query = select(Run).order_by(Run.created_at.desc(), Run.id.desc()).limit(limit)
+        if listed is not None:
+            query = query.where(Run.listed.is_(listed))
+        async with self._session() as s:
+            return [_run_record(r) for r in await s.scalars(query)]
+
+    async def verdict_kinds(self, run_id: str) -> list[VerdictKind]:
+        """The run's verdict kinds, in claim order."""
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(VerdictRow.verdict)
+                .where(VerdictRow.run_id == run_id)
+                .order_by(VerdictRow.claim_id)
+            )
+            return [VerdictKind(v) for v in rows]
 
     async def list_gallery(self, limit: int = 100) -> list[RunRecord]:
         async with self._session() as s:
@@ -724,6 +761,36 @@ class Store:
                     expires_at=expires_at,
                 )
             )
+
+    async def list_invites(self) -> list[InviteRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(select(InviteRow).order_by(InviteRow.code_hash))
+            return [
+                InviteRecord(
+                    code_hash=r.code_hash,
+                    quota_per_day=r.quota_per_day,
+                    used_today=r.used_today,
+                    used_on=r.used_on,
+                    expires_at=r.expires_at,
+                )
+                for r in rows
+            ]
+
+    async def revoke_invite(self, hash_prefix: str, now: datetime) -> int:
+        """Expire the one invite whose code hash starts with `hash_prefix` (never later than it
+        already expires). Returns how many invites match: anything but 1 changes nothing."""
+        matching = InviteRow.code_hash.startswith(hash_prefix, autoescape=True)
+        async with self._session() as s, s.begin():
+            count = int(
+                (await s.scalar(select(func.count()).select_from(InviteRow).where(matching))) or 0
+            )
+            if count == 1:
+                await s.execute(
+                    update(InviteRow)
+                    .where(matching, InviteRow.expires_at.is_(None) | (InviteRow.expires_at > now))
+                    .values(expires_at=now)
+                )
+            return count
 
     async def invite_valid(self, code_hash: str, now: datetime) -> bool:
         async with self._session() as s:

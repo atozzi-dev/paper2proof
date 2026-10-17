@@ -4,74 +4,6 @@
  */
 
 export interface paths {
-    "/admin/drain": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Drain */
-        post: operations["drain_admin_drain_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/gallery/{run_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Curate */
-        post: operations["curate_admin_gallery__run_id__post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/invites": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Create Invite */
-        post: operations["create_invite_admin_invites_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/kill-switch": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Kill Switch */
-        post: operations["kill_switch_admin_kill_switch_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/gallery": {
         parameters: {
             query?: never;
@@ -447,21 +379,6 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
-        /** InviteCreated */
-        InviteCreated: {
-            /** Code */
-            code: string;
-        };
-        /** InviteRequest */
-        InviteRequest: {
-            /** Expires At */
-            expires_at?: string | null;
-            /**
-             * Quota Per Day
-             * @default 3
-             */
-            quota_per_day: number;
-        };
         /** JobLogPayload */
         JobLogPayload: {
             /**
@@ -483,11 +400,6 @@ export interface components {
             name: string;
             /** State */
             state: string;
-        };
-        /** Listing */
-        Listing: {
-            /** Listed */
-            listed: boolean;
         };
         /** ModelCallPayload */
         ModelCallPayload: {
@@ -678,11 +590,6 @@ export interface components {
             /** Status */
             status: string;
         };
-        /** Toggle */
-        Toggle: {
-            /** On */
-            on: boolean;
-        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -753,142 +660,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    drain_admin_drain_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-admin-token"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Toggle"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    curate_admin_gallery__run_id__post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-admin-token"?: string | null;
-            };
-            path: {
-                run_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Listing"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_invite_admin_invites_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-admin-token"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InviteRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InviteCreated"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    kill_switch_admin_kill_switch_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-admin-token"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Toggle"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     gallery_api_gallery_get: {
         parameters: {
             query?: never;
