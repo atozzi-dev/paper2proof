@@ -4,6 +4,14 @@ Collected during development. Consolidated into the Devpost feedback field at su
 
 ## Token Factory (inference API)
 
+### 2026-10-17 — Batch API wire format and batch pricing not pinned down for us yet
+- **Context:** A-30, building `app/models/batch.py` for the extraction eval (set C) and the routing ablation. Offline only: no paid call made yet.
+- **What happened:** Our model-routing spec only says "Files API upload, create a batch, poll, download output and error files, map by `custom_id`". To write the client we had to assume the OpenAI Batch format: input lines `{custom_id, method, url, body}` with `url = /v1/chat/completions`, `completion_window = "24h"`, output lines `{id, custom_id, response: {status_code, request_id, body}, error}`, a separate error file, and per-line `usage`. Not yet verified against Token Factory: whether `response` wraps the completion in `status_code`/`body`, whether failed lines go to the error file or inline, which `completion_window` values are accepted, whether `chat_template_kwargs` (reasoning on/off) is honoured in batch bodies, and the batch discount (`batch_discount: 0.5` in `config/pricing.yaml` is indicative).
+- **Expected:** One page with a complete input line, a complete output line, a complete error line, the accepted `completion_window` values, the batch limits and the batch price per model.
+- **Impact:** The parser accepts both shapes (`response.body` and a bare completion, inline or top-level `error`) and the budget is charged conservatively (missing lines at their input estimate, a timed-out batch in full). The first paid run must confirm the format before the results are trusted.
+- **Suggestion:** Publish example JSONL for input, output and error files, plus batch pricing and limits, on the Batch API page.
+- **Severity:** minor
+
 ## Token Factory Sandboxes
 
 ### 2026-10-15 — Billing model of Sandboxes is not documented
