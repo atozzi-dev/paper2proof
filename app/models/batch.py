@@ -384,8 +384,17 @@ class BatchRunner:
                 endpoint=BATCH_ENDPOINT,
                 completion_window=COMPLETION_WINDOW,
             )
+        except openai.APIStatusError as err:
+            if err.status_code >= 500:  # the batch may exist anyway: charge it in full
+                await self._settle_in_full(reservations)
+            else:  # rejected (4xx): no batch was created, nothing billed
+                await self._settle(reservations, 0, 0, 0.0)
+            raise
         except BaseException:
-            await self._settle(reservations, 0, 0, 0.0)  # no batch was created: nothing billed
+            # A timeout or a dropped connection: the create may have succeeded on the server
+            # side. The client has no retries (a retry could start a second, untracked batch),
+            # so the one batch that may run is charged in full.
+            await self._settle_in_full(reservations)
             raise
         try:
             batch = await self._wait(batch)
@@ -417,6 +426,7 @@ class BatchRunner:
         tokens_in = tokens_out = 0
         priced: list[float | None] = []
         charged: list[float] = []
+        calls: list[tuple[_Estimate, int, int, float | None]] = []
         for cid in missing:  # possibly processed and billed for its input: charge that
             est = estimates[cid]
             tokens_in += est.tokens_in
@@ -437,6 +447,10 @@ class BatchRunner:
             cost = None if list_price is None else list_price * self.pricing.batch_discount
             priced.append(cost)
             charged.append(cost if cost is not None else self._price(est.model_id, tin, tout))
+            calls.append((est, tin, tout, cost))
+        total = math.fsum(charged)
+        await self._settle(reservations, tokens_in, tokens_out, total)  # before anything can fail
+        for est, tin, tout, cost in calls:
             await self._recorder.record(
                 run_id=None,
                 step=self._step,
@@ -449,8 +463,6 @@ class BatchRunner:
                 ratelimit_remaining=None,
                 prompt_version=_prompt_version(est.prompt),
             )
-        total = math.fsum(charged)
-        await self._settle(reservations, tokens_in, tokens_out, total)
         return BatchOutcome(
             batch_id=batch.id,
             status=batch.status,

@@ -123,7 +123,7 @@ def test_lines_carry_the_routed_model_and_role_settings() -> None:
     assert reader["max_tokens"] == cfg.roles[Role.READER].max_output
     assert reader["temperature"] == cfg.roles[Role.READER].temperature
     assert reader["tool_choice"] == {"type": "function", "function": {"name": "emit_result"}}
-    assert reader["tools"][0]["function"]["name"] == "emit_result"
+    assert json.loads(json.dumps(reader["tools"]))[0]["function"]["name"] == "emit_result"
     # reasoning: "off" for the reader, sent the way the provider expects (chat_template_kwargs)
     assert reader["chat_template_kwargs"] == {"enable_thinking": False}
     assert utility["model"] == NANO
@@ -417,3 +417,87 @@ async def test_lines_missing_from_both_files_are_reported_and_charged_their_inpu
     assert outcome.results == {}
     assert await runner.budget.day_spend(SpendKind.INFERENCE_USD) > 0
     assert await runner.budget.day_spend(SpendKind.TOKENS_OUT) == 0
+
+
+def _file_ok() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "id": "file_in",
+            "object": "file",
+            "bytes": 1,
+            "created_at": 0,
+            "filename": "batch.jsonl",
+            "purpose": "batch",
+        },
+    )
+
+
+@respx.mock
+async def test_a_rejected_create_is_not_charged(store: Store) -> None:
+    respx.post(f"{BASE}files").mock(return_value=_file_ok())
+    create = respx.post(f"{BASE}batches").mock(
+        return_value=httpx.Response(400, json={"error": {"code": "invalid"}})
+    )
+    runner = _runner(store, Recorded(), Sleeps())
+    with pytest.raises(openai.BadRequestError):
+        await runner.run(_requests()[:1])
+    assert create.call_count == 1
+    assert await runner.budget.day_spend(SpendKind.INFERENCE_USD) == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ReadTimeout("slow"), httpx.Response(503, json={"error": {"code": "busy"}})],
+)
+@respx.mock
+async def test_a_create_with_an_unknown_outcome_is_charged_in_full_and_never_retried(
+    store: Store, failure: Any
+) -> None:
+    respx.post(f"{BASE}files").mock(return_value=_file_ok())
+    route = respx.post(f"{BASE}batches")
+    if isinstance(failure, httpx.Response):
+        route.mock(return_value=failure)
+    else:
+        route.mock(side_effect=failure)
+    runner = _runner(store, Recorded(), Sleeps())
+    with pytest.raises(openai.APIError):
+        await runner.run(_requests()[:1])
+    assert route.call_count == 1  # a retried create could start a second batch
+    assert await runner.budget.day_spend(SpendKind.INFERENCE_USD) > 0
+
+
+@respx.mock
+async def test_the_ledger_is_settled_even_when_recording_fails(store: Store) -> None:
+    respx.post(f"{BASE}files").mock(return_value=_file_ok())
+    respx.post(f"{BASE}batches").mock(
+        return_value=httpx.Response(200, json=_batch("completed", output_file_id="file_out"))
+    )
+    respx.get(f"{BASE}files/file_out/content").mock(
+        return_value=httpx.Response(
+            200,
+            content=_jsonl(
+                [_ok_line("2410.01234:reader", _body(SUPER, args='{"answer":1}', tokens=(100, 10)))]
+            ),
+        )
+    )
+
+    class Broken(Recorded):
+        async def record(self, **kwargs: object) -> None:
+            raise RuntimeError("db down")
+
+    runner = _runner(store, Broken(), Sleeps())
+    with pytest.raises(RuntimeError):
+        await runner.run(_requests()[:1])
+    assert await runner.budget.day_spend(SpendKind.TOKENS_IN) == 100
+
+
+@pytest.mark.parametrize("discount", ["0", "-0.5", "1.5"])
+def test_batch_discount_must_be_a_real_discount(tmp_path: Any, discount: str) -> None:
+    path = tmp_path / "pricing.yaml"
+    path.write_text(
+        f"models:\n  m: {{ input: 1.0, output: 1.0 }}\nbatch_discount: {discount}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="batch_discount"):
+        Pricing.load(path)
