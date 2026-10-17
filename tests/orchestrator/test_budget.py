@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.events import CostUpdatePayload
 from app.orchestrator.budget import (
     Budget,
     BudgetExceeded,
@@ -205,3 +206,62 @@ async def test_enforce_daily_cloud_cap_trips_the_kill_switch(store: Store) -> No
     await store.add_ledger_entry(RUN, NOW.date(), SpendKind.CLOUD_USD.value, 2.0)
     await budget.enforce_daily_cloud_cap(NOW.date())
     assert await budget.kill_switch_active()
+
+
+# --- cost.update (docs/specs/api-and-events.md) -------------------------------------------
+
+
+async def _cost_updates(store: Store, run_id: str = RUN) -> list[CostUpdatePayload]:
+    return [
+        e.payload
+        for e in await store.events_after(run_id, 0)
+        if isinstance(e.payload, CostUpdatePayload)
+    ]
+
+
+async def test_committed_spend_emits_the_run_cost(store: Store) -> None:
+    await _runs(store)
+    budget = _budget(store)
+    await budget.commit(await budget.check_and_reserve(RUN, SpendKind.INFERENCE_USD, 0.2), 0.05)
+    await budget.commit(await budget.check_and_reserve(RUN, SpendKind.CLOUD_USD, 1.0), 0.4)
+    updates = await _cost_updates(store)
+    assert [(u.inference_usd, u.cloud_usd) for u in updates] == [
+        (pytest.approx(0.05), 0.0),
+        (pytest.approx(0.05), pytest.approx(0.4)),
+    ]
+    assert updates[-1].total_usd == pytest.approx(0.45)
+    assert await _cost_updates(store, RUN2) == []  # per run
+
+
+async def test_only_money_spent_by_a_run_emits_a_cost_update(store: Store) -> None:
+    await _runs(store)
+    budget = _budget(store)
+    await budget.commit(await budget.check_and_reserve(RUN, SpendKind.TOKENS_IN, 100), 100)
+    await budget.commit(await budget.check_and_reserve(RUN, SpendKind.GPU_MINUTES, 5), 5)
+    await budget.commit(await budget.check_and_reserve(RUN, SpendKind.CLOUD_USD, 1.0), 0)
+    await budget.commit(await budget.check_and_reserve(None, SpendKind.INFERENCE_USD, 0.1), 0.1)
+    assert await _cost_updates(store) == []
+
+
+async def test_publish_run_cost_reports_ledger_entries_written_outside_a_reservation(
+    store: Store,
+) -> None:
+    await _runs(store)
+    await store.add_ledger_entry(RUN, NOW.date(), SpendKind.CLOUD_USD.value, 0.25)
+    await _budget(store).publish_run_cost(RUN)
+    (update,) = await _cost_updates(store)
+    assert (update.inference_usd, update.cloud_usd, update.total_usd) == (0.0, 0.25, 0.25)
+
+
+async def test_a_failing_cost_update_never_fails_the_commit(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _runs(store)
+    budget = _budget(store)
+
+    async def broken(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("events table unavailable")
+
+    monkeypatch.setattr(store, "append_event", broken)
+    await budget.commit(await budget.check_and_reserve(RUN, SpendKind.CLOUD_USD, 1.0), 0.4)
+    assert await budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(0.4)

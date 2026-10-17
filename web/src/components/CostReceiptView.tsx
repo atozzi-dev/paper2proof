@@ -42,13 +42,14 @@ export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]
         <tr>
           <th scope="row">Cloud jobs</th>
           <td colSpan={3} />
-          <td>{formatUsd(r.cloudUsd)}</td>
+          <td>{r.cloudReported ? formatUsd(r.cloudUsd) : <span className="muted">not reported yet</span>}</td>
         </tr>
         <tr>
           <th scope="row">Total</th>
           <td colSpan={3} />
           <td>
             <strong>{formatUsd(r.totalUsd)}</strong>
+            {!r.cloudReported && <span className="muted"> + cloud not reported yet</span>}
           </td>
         </tr>
         {r.unpricedCalls > 0 && (

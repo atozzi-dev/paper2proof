@@ -93,6 +93,19 @@ describe('CostReceiptView', () => {
     const table = screen.getByRole('table', { name: 'Cost receipt' })
     expect(within(table).getByRole('row', { name: /reader/ })).toHaveTextContent('$0.10')
     expect(within(table).getByRole('row', { name: /^Total/ })).toHaveTextContent('$1.85')
+    expect(within(table).getByRole('row', { name: /^Cloud jobs/ })).toHaveTextContent('$1.50')
+  })
+
+  it('never shows $0.00 of cloud spend before the server reported any', () => {
+    render(
+      <CostReceiptView
+        calls={[{ role: 'reader', model_id: 'm', tokens_in: 1, tokens_out: 1, latency_ms: 1, cost_usd: 0.1 }]}
+        update={null}
+      />,
+    )
+    const table = screen.getByRole('table', { name: 'Cost receipt' })
+    expect(within(table).getByRole('row', { name: /^Cloud jobs/ })).toHaveTextContent('not reported yet')
+    expect(within(table).getByRole('row', { name: /^Total/ })).toHaveTextContent('$0.10 + cloud not reported yet')
   })
 })
 

@@ -7,6 +7,7 @@ survive restarts; reservations still in flight are held in memory under a lock.
 
 import asyncio
 import itertools
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,8 +19,11 @@ from typing import Protocol
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.domain.events import CostUpdatePayload, EventType
 from app.observability import metrics
 from app.settings import Env
+
+log = logging.getLogger(__name__)
 
 EPSILON = 1e-9
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "budgets.yaml"
@@ -36,6 +40,8 @@ class SpendKind(StrEnum):
 
 # The kill switch stops new cloud spend; model calls of runs already in flight still pass.
 KILL_SWITCH_KINDS = frozenset({SpendKind.CLOUD_USD, SpendKind.GPU_MINUTES})
+# Money a run spends: committing it shows the run's cost in the UI (cost.update).
+COST_KINDS = frozenset({SpendKind.INFERENCE_USD, SpendKind.CLOUD_USD})
 
 
 class BudgetExceeded(Exception):
@@ -112,6 +118,8 @@ class LedgerStore(Protocol):
     async def kill_switch(self, day: date) -> bool: ...
 
     async def set_kill_switch(self, day: date, on: bool) -> None: ...
+
+    async def append_event(self, run_id: str, type: EventType, payload: BaseModel) -> int: ...
 
 
 def _utcnow() -> datetime:
@@ -196,6 +204,23 @@ class Budget:
             if reservation.kind is SpendKind.CLOUD_USD:
                 await self._trip_if_over(reservation.day)
         metrics.spend(reservation.kind.value, actual)
+        if reservation.run_id is not None and reservation.kind in COST_KINDS and actual > 0:
+            await self.publish_run_cost(reservation.run_id)
+
+    async def publish_run_cost(self, run_id: str) -> None:
+        """Emit the run's committed spend, from the ledger, as a `cost.update` event. Display
+        only: a failure is logged and never fails the caller (the ledger entry is written)."""
+        try:
+            inference = await self._store.ledger_total(SpendKind.INFERENCE_USD.value, run_id=run_id)
+            cloud = await self._store.ledger_total(SpendKind.CLOUD_USD.value, run_id=run_id)
+            update = CostUpdatePayload(
+                inference_usd=round(inference, 6),
+                cloud_usd=round(cloud, 6),
+                total_usd=round(inference + cloud, 6),
+            )
+            await self._store.append_event(run_id, EventType.COST_UPDATE, update)
+        except Exception:
+            log.warning("cost.update not emitted", extra={"run_id": run_id}, exc_info=True)
 
     async def enforce_daily_cloud_cap(self, day: date) -> None:
         """Trip the kill switch when cloud spend written without a reservation (the reaper
