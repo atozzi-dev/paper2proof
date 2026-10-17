@@ -14,7 +14,12 @@ SEPARATOR = " · "
 def verdict_summary(verdicts: Iterable[Verdict]) -> str | None:
     """`"<n> <KIND>"` per kind, in VerdictKind order, e.g. `1 REPRODUCED · 1 NOT_REPRODUCED`.
     Kinds that don't fit the column are counted as `+<n> more`, never cut or dropped."""
-    counts = Counter(v.kind for v in verdicts)
+    return kinds_summary(v.kind for v in verdicts)
+
+
+def kinds_summary(kinds: Iterable[VerdictKind]) -> str | None:
+    """The same line from the stored verdict kinds (gallery curation re-derives it)."""
+    counts = Counter(kinds)
     parts = [(counts[kind], f"{counts[kind]} {kind.value}") for kind in VerdictKind if counts[kind]]
     if not parts:
         return None
