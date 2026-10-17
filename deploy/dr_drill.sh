@@ -17,13 +17,16 @@
 #                        before any change; the drill always redeploys the commit it reports)
 #   P2P_DRILL_KEEP_RUN=1 leave the drill's run going at the end (default: cancel it)
 #   P2P_RUN_ATTEMPTS     polls 10 s apart for the run to start / resume (default 60, at least 1)
-# DRY_RUN, P2P_SKIP_DRAIN and P2P_DRAIN_WAIT_S are never passed on to deploy/endpoint.sh.
+# P2P_DRILL_INVITE, DRY_RUN, P2P_SKIP_DRAIN and P2P_DRAIN_WAIT_S are never passed on to
+# deploy/endpoint.sh.
 #
 # The session cookie is host-only (__Host-, no Domain), and the recreated endpoint may get a
 # new hostname: after the login its value goes into a header file in a private temporary
 # directory and every request sends it from there (never on argv). Only that session owns the
 # run (runs are private, cancel is owner-only), so a failed drill cancels the run before it
-# deletes the session, and keeps the session file when the cancel fails.
+# deletes the session, and keeps the session file when the cancel fails or when the run
+# creation failed in a way that may still have created a run (a timeout, a status other than
+# the app's refusals, no run id, an interrupt during the request).
 set -euo pipefail
 
 NAME="${P2P_ENDPOINT_NAME:-p2p-api}"
@@ -62,6 +65,7 @@ drill_started="$(now)"
 run_id=""
 url=""
 keep_session=0
+creating=0  # 1 while the outcome of POST /api/runs is unknown
 
 cancel_run() {  # POST /api/runs/<run>/cancel with the drill's session; fails without one
   [ -f "$cookie_hdr" ] || return 1
@@ -72,16 +76,25 @@ cancel_run() {  # POST /api/runs/<run>/cancel with the drill's session; fails wi
 session_kept() {  # session_kept <why>: keep only the session file and say how to cancel
   keep_session=1
   rm -f "$cookies"
-  echo "dr_drill.sh: $1: the drill's run $run_id is still going. Only the drill's session owns" >&2
+  if [ -n "$run_id" ]; then
+    echo "dr_drill.sh: $1: the drill's run $run_id is still going. Only the drill's session owns" >&2
+  else  # the run id never reached the drill: the admin listing and the logs have it
+    echo "dr_drill.sh: $1: find its id (newest first, arXiv $arxiv) with" >&2
+    echo "  uv run python -m app.admin_cli --url $url runs --limit 5" >&2
+    echo "dr_drill.sh: or in the server logs, and put it in place of RUN_ID_HERE below. Only the" >&2
+    echo "dr_drill.sh: drill's session owns" >&2
+  fi
   echo "dr_drill.sh: it (kept in $cookie_hdr; replace the URL if the endpoint moved). Cancel with:" >&2
-  echo "  curl -fsS --proto =https -X POST -H @$cookie_hdr $url/api/runs/$run_id/cancel && rm -rf $work" >&2
+  echo "  curl -fsS --proto =https -X POST -H @$cookie_hdr $url/api/runs/${run_id:-RUN_ID_HERE}/cancel && rm -rf $work" >&2
 }
 
 cleanup() {
   local status=$?
   if [ "$status" -ne 0 ]; then
     echo "dr_drill.sh: stopped after $(( $(now) - drill_started )) s" >&2
-    if [ -n "$run_id" ] && [ "$dry" != 1 ] && [ "$keep_session" != 1 ]; then
+    if [ "$creating" = 1 ] && [ -z "$run_id" ] && [ "$keep_session" != 1 ]; then
+      session_kept "interrupted during the run creation: a run may have been created"
+    elif [ -n "$run_id" ] && [ "$dry" != 1 ] && [ "$keep_session" != 1 ]; then
       if cancel_run; then
         echo "dr_drill.sh: cancelled the drill's run $run_id" >&2
       else
@@ -92,7 +105,8 @@ cleanup() {
   [ "$keep_session" = 1 ] || rm -rf "$work"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM  # an interrupted drill still cancels its run
+trap 'exit 130' INT  # an interrupted drill still cancels its run
+trap 'exit 143' TERM
 
 # --- reading the platform and the app (fail closed: an error never means "fine") -----------
 # JSON goes to python on stdin, never on argv.
@@ -140,12 +154,6 @@ get() {  # get <path>: GET with the drill's session (read-only, also in a dry ru
   curl -fsS --proto =https --max-time 20 -H @"$cookie_hdr" "$url$1"
 }
 
-post() {  # post <path> [body on stdin]: printed (on stderr) instead in a dry run
-  if [ "$dry" = 1 ]; then echo "DRY-RUN: POST $url$1" >&2; cat >/dev/null; return; fi
-  curl -fsS --proto =https --max-time 20 -H @"$cookie_hdr" \
-    -H 'Content-Type: application/json' --data-binary @- "$url$1"
-}
-
 login() {  # the invite code on stdin; the session cookie from the jar into $cookie_hdr
   if [ "$dry" = 1 ]; then echo "DRY-RUN: POST $url/api/session" >&2; return; fi
   "$PY" -c 'import json, os, sys; sys.stdout.write(json.dumps({"invite_code": os.environ["P2P_DRILL_INVITE"]}))' \
@@ -170,6 +178,25 @@ sys.stdout.write("Cookie: " + name + "=" + value + "\n")' "$SESSION_COOKIE" <"$c
   rm -f "$cookies"
 }
 
+create_run() {  # POST /api/runs: prints the HTTP status, the body goes to $work/created.json
+  "$PY" -c 'import json, sys; sys.stdout.write(json.dumps({"arxiv_id": sys.argv[1]}))' "$arxiv" \
+    | curl -sS --proto =https --max-time 20 -o "$work/created.json" -w '%{http_code}' \
+      -H @"$cookie_hdr" -H 'Content-Type: application/json' --data-binary @- "$url/api/runs"
+}
+
+refused() {  # refused <status>: the app refused before creating a run (app/api/runs.py, the
+  # session and middleware checks), with why; any other status may come after a creation
+  case "$1" in
+    400) echo "the app refused the arXiv ID" ;;
+    401 | 403) echo "the app refused the drill's session" ;;
+    402) echo "the kill switch is on (daily budget reached)" ;;
+    413) echo "the app refused the request body" ;;
+    429) echo "the invite's daily quota is used up, or too many requests" ;;
+    503) echo "the endpoint is draining (a deploy is in progress): turn drain off first" ;;
+    *) return 1 ;;
+  esac
+}
+
 last_event() {  # last_event <run_id>: "<last id> <its type> <step of the last step.started> <attempt>"
   get "/api/runs/$1/events.json?after=0" | "$PY" -c '
 import json, sys
@@ -177,7 +204,7 @@ events = json.load(sys.stdin)["events"]
 started = [e for e in events if e["type"] == "step.started"]
 last = events[-1] if events else {"id": 0, "type": "none"}
 step = started[-1]["payload"] if started else {"step": "none", "attempt": 0}
-print(last["id"], last["type"], step["step"], step["attempt"])'
+print(int(last["id"]), last["type"], step["step"], int(step["attempt"]))'
 }
 
 # --- 1. the endpoint as it runs now ---------------------------------------------------------
@@ -199,19 +226,46 @@ step "endpoint $old_id at $url runs $image (commit $commit)"
 # --- 2. an in-flight run ----------------------------------------------------------------------
 step "starting the drill's run on arXiv $arxiv"
 login || die "login with P2P_DRILL_INVITE failed"
-created="$("$PY" -c 'import json, sys; sys.stdout.write(json.dumps({"arxiv_id": sys.argv[1]}))' "$arxiv" \
-  | post /api/runs)" || die "the drill's run was not created (kill switch on? invite quota used up?)"
 before_id=0 before_type=none run_step=none run_attempt=0
 if [ "$dry" = 1 ]; then
+  echo "DRY-RUN: POST $url/api/runs" >&2
   echo "DRY-RUN: wait until the run is RUNNING with a step.started, note its last event and step"
 else
-  run_id="$(json_field 'd["run_id"]' <<<"$created")" || run_id=""
-  [[ "$run_id" =~ ^r_[0-9a-z]{26}$ ]] || { run_id=""; die "unexpected answer to the run creation"; }
+  # Only the app's refusals (a 4xx it sends before creating anything, or the drain's 503) mean
+  # that no run was created. A timeout, another status or an answer without a run id may hide a
+  # created run that only the drill's session can cancel; so may an interrupt (see cleanup).
+  creating=1 rc=0
+  code="$(create_run)" || rc=$?
+  answer="HTTP ${code:-000}"
+  [ "$rc" = 0 ] || answer="$answer, curl exit $rc"
+  why=""
+  if [ "$rc" = 0 ] && why="$(refused "$code")"; then
+    if [ "$code" = 503 ]; then  # the app's errors are {"error": <detail>} (app/api/main.py)
+      drain="$(json_field 'd.get("error")' 2>/dev/null <"$work/created.json")" || drain=""
+      [ "$drain" = "deploy in progress" ] || why=""
+    fi
+  fi
+  if [ -n "$why" ]; then
+    creating=0
+    die "the drill's run was not created ($answer: $why)"
+  fi
+  if [ "$rc" = 0 ] && [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+    run_id="$(json_field 'd["run_id"]' 2>/dev/null <"$work/created.json")" || run_id=""
+    [[ "$run_id" =~ ^r_[0-9a-z]{26}$ ]] || run_id=""
+  fi
+  if [ -z "$run_id" ]; then
+    echo "dr_drill.sh: FAILED: no run id from the run creation ($answer)" >&2
+    session_kept "a run may have been created"
+    exit 1
+  fi
+  creating=0
   status=""
   for _ in $(seq 1 "$attempts"); do
     status="$(get "/api/runs/$run_id" | json_field 'd["status"]')" || die "could not read run $run_id"
     noted="$(last_event "$run_id")" || die "could not read the events of run $run_id"
     read -r before_id before_type run_step run_attempt <<<"$noted"
+    [[ "$before_id" =~ ^[0-9]+$ && "$run_attempt" =~ ^[0-9]+$ ]] \
+      || die "unexpected events of run $run_id"  # they reach bash arithmetic below
     [ "$status" = RUNNING ] && [ "$run_attempt" -gt 0 ] && break
     [ "$status" = QUEUED ] || [ "$status" = RUNNING ] || die "the drill's run ended before the drill: $status"
     sleep 10
@@ -234,11 +288,11 @@ watch_stop() {
   done
 }
 if [ "$dry" = 1 ]; then
-  env -u P2P_SKIP_DRAIN -u P2P_DRAIN_WAIT_S DRY_RUN=1 P2P_ENDPOINT_UPDATE=recreate \
+  env -u P2P_DRILL_INVITE -u P2P_SKIP_DRAIN -u P2P_DRAIN_WAIT_S DRY_RUN=1 P2P_ENDPOINT_UPDATE=recreate \
     P2P_EXPECT_COMMIT="$commit" bash "$ENDPOINT_SH" "$image" "$env_file" | watch_stop \
     || die "deploy/endpoint.sh failed"
 else
-  env -u DRY_RUN -u P2P_SKIP_DRAIN -u P2P_DRAIN_WAIT_S P2P_ENDPOINT_UPDATE=recreate \
+  env -u P2P_DRILL_INVITE -u DRY_RUN -u P2P_SKIP_DRAIN -u P2P_DRAIN_WAIT_S P2P_ENDPOINT_UPDATE=recreate \
     P2P_EXPECT_COMMIT="$commit" bash "$ENDPOINT_SH" "$image" "$env_file" | watch_stop \
     || die "deploy/endpoint.sh failed: roll back with it"
 fi
@@ -272,7 +326,10 @@ sys.exit(0 if any(e["id"] == int(sys.argv[1]) and e["type"] == sys.argv[2] for e
   restore="ok (run $run_id, event $before_id ($before_type) kept)"
   step "restore $restore"
   # Resumed = a step.started written after the stop for the step and attempt that were RUNNING
-  # when the old instance stopped (the step.started right before it, in event order).
+  # when the old instance stopped (the step.started right before it, in event order). "After the
+  # stop", not after /readyz: the app resumes runs in its lifespan, before /readyz answers. The
+  # stop time is the operator's clock and the event times the server's: only an event after the
+  # noted one can be the resume, so a clock skew can fail the drill but never pass it.
   resumed_at="" found=""
   for _ in $(seq 1 "$attempts"); do
     status="$(get "/api/runs/$run_id" | json_field 'd["status"]')" || die "could not read run $run_id"
@@ -285,18 +342,19 @@ def epoch(ts):
     t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).timestamp()
 stopping_at, running = float(sys.argv[1]), (sys.argv[2], int(sys.argv[3]))
+noted = int(sys.argv[4])
 events = json.load(sys.stdin)["events"]
 for e in events:
     if e["type"] != "step.started":
         continue
     this = (e["payload"]["step"], int(e["payload"]["attempt"]))
-    if this == running and epoch(e["ts"]) > stopping_at:
+    if this == running and e["id"] > noted and epoch(e["ts"]) > stopping_at:
         print("resumed", e["ts"])
         sys.exit()
     running = this
 late = any(epoch(e["ts"]) > stopping_at for e in events)
 print("waiting" if late else "nothing-after-the-stop")' \
-      "$stopping_at" "$run_step" "$run_attempt" <"$work/page.json")" \
+      "$stopping_at" "$run_step" "$run_attempt" "$before_id" <"$work/page.json")" \
       || die "could not read the events of run $run_id"
     if [[ "$found" == resumed* ]]; then
       resumed_at="$(now)"
