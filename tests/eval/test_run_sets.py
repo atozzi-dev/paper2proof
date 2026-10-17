@@ -249,6 +249,7 @@ def _view(status: str, *, awaiting: bool = False, done: bool = False) -> dict[st
             if done
             else []
         ),
+        "conditions": None,  # the API always sends it (null until there is something to show)
     }
 
 
