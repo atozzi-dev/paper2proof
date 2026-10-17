@@ -102,6 +102,8 @@ class JobRecord(_Record):
     created_at: datetime
     gpu_seconds: float | None = None
     cost_usd: float | None = None
+    platform: str | None = None
+    preset: str | None = None
 
 
 def _job_record(row: JobRow) -> JobRecord:
@@ -115,6 +117,8 @@ def _job_record(row: JobRow) -> JobRecord:
         created_at=row.created_at,
         gpu_seconds=row.gpu_seconds,
         cost_usd=row.cost_usd,
+        platform=row.platform,
+        preset=row.preset,
     )
 
 
@@ -314,6 +318,8 @@ class Store:
         *,
         deadline: datetime | None = None,
         at: datetime | None = None,
+        platform: str | None = None,
+        preset: str | None = None,
     ) -> int:
         """Insert-or-ignore by the deterministic job name; returns the row id either way."""
         async with self._session() as s, s.begin():
@@ -328,6 +334,8 @@ class Store:
                     status="SUBMITTED",
                     deadline=deadline,
                     created_at=at or utcnow(),
+                    platform=platform,
+                    preset=preset,
                 )
                 .on_conflict_do_nothing(index_elements=["name"])
             )

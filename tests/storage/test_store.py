@@ -127,6 +127,21 @@ async def test_record_job_is_idempotent_by_name(store: Store) -> None:
     assert first == second
 
 
+async def test_record_job_keeps_where_the_job_runs(store: Store) -> None:
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    await store.record_job(
+        RUN, "exec", "p2p-exec-x-1", "job-1", "p2p-run-x",
+        platform="gpu-l40s-d", preset="1gpu-16vcpu-96gb",
+    )  # fmt: skip
+    await store.record_job(RUN, "exec", "p2p-exec-x-2", "job-2", "p2p-run-x")
+    first, second = await store.get_job("p2p-exec-x-1"), await store.get_job("p2p-exec-x-2")
+    assert first is not None and (first.platform, first.preset) == (
+        "gpu-l40s-d",
+        "1gpu-16vcpu-96gb",
+    )
+    assert second is not None and (second.platform, second.preset) == (None, None)
+
+
 async def test_get_job_returns_the_first_submission(store: Store) -> None:
     await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
     at = datetime(2026, 10, 15, 12, tzinfo=UTC)
