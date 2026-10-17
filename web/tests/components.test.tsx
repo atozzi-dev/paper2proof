@@ -1,6 +1,7 @@
 import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { CostReceiptView } from '../src/components/CostReceiptView'
+import { JobsList } from '../src/components/JobsList'
 import { LogPanel } from '../src/components/LogPanel'
 import { SafeMarkdown } from '../src/components/SafeMarkdown'
 import { VerdictCard } from '../src/components/VerdictCard'
@@ -108,5 +109,32 @@ describe('VerdictCard without the full context', () => {
     render(<VerdictCard claimId="c9" claim={null} verdict={notReproduced} explanationMd="" {...conditions} />)
     expect(screen.getByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()
     expect(screen.getByRole('article')).toHaveTextContent('Claim c9')
+  })
+})
+
+describe('JobsList', () => {
+  it('names every job kind, the fetch job included, apart from provisioning', () => {
+    render(
+      <JobsList
+        jobs={{
+          'p2p-prov-abc-1': { kind: 'prov', name: 'p2p-prov-abc-1', state: 'SUCCEEDED' },
+          'p2p-fetch-abc-1': { kind: 'fetch', name: 'p2p-fetch-abc-1', state: 'RUNNING' },
+          'p2p-exec-abc-1': { kind: 'exec', name: 'p2p-exec-abc-1', state: 'PENDING' },
+        }}
+      />,
+    )
+    const list = screen.getByRole('list', { name: 'Cloud jobs' })
+    const items = within(list).getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(items[0]).toHaveTextContent('Packages (provision job)')
+    expect(items[1]).toHaveTextContent('Repository and datasets (fetch job)')
+    expect(items[1]).toHaveTextContent('p2p-fetch-abc-1')
+    expect(items[1]).toHaveTextContent('RUNNING')
+    expect(items[2]).toHaveTextContent('Experiment on GPU (exec job)')
+  })
+
+  it('says when no job has started', () => {
+    render(<JobsList jobs={{}} />)
+    expect(screen.getByText('No cloud job yet.')).toBeInTheDocument()
   })
 })

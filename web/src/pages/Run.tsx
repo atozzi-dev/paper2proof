@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, api, bundleUrl, isRunId } from '../api/client'
 import { ClaimsTable } from '../components/ClaimsTable'
 import { CostReceiptView } from '../components/CostReceiptView'
+import { JobsList } from '../components/JobsList'
 import { LogPanel } from '../components/LogPanel'
 import { PlanCard } from '../components/PlanCard'
 import { StatusTimeline } from '../components/StatusTimeline'
@@ -119,6 +120,11 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
           <LogPanel title="Sandbox output" lines={state.sandboxLines} />
           <LogPanel title="Job logs" lines={state.jobLines} />
         </div>
+      </section>
+
+      <section aria-labelledby="jobs-h">
+        <h2 id="jobs-h">Cloud jobs</h2>
+        <JobsList jobs={state.jobs} />
       </section>
 
       <section aria-labelledby="verdicts-h">

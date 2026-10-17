@@ -230,10 +230,10 @@ async def test_provision_job_is_submitted_safely_and_succeeds(store: Store, tmp_
     assert await ctx.budget.run_spend(RUN, SpendKind.CLOUD_USD) >= 0
     events = [e.payload for e in await store.events_after(RUN, 0)]
     assert any(isinstance(p, JobStatusPayload) and p.state == "SUCCEEDED" for p in events)
-    # the UI knows provisioning as one kind of job: the fetch job is told apart by its name
-    assert any(
-        isinstance(p, JobStatusPayload) and (p.kind, p.name) == ("prov", FETCH) for p in events
-    )
+    # each job's events carry its own kind: the fetch job is not shown as a provision job
+    kinds = {(p.kind, p.name) for p in events if isinstance(p, JobStatusPayload)}
+    assert ("fetch", FETCH) in kinds
+    assert ("prov", FETCH) not in kinds
 
 
 @respx.mock

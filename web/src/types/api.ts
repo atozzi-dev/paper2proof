@@ -16,6 +16,7 @@ export type StepName = S['StepName']
 export type Verdict = S['Verdict']
 export type VerdictKind = S['VerdictKind']
 export type EventEnvelope = S['EventEnvelope']
+export type JobKind = S['JobStatusPayload']['kind']
 
 /** One payload type per SSE event type (docs/specs/api-and-events.md). */
 export interface EventPayloads {

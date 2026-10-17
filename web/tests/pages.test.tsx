@@ -98,6 +98,7 @@ describe('Run page', () => {
     expect(screen.getByRole('heading', { name: 'Reproduced' })).toBeInTheDocument()
     expect(screen.getByRole('table', { name: 'Claims extracted from the paper' })).toHaveTextContent('Table 2')
     expect(screen.getByText('<b>epoch 1</b>')).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Cloud jobs' })).toHaveTextContent('Experiment on GPU (exec job)')
     expect(screen.getByRole('link', { name: 'Download the Proof Bundle' })).toHaveAttribute(
       'href',
       `/api/runs/${RUN_ID}/bundle`,
