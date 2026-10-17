@@ -1,0 +1,56 @@
+{
+  "by_kind": {
+    "INCONCLUSIVE": 1,
+    "REPRODUCED": 1
+  },
+  "by_reason": {
+    "BUDGET": 1
+  },
+  "cases": [
+    {
+      "arxiv_id": "2410.00001",
+      "run": {
+        "cost_usd": 0.8,
+        "duration_s": 1200.0,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_b1",
+        "status": "COMPLETED"
+      },
+      "verdicts": [
+        {
+          "claim_id": "c1",
+          "kind": "REPRODUCED",
+          "reason": null
+        },
+        {
+          "claim_id": "c2",
+          "kind": "INCONCLUSIVE",
+          "reason": "BUDGET"
+        }
+      ]
+    },
+    {
+      "arxiv_id": "2410.00002",
+      "run": {
+        "cost_usd": 0.2,
+        "duration_s": 300.0,
+        "error": null,
+        "error_code": "SMOKE_EXHAUSTED",
+        "run_id": "r_b2",
+        "status": "FAILED"
+      },
+      "verdicts": []
+    }
+  ],
+  "cost": {
+    "median_duration_s": 750.0,
+    "median_usd_per_claim": 0.4,
+    "runs_without_cost": 0,
+    "total_usd": 1.0
+  },
+  "failed_runs": 1,
+  "generated_at": "2026-10-26T09:30:00Z",
+  "inconclusive_rate": 0.5,
+  "kind": "set_b"
+}

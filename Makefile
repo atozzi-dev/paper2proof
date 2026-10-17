@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup lint test licenses test-docker test-live dev dev-images-env images tf-check eval
+.PHONY: help setup lint test licenses test-docker test-live dev dev-images-env images tf-check eval eval-a eval-b eval-c eval-ablation eval-report
 
 UV ?= uv
 NPM ?= npm
@@ -75,5 +75,36 @@ tf-check: ## terraform fmt -check, validate, tflint, checkov
 	$(TFLINT) --chdir=$(TF_DIR) --recursive --config=$(CURDIR)/.tflint.hcl
 	$(CHECKOV) --config-file $(TF_DIR)/.checkov.yaml
 
-eval: ## ReproBench-mini: costs money, ask first
-	@echo "not implemented yet (A-30)"; exit 1
+# ReproBench-mini (A-30). Every target but eval-report spends real money: ask first, then pass
+# CONFIRM_SPEND=1. Sets A and B drive a deployment (API_URL; API_URL_A for the canaries, which
+# need a deployment that serves them) with an invite code in P2P_EVAL_INVITE; set C and the
+# ablation call the Batch API with NEBIUS_API_KEY.
+API_URL ?=
+API_URL_A ?= $(API_URL)
+define confirm_spend
+	@if [ "$(CONFIRM_SPEND)" != "1" ]; then \
+	  echo "this spends real money (Token Factory, Nebius jobs): ask first, then add CONFIRM_SPEND=1"; \
+	  exit 1; \
+	fi
+endef
+
+eval: eval-a eval-b eval-c eval-ablation eval-report ## ReproBench-mini, all sets: costs money, ask first (CONFIRM_SPEND=1)
+
+eval-a: ## Eval set A (canaries) through API_URL_A: costs money (CONFIRM_SPEND=1)
+	$(confirm_spend)
+	$(UV) run python -m eval.run_set_a --api-url "$(API_URL_A)" --confirm-spend
+
+eval-b: ## Eval set B (eval/set_b.yaml) through API_URL: costs money (CONFIRM_SPEND=1)
+	$(confirm_spend)
+	$(UV) run python -m eval.run_set_b --api-url "$(API_URL)" --confirm-spend
+
+eval-c: ## Eval set C (extraction, Batch API): costs money (CONFIRM_SPEND=1)
+	$(confirm_spend)
+	$(UV) run python -m eval.run_set_c --confirm-spend
+
+eval-ablation: ## Routing ablation on set C (routed vs all-Ultra): costs money (CONFIRM_SPEND=1)
+	$(confirm_spend)
+	$(UV) run python -m eval.ablation --confirm-spend
+
+eval-report: ## Markdown tables and /api/stats JSON from eval/results (free, offline)
+	$(UV) run python -m eval.report

@@ -26,7 +26,10 @@ class Pricing:
     def load(cls, path: Path = DEFAULT_PATH) -> "Pricing":
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         prices = {k: ModelPrice.model_validate(v) for k, v in raw["models"].items()}
-        return cls(prices, float(raw.get("batch_discount", 1.0)))
+        discount = float(raw.get("batch_discount", 1.0))
+        if not 0 < discount <= 1:  # 0 would reserve nothing for a batch (invariant 7)
+            raise ValueError(f"batch_discount must be in (0, 1], got {discount}")
+        return cls(prices, discount)
 
     def price(self, model_id: str) -> ModelPrice | None:
         return self._prices.get(model_id.lower())
