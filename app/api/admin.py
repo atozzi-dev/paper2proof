@@ -15,11 +15,11 @@ from pydantic import BaseModel, Field
 from app.api.deps import RUN_ID, client_ip, get_state
 from app.domain.models import RunStatus, VerdictKind
 from app.settings import MIN_SECRET_LEN
+from app.verdict.summary import kinds_summary
 
 DEFAULT_QUOTA = 3
 ADMIN_FAILURES_PER_MINUTE = 10
 INVITE_ID_CHARS = 12  # the listed id: a prefix of the code's sha256, never the code
-SUMMARY_MAX_CHARS = 64  # runs.verdict_summary
 
 
 def require_admin(request: Request, x_admin_token: Annotated[str | None, Header()] = None) -> None:
@@ -91,18 +91,6 @@ async def kill_switch(body: Toggle, request: Request) -> Response:
     return Response(status_code=204)
 
 
-def verdict_summary(kinds: list[VerdictKind]) -> str:
-    """The gallery card's line: the distinct verdict kinds in claim order (the UI shows each
-    with its copy, e.g. "Not reproduced under our conditions")."""
-    summary = ""
-    for kind in dict.fromkeys(kinds):
-        candidate = f"{summary}, {kind.value}" if summary else kind.value
-        if len(candidate) > SUMMARY_MAX_CHARS:
-            break
-        summary = candidate
-    return summary
-
-
 @router.get("/runs")
 async def list_runs(
     request: Request,
@@ -142,7 +130,7 @@ async def curate(run_id: str, body: Listing, request: Request) -> Response:
             raise HTTPException(
                 409, "a NOT_REPRODUCED verdict is listed only after a review: send reviewed: true"
             )
-        summary = verdict_summary(kinds) or None
+        summary = kinds_summary(kinds)
     if not await store.set_listed(run_id, body.listed, verdict_summary=summary):
         raise HTTPException(404, "not found")
     return Response(status_code=204)

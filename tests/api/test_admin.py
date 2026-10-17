@@ -71,9 +71,9 @@ async def test_gallery_curation(client: httpx.AsyncClient, store: Store) -> None
     assert (await _curate(client, run_id, listed=True)).status_code == 204
     run = await store.get_run(run_id)
     assert run is not None and run.listed
-    assert run.verdict_summary == "REPRODUCED"  # the gallery card shows the verdict
+    assert run.verdict_summary == "1 REPRODUCED"  # the same line VERDICT writes
     cards = (await client.get("/api/gallery")).json()
-    assert [(c["id"], c["verdict_summary"]) for c in cards] == [(run_id, "REPRODUCED")]
+    assert [(c["id"], c["verdict_summary"]) for c in cards] == [(run_id, "1 REPRODUCED")]
     missing = await _curate(client, "r_" + "0" * 26, listed=True)
     assert missing.status_code == 404
 
@@ -101,7 +101,7 @@ async def test_a_negative_verdict_is_listed_only_after_review(
     assert (await _curate(client, run_id, listed=True, reviewed=True)).status_code == 204
     run = await store.get_run(run_id)
     assert run is not None and run.listed
-    assert run.verdict_summary == "INCONCLUSIVE, NOT_REPRODUCED"
+    assert run.verdict_summary == "1 NOT_REPRODUCED · 1 INCONCLUSIVE"
 
 
 async def test_unlisting_always_works(client: httpx.AsyncClient, store: Store) -> None:
