@@ -210,6 +210,17 @@ async def test_a_full_scale_failure_is_not_reproduced_in_the_judges_words(
     assert "full scale" in ready.explanation_md
 
 
+async def test_the_run_summary_comes_from_the_deterministic_verdict(
+    store: Store, tmp_path: Path
+) -> None:
+    # the Judge claims REPRODUCED; the summary follows decide(), never the model text
+    raw = _results([0.90, 0.91, 0.90], [0.92, 0.93, 0.92], scale=FULL)
+    verdict, _ = await _verdict(store, tmp_path, raw, case="contradicting", full=True)
+    assert verdict is not None and verdict.kind is VerdictKind.NOT_REPRODUCED
+    run = await store.get_run(RUN)
+    assert run is not None and run.verdict_summary == "1 NOT_REPRODUCED"
+
+
 async def test_the_utility_summarizes_the_log_for_display_only(
     store: Store, tmp_path: Path
 ) -> None:

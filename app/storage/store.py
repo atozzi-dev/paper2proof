@@ -483,6 +483,10 @@ class Store:
                 )
             )
 
+    async def set_verdict_summary(self, run_id: str, summary: str | None) -> None:
+        async with self._session() as s, s.begin():
+            await s.execute(update(Run).where(Run.id == run_id).values(verdict_summary=summary))
+
     async def get_verdict(self, run_id: str, claim_id: str) -> Verdict | None:
         async with self._session() as s:
             row = await s.get(VerdictRow, (run_id, claim_id))
