@@ -86,7 +86,7 @@ Rules, in order:
 1. Name matches PEP 508 name regex; specifier optional; no URLs, no `git+`, no local paths, no `--index-url` (`REJECT_SYNTAX`).
 2. Not in `config/allowlist.yaml: packages.denylist` (`REJECT_DENYLIST`).
 3. Exists on PyPI (JSON API `https://pypi.org/pypi/<name>/json`, cached 24 h) (`REJECT_NOT_FOUND`).
-4. **Typosquat check:** if Levenshtein distance ≤ 2 to any name in the file at `packages.popular_list` (top ~500, `config/pypi_top500.txt`), and not an exact match, reject (`REJECT_TYPOSQUAT`).
+4. **Typosquat check:** if the edit distance (optimal string alignment: Levenshtein where an adjacent swap is one edit) to any name in the file at `packages.popular_list` (top ~500, `config/pypi_top500.txt`) is at most the threshold, and not an exact match, reject (`REJECT_TYPOSQUAT`). The threshold scales with length: 1 when the shorter of the two names has fewer than 5 characters, 2 otherwise (a fixed 2 flags most 2–4 letter names, e.g. `mlx` against `jax`). Packages the official repository declares are exempt (rule 5).
 5. Accept if the package appears in the official repo's requirements (`requirements*.txt`, `pyproject.toml`, `setup.cfg`, `environment.yml`), **or** has ≥ `packages.min_releases` releases **and** its first release is older than `packages.min_age_days` (`REJECT_UNPOPULAR` otherwise).
 6. At most `packages.max_per_request` (`config/allowlist.yaml`) per request and `per_run.package_requests` (`config/budgets.yaml`) requests per run (`REJECT_QUOTA`).
 
@@ -151,7 +151,7 @@ its deadline. The two jobs mean two cold starts (VM, image pull, mounts) in the 
 not measured yet (S-4/S-12): a fetch job is submitted only with at least 5 minutes left before
 the deadline, otherwise the step times out without starting it. `ref: null` means the default
 branch. Every resolved dependency (not only the
-requested names) passes the denylist and typosquat checks, except packages the runner image
+requested names) passes the denylist and the same typosquat check (§4 rule 4), except packages the runner image
 already provides.
 
 The smoke manifest (`/etc/p2p/smoke.json`, CPU smoke jobs): `{schema: "p2p.smoke/v1", run_id,

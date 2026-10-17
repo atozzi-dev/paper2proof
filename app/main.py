@@ -15,14 +15,14 @@ import logging
 import multiprocessing
 import os
 import stat
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, MutableMapping
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import httpx
 from fastapi import FastAPI
@@ -151,14 +151,26 @@ def key_file(content: SecretStr | None, path: Path | None, target: Path) -> Path
     return target
 
 
-KEY_ENV = ("JOB_LAUNCHER_AUTH_KEY", "RUNTIME_AUTH_KEY")
+# Not Settings fields, but the same S3 secret: start.sh exports them for litestream.
+OTHER_SECRET_ENV = frozenset({"LITESTREAM_ACCESS_KEY_ID", "LITESTREAM_SECRET_ACCESS_KEY"})
 
 
-def drop_key_env() -> None:
-    """The authorized keys leave the environment once Settings has read them: child
-    processes (the parsing pool, litestream) never inherit a signing identity."""
-    for name in KEY_ENV:
-        os.environ.pop(name, None)
+def secret_env_names() -> frozenset[str]:
+    """Every variable that carries a secret: each SecretStr setting, and litestream's copy."""
+    fields = Settings.model_fields.items()
+    names = {
+        name.upper() for name, f in fields if SecretStr in (f.annotation, *get_args(f.annotation))
+    }
+    return frozenset(names) | OTHER_SECRET_ENV
+
+
+def drop_secret_env(environ: MutableMapping[str, str] = os.environ) -> None:
+    """Every secret leaves the environment once Settings has read them: child processes (the
+    CPU pool parsing untrusted papers, docker CLI calls in dev) never inherit a key, a token or
+    an S3 secret. Settings names are case-insensitive, so any spelling goes."""
+    secret = secret_env_names()
+    for name in [n for n in environ if n.upper() in secret]:
+        environ.pop(name, None)
 
 
 def kms_signer(key: Path, key_id: str) -> Signer:  # pragma: no cover - needs the Nebius SDK
@@ -581,7 +593,7 @@ def _app() -> FastAPI:  # pragma: no cover - the uvicorn entrypoint (start.sh)
     observability.configure_early()  # JSON and key-shaped redaction even if settings fail
     settings = get_settings()
     observability.configure(settings, known_secrets(settings))
-    drop_key_env()
+    drop_secret_env()
     pool = ProcessPoolExecutor(
         max_workers=2,
         mp_context=multiprocessing.get_context(pool_start_method()),

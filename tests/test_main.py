@@ -404,13 +404,36 @@ async def test_the_signing_key_is_probed_at_startup(tmp_path: Path) -> None:
                     pass
 
 
-def test_authorized_keys_leave_the_environment_and_their_private_part_is_redacted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+SECRET_FIELDS = sorted(
+    name.upper()
+    for name, field in Settings.model_fields.items()
+    if "SecretStr" in str(field.annotation)
+)
+
+
+def test_every_secret_leaves_the_environment_once_settings_are_read(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("JOB_LAUNCHER_AUTH_KEY", "x")
-    monkeypatch.setenv("RUNTIME_AUTH_KEY", "y")
-    main.drop_key_env()
-    assert "JOB_LAUNCHER_AUTH_KEY" not in os.environ and "RUNTIME_AUTH_KEY" not in os.environ
+    """CPU-pool workers parse untrusted papers: they inherit no secret at all, neither the
+    authorized keys nor the API keys, the S3 secrets, the session key or the admin token."""
+    assert {"NEBIUS_API_KEY", "ADMIN_TOKEN", "RUNTIME_S3_SECRET", "JOB_LAUNCHER_AUTH_KEY"} <= set(
+        SECRET_FIELDS
+    )
+    for name in SECRET_FIELDS:
+        monkeypatch.setenv(name, "s" * 40)
+    monkeypatch.setenv("session_key", "s" * 40)  # settings read names case-insensitively
+    monkeypatch.setenv("LITESTREAM_SECRET_ACCESS_KEY", "l" * 40)  # exported by start.sh
+    monkeypatch.setenv("LITESTREAM_ACCESS_KEY_ID", "l" * 20)
+    monkeypatch.setenv("S3_ENDPOINT", "https://storage.example")
+    settings = Settings()
+    main.drop_secret_env()
+    left = {name.upper() for name in os.environ}
+    assert not left & {*SECRET_FIELDS, "LITESTREAM_SECRET_ACCESS_KEY", "LITESTREAM_ACCESS_KEY_ID"}
+    assert os.environ["S3_ENDPOINT"] == "https://storage.example"  # settings stay
+    assert settings.admin_token.get_secret_value() == "s" * 40  # already read
+
+
+def test_authorized_keys_private_part_is_redacted(tmp_path: Path) -> None:
     private = "-----BEGIN " + "PRIVATE KEY-----\nAbC\n-----END"  # no key-like literal
     key = json.dumps({"id": "k", "private-key": private})
     settings = _settings(tmp_path, runtime_auth_key=SecretStr(key))

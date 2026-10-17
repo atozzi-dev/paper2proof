@@ -25,6 +25,7 @@ _VERSION = r"[A-Za-z0-9.*+!_-]{1,40}"
 _OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
 _SPEC = re.compile(rf"^ *{_OP} *{_VERSION}(?: *, *{_OP} *{_VERSION})* *$")  # plain spaces only
 TYPOSQUAT_DISTANCE = 2
+SHORT_NAME = 5  # below this many characters a single edit is already a different name
 
 
 class Reason(StrEnum):
@@ -100,15 +101,27 @@ def load_policy_config(config_dir: Path) -> PolicyConfig:
 
 
 def levenshtein(a: str, b: str, cap: int = 10) -> int:
+    """Optimal string alignment distance: Levenshtein where swapping two adjacent letters is one
+    edit (tqmd is one edit from tqdm, not two)."""
     if abs(len(a) - len(b)) > cap:
         return cap + 1
+    before: list[int] = []
     previous = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         current = [i]
         for j, cb in enumerate(b, 1):
-            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
-        previous = current
+            cost = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cost = min(cost, before[j - 2] + 1)
+            current.append(cost)
+        before, previous = previous, current
     return previous[-1]
+
+
+def typosquat_threshold(name: str, popular: str) -> int:
+    """Edits within which `name` counts as a typosquat of `popular`: 1 when the shorter name has
+    fewer than 5 characters (a fixed 2 flags most 2-4 letter names, e.g. mlx against jax)."""
+    return 1 if min(len(name), len(popular)) < SHORT_NAME else TYPOSQUAT_DISTANCE
 
 
 class PackageInfo(BaseModel):
@@ -196,7 +209,7 @@ class PackagePolicy:
             close = sorted(
                 p
                 for p in cfg.popular
-                if levenshtein(name, p, TYPOSQUAT_DISTANCE) <= TYPOSQUAT_DISTANCE
+                if levenshtein(name, p, TYPOSQUAT_DISTANCE) <= typosquat_threshold(name, p)
             )
             if close:
                 return decision(Reason.REJECT_TYPOSQUAT, f"looks like {close[0]}")

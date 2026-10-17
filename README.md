@@ -6,6 +6,29 @@ Built for the Nebius × NVIDIA Global AI Hackathon (*Coding and Agentic Engineer
 
 > Work in progress. Demo link, judge instructions, architecture and evaluation results will be added before submission.
 
+## For paper authors
+
+If one of your papers was run through Paper2Proof, here is what that means and what you can do.
+
+- **A verdict is about our run, not about your paper.** The verdict comes from a deterministic
+  rule over the numbers our experiment measured (a language model only writes the explanation).
+  The experiment often runs at a smaller scale, with fewer seeds, other hardware or code we
+  wrote ourselves. That is why a negative result always reads **"Not reproduced under our
+  conditions"**, with those conditions listed next to it, and every Proof Bundle has a
+  Limitations section written by code.
+- **Runs are private by default.** Only the person who started a run can see it. Nothing
+  reaches the public gallery automatically: we list runs one by one, and a negative verdict on
+  a real paper only after a manual review.
+- **We do not redistribute your paper.** Bundles hold its hash and metadata only.
+- **Report an error:** open an issue at
+  <https://github.com/atozzi-dev/paper2proof/issues> with the arXiv ID and the run link, and
+  tell us what we got wrong (the claim, the metric, the dataset, the setup). We fix our side
+  and say so on the issue.
+- **Removal:** ask for a run to be taken down in an issue. We remove it from the public gallery
+  right away, without asking why, and on request also delete its Proof Bundle and stored
+  artifacts. The procedure is in
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#takedown).
+
 ## Development
 
 Requirements: [uv](https://docs.astral.sh/uv/), Python 3.12, Node.js 24, GNU make, Docker.

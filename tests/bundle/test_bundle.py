@@ -277,6 +277,18 @@ def test_secret_scan_and_redaction() -> None:
     assert redact(b"plain", known) == (b"plain", False)
 
 
+# A Nebius IAM access token: "v1." and a long base64url protobuf, split for the secret hooks.
+NEBIUS_IAM = b"v1." + b"CmMKHHNlcnZpY2VhY2NvdW50LWUwMGFiY2RlZmdoaWprbG1ub3BxcnN0EhRhdXRo" + b".c2ln"
+
+
+def test_nebius_iam_tokens_are_found_and_redacted() -> None:
+    assert find_secrets(b"NEBIUS_IAM_TOKEN=" + NEBIUS_IAM) is True
+    cleaned, changed = redact(b"password " + NEBIUS_IAM + b" end")
+    assert changed and cleaned == b"password [REDACTED] end"
+    for harmless in (b"torch v1.13.1", b"GET /api/v1.json", b"v1.nebius-access-token-value"):
+        assert find_secrets(harmless) is False, harmless
+
+
 def test_secret_values_come_from_the_settings() -> None:
     settings = Settings(nebius_api_key="n" * 40, tavily_api_key="tvly-" + "t" * 20)
     values = secret_values(settings)

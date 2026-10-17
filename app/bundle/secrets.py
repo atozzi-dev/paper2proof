@@ -21,6 +21,9 @@ PATTERNS = re.compile(
     rb"|xox[abposr]-[A-Za-z0-9-]{10,}"
     rb"|AIza[0-9A-Za-z_-]{35}"
     rb"|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    # Nebius IAM access tokens (`nebius iam get-access-token`, the SDK, the registry password):
+    # "v1." and a long base64url payload, optionally more dot-separated parts
+    rb"|(?<![A-Za-z0-9_.-])v1\.[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)*"
 )
 
 

@@ -794,3 +794,36 @@ def test_the_deadline_handler_does_not_follow_symlinks(
     provision.deadline_expired(staging)
     assert victim.read_bytes() == b"keep"
     assert "deadline" in json.loads((staging / "provision_error.json").read_text())["error"]
+
+
+def _transitive(*names: str) -> None:
+    data = manifest(
+        packages=["einops"],
+        policy={"denylist": ["pip"], "popular": ["jax", "tqdm", "requests", "six", "py"]},
+    )
+    lock = "".join(f"{name}==1.0 \\\n    --hash=sha256:aaa\n" for name in names)
+    provision._check_transitive(provision.validate_manifest(data), lock)
+
+
+@pytest.mark.parametrize("name", ["mlx", "pot", "tfds", "einops", "requests"])
+def test_short_real_dependencies_are_not_typosquats(name: str) -> None:
+    """The control plane's rule (execution-contracts 4): one edit below 5 characters."""
+    _transitive(name)
+
+
+@pytest.mark.parametrize("name", ["jaxx", "tqmd", "reqeusts", "requessts"])
+def test_typosquatted_dependencies_are_refused(name: str) -> None:
+    with pytest.raises(provision.ProvisionError, match="typosquat"):
+        _transitive(name)
+
+
+def test_the_provisioner_and_the_policy_agree_on_typosquats() -> None:
+    """Two copies of one rule (the image has no app package): same distance, same threshold."""
+    from app.execution import package_policy as policy
+
+    popular = sorted(policy.load_policy_config(ROOT / "config").popular)
+    names = [*popular[:200], "mlx", "tqmd", "reqeusts", "jaxx", "pot", "ab", "ba"]
+    for a in names[::7]:
+        for b in names:
+            assert provision.levenshtein(a, b, 2) == policy.levenshtein(a, b, 2), (a, b)
+            assert provision.typosquat_threshold(a, b) == policy.typosquat_threshold(a, b)

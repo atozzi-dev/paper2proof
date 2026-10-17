@@ -51,6 +51,13 @@ def test_a_fake_api_key_is_removed_from_message_and_args(stream: io.StringIO) ->
     ]
 
 
+def test_a_nebius_iam_token_is_removed_from_logs(stream: io.StringIO) -> None:
+    token = "v1." + "CmMKHHNlcnZpY2VhY2NvdW50LWUwMGFiY2RlZmdoaWprbG1ub3BxcnN0" + ".c2ln"
+    logging.getLogger("app.anything").info("nebius call failed with %s", token)
+    assert token not in stream.getvalue()
+    assert _lines(stream)[-1]["message"] == "nebius call failed with [REDACTED]"
+
+
 def test_paper_text_and_prompt_fields_are_redacted(stream: io.StringIO) -> None:
     logging.getLogger("app.x").info(
         "step done",
