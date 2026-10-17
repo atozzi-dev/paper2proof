@@ -405,27 +405,16 @@ class TokenFactoryClient:
         tool_choice: ToolChoice | None,
         max_output: int,
         response_format: dict[str, object] | None,
-    ) -> "_Request":
-        spec = self.config.roles[role]
-        payload = [m.model_dump(exclude_none=True) for m in messages]
-        extra_body: dict[str, object] = {}
-        toggle = self.config.provider.reasoning_toggle
-        if spec.reasoning != "default":
-            on = spec.reasoning == "on"
-            if toggle == "chat_template_kwargs":
-                extra_body["chat_template_kwargs"] = {"enable_thinking": on}
-            elif toggle == "system_flag":
-                payload.insert(0, {"role": "system", "content": "/think" if on else "/no_think"})
-        return _Request(
-            model=self.resolved[role].model_id,
-            messages=payload,
-            max_tokens=max_output,
-            temperature=spec.temperature,
-            timeout=spec.timeout_s or self.config.provider.timeout_s,
-            tools=[{"type": "function", "function": t.model_dump()} for t in tools or []],
+    ) -> "ChatRequest":
+        return chat_request(
+            self.config,
+            self.resolved,
+            role,
+            messages,
+            tools=tools,
             tool_choice=tool_choice,
+            max_output=max_output,
             response_format=response_format,
-            extra_body=extra_body,
         )
 
     async def _reserve(
@@ -541,7 +530,7 @@ class TokenFactoryClient:
             latency_ms=latency_ms,
         )
 
-    async def _call_with_retries(self, req: "_Request") -> LegacyAPIResponse[ChatCompletion]:
+    async def _call_with_retries(self, req: "ChatRequest") -> LegacyAPIResponse[ChatCompletion]:
         retrying = AsyncRetrying(
             stop=stop_after_attempt(self.config.provider.max_retries),
             wait=_wait,
@@ -586,7 +575,7 @@ class TokenFactoryClient:
 
 
 @dataclass(frozen=True)
-class _Request:
+class ChatRequest:
     model: str
     messages: list[dict[str, object]]
     max_tokens: int
@@ -596,6 +585,58 @@ class _Request:
     tool_choice: ToolChoice | None
     response_format: dict[str, object] | None
     extra_body: dict[str, object]
+
+    def body(self) -> dict[str, object]:
+        """The JSON body of POST /chat/completions (the Batch API sends it as is)."""
+        body: dict[str, object] = {
+            "model": self.model,
+            "messages": self.messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+        }
+        if self.tools:
+            body["tools"] = self.tools
+        if self.tool_choice is not None:
+            body["tool_choice"] = self.tool_choice
+        if self.response_format is not None:
+            body["response_format"] = self.response_format
+        return {**body, **self.extra_body}
+
+
+def chat_request(
+    config: ModelsConfig,
+    resolved: Mapping[Role, ResolvedModel],
+    role: Role,
+    messages: list[Message],
+    *,
+    tools: list[ToolDef] | None = None,
+    tool_choice: ToolChoice | None = None,
+    max_output: int | None = None,
+    response_format: dict[str, object] | None = None,
+) -> ChatRequest:
+    """The request for `role`: its routed model, settings and reasoning switch. Shared by the
+    live client and the Batch API (app/models/batch.py), so both send the same thing."""
+    spec = config.roles[role]
+    payload = [m.model_dump(exclude_none=True) for m in messages]
+    extra_body: dict[str, object] = {}
+    toggle = config.provider.reasoning_toggle
+    if spec.reasoning != "default":
+        on = spec.reasoning == "on"
+        if toggle == "chat_template_kwargs":
+            extra_body["chat_template_kwargs"] = {"enable_thinking": on}
+        elif toggle == "system_flag":
+            payload.insert(0, {"role": "system", "content": "/think" if on else "/no_think"})
+    return ChatRequest(
+        model=resolved[role].model_id,
+        messages=payload,
+        max_tokens=max_output or spec.max_output,
+        temperature=spec.temperature,
+        timeout=spec.timeout_s or config.provider.timeout_s,
+        tools=[{"type": "function", "function": t.model_dump()} for t in tools or []],
+        tool_choice=tool_choice,
+        response_format=response_format,
+        extra_body=extra_body,
+    )
 
 
 def _prompt_version(prompt: str | None) -> str | None:
