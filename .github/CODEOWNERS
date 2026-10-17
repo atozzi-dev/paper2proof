@@ -8,4 +8,7 @@
 
 /config/canary_allowlist.yaml @atozzi-dev
 /eval/canaries/ @atozzi-dev
+# The code that enforces the allowlist.
+/app/execution/local_trusted.py @atozzi-dev
+/app/execution/dev_docker.py @atozzi-dev
 /.github/CODEOWNERS @atozzi-dev

@@ -19,7 +19,14 @@ def _rules() -> dict[str, list[str]]:
 
 def test_the_canary_allowlist_and_papers_need_a_code_owner_review() -> None:
     rules = _rules()
-    for pattern in ("/config/canary_allowlist.yaml", "/eval/canaries/", "/.github/CODEOWNERS"):
+    guarded = (
+        "/config/canary_allowlist.yaml",
+        "/eval/canaries/",
+        "/app/execution/local_trusted.py",
+        "/app/execution/dev_docker.py",
+        "/.github/CODEOWNERS",
+    )
+    for pattern in guarded:
         assert rules.get(pattern), f"{pattern} has no code owner"
         assert all(owner.startswith("@") for owner in rules[pattern])
 
