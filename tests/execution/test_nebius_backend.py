@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from nebius.aio.service_error import RequestError, RequestStatusExtended
 from nebius.api.nebius.ai.v1 import (
     CancelJobRequest,
     CreateJobRequest,
+    DeleteJobRequest,
     GetJobByNameRequest,
     GetJobRequest,
     Job,
@@ -47,7 +49,14 @@ from nebius.api.nebius.storage.v1 import (
 from pydantic import SecretStr
 
 from app.execution import nebius_backend
-from app.execution.backend import JobHandle, JobKind, JobSpec, JobState, VolumeMount
+from app.execution.backend import (
+    CapacityError,
+    JobHandle,
+    JobKind,
+    JobSpec,
+    JobState,
+    VolumeMount,
+)
 from app.execution.naming import bucket_name, job_name
 from app.execution.nebius_backend import (
     GatewayUnavailable,
@@ -84,9 +93,15 @@ class FakeOp:
     ok: bool = True
     finished: bool = True
     waited: int = 0
+    code: StatusCode | None = None  # why a failed operation failed
 
     def successful(self) -> bool:
         return self.ok
+
+    def status(self) -> Any:
+        if not self.finished:
+            return None
+        return SimpleNamespace(code=StatusCode.OK if self.ok else self.code or StatusCode.UNKNOWN)
 
     def done(self) -> bool:
         return self.finished
@@ -103,6 +118,9 @@ class FakeJobs:
     requests: list[Any] = field(default_factory=list)
     create_error: StatusCode | None = None
     create_op: FakeOp | None = None
+    create_leaves_job: bool = True  # [S-4] whether a refused creation leaves a job object
+    delete_error: StatusCode | None = None
+    delete_keeps_job: bool = False  # the delete operation succeeds, the job is still listed
     page_size: int = 2
 
     def add(self, name: str, state: Any, created: datetime = T0) -> Job:
@@ -130,9 +148,26 @@ class FakeJobs:
     async def create(self, request: CreateJobRequest) -> FakeOp:
         self.requests.append(request)
         if self.create_error is not None:
+            if self.create_error is not StatusCode.ALREADY_EXISTS and self.create_leaves_job:
+                self.add(request.metadata.name, State.PROVISIONING)  # refused, yet left behind
             raise rpc_error(self.create_error)
+        if self.create_op is not None and not self.create_op.ok and not self.create_leaves_job:
+            return self.create_op
         job = self.add(request.metadata.name, State.PROVISIONING)
         return self.create_op or FakeOp(job.metadata.id)
+
+    async def delete(self, request: DeleteJobRequest) -> FakeOp:
+        self.requests.append(request)
+        if self.delete_error is not None:
+            raise rpc_error(self.delete_error)
+        if request.id not in self.jobs:
+            raise rpc_error(StatusCode.NOT_FOUND)
+        if not self.delete_keeps_job:
+            del self.jobs[request.id]
+        return FakeOp(request.id)
+
+    def named(self, name: str) -> list[Job]:
+        return [job for job in self.jobs.values() if job.metadata.name == name]
 
     async def cancel(self, request: CancelJobRequest) -> FakeOp:
         self.requests.append(request)
@@ -406,6 +441,73 @@ async def test_submit_race_already_exists_returns_the_existing_job(world: World)
 
 async def test_submit_failed_operation_raises(world: World) -> None:
     world.jobs.create_op = FakeOp("aijob-x", ok=False)
+    with pytest.raises(JobBackendError, match=spec().name):
+        await world.backend.submit(spec())
+
+
+def _deleted(world: World) -> list[str]:
+    return [r.id for r in world.jobs.requests if isinstance(r, DeleteJobRequest)]
+
+
+async def test_submit_without_capacity_raises_capacity_error(world: World) -> None:
+    world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED  # GPU quota, "not enough resources"
+    world.jobs.create_leaves_job = False
+    with pytest.raises(CapacityError, match=spec().platform):
+        await world.backend.submit(spec())
+    assert _deleted(world) == []  # nothing was left behind, nothing to clean up
+
+
+async def test_a_create_operation_failing_for_capacity_raises_capacity_error(world: World) -> None:
+    world.jobs.create_op = FakeOp("", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
+    world.jobs.create_leaves_job = False
+    with pytest.raises(CapacityError, match=spec().name):
+        await world.backend.submit(spec())
+    assert _deleted(world) == []
+
+
+async def test_a_job_left_by_a_refused_create_operation_is_deleted_first(world: World) -> None:
+    """[S-4] the failed operation may still name a job: it is removed before CapacityError, so
+    the retry (or the fallback platform) creates its own job instead of re-attaching to it."""
+    world.jobs.create_op = FakeOp("aijob-1", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
+    with pytest.raises(CapacityError, match=spec().name):
+        await world.backend.submit(spec())
+    assert _deleted(world) == ["aijob-1"]
+    assert world.jobs.named(spec().name) == []
+    world.jobs.create_op = None
+    fallback = spec(platform="gpu-l40s-d", preset="1gpu-16vcpu-96gb")
+    handle = await world.backend.submit(fallback)
+    assert world.jobs.jobs[handle.nebius_id].metadata.name == fallback.name
+    created = [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+    assert created[-1].spec.platform == "gpu-l40s-d"
+
+
+async def test_a_job_found_by_name_after_a_refused_create_is_deleted(world: World) -> None:
+    world.jobs.create_op = FakeOp("", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
+    with pytest.raises(CapacityError):
+        await world.backend.submit(spec())
+    assert _deleted(world) == ["aijob-1"]
+    assert world.jobs.named(spec().name) == []
+
+
+async def test_a_job_left_by_a_refused_create_call_is_deleted(world: World) -> None:
+    world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED
+    with pytest.raises(CapacityError):
+        await world.backend.submit(spec())
+    assert world.jobs.named(spec().name) == []
+
+
+async def test_a_refused_job_that_can_not_be_deleted_is_a_backend_error(world: World) -> None:
+    """Not a capacity verdict: the job may still run, unrecorded, so the step fails instead."""
+    world.jobs.create_op = FakeOp("aijob-1", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
+    world.jobs.delete_error = StatusCode.INTERNAL
+    with pytest.raises(JobBackendError, match=spec().name) as raised:
+        await world.backend.submit(spec())
+    assert not isinstance(raised.value, CapacityError)
+
+
+async def test_a_refused_job_still_there_after_deletion_is_a_backend_error(world: World) -> None:
+    world.jobs.create_op = FakeOp("aijob-1", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
+    world.jobs.delete_keeps_job = True
     with pytest.raises(JobBackendError, match=spec().name):
         await world.backend.submit(spec())
 

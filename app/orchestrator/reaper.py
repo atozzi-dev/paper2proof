@@ -22,6 +22,8 @@ from app.models.pricing import CloudPrices
 from app.observability import metrics
 from app.orchestrator.budget import Budget, SpendKind
 from app.orchestrator.cost_estimate import (
+    EXEC_FALLBACK_PLATFORM,
+    EXEC_FALLBACK_PRESET,
     EXEC_PLATFORM,
     EXEC_PRESET,
     PROVISION_PLATFORM,
@@ -44,11 +46,15 @@ _RUN_BUCKET = re.compile(r"^p2p-run-([0-9a-z]{26})$")
 
 
 def reaper_rates(cloud: CloudPrices) -> dict[str, float]:
-    """On-demand USD/hour per job kind: an upper bound for time nobody measured."""
+    """On-demand USD/hour per job kind: an upper bound for time nobody measured, used when the
+    job's platform is not recorded (an exec job may be on either GPU platform)."""
     return {
         JobKind.PROVISION.value: cloud.hourly(PROVISION_PLATFORM, PROVISION_PRESET),
         JobKind.FETCH.value: cloud.hourly(PROVISION_PLATFORM, PROVISION_PRESET),
-        JobKind.EXEC.value: cloud.hourly(EXEC_PLATFORM, EXEC_PRESET),
+        JobKind.EXEC.value: max(
+            cloud.hourly(EXEC_PLATFORM, EXEC_PRESET),
+            cloud.hourly(EXEC_FALLBACK_PLATFORM, EXEC_FALLBACK_PRESET),
+        ),
         JobKind.SMOKE.value: cloud.hourly(SMOKE_PLATFORM, SMOKE_PRESET),
     }
 
@@ -70,6 +76,7 @@ class Reaper:
         budget: Budget,
         *,
         rates: Mapping[str, float],
+        cloud: CloudPrices | None = None,
         clock: Callable[[], datetime] = _utcnow,
         interval_s: float = INTERVAL_S,
     ) -> None:
@@ -78,6 +85,7 @@ class Reaper:
         self._bundles = bundles
         self._budget = budget
         self._rates = dict(rates)
+        self._cloud = cloud
         self._clock = clock
         self._interval_s = interval_s
         self.actions_total: Counter[str] = Counter()  # exported as p2p_reaper_actions_total
@@ -199,15 +207,23 @@ class Reaper:
             state = JobState.CANCELLED  # vanished: the platform stopped it by its timeout
         await self._charge(record, state, actions)
 
+    def _rate(self, record: JobRecord) -> float:
+        """On-demand USD/hour of the platform and preset the job was recorded with, else (not
+        recorded, or not priced) the rate of its kind."""
+        if self._cloud is not None and record.platform and record.preset:
+            if record.platform in self._cloud.platforms:
+                return self._cloud.hourly(record.platform, record.preset)
+            log.warning("reaper: no price for platform %s", record.platform)
+        return self._rates.get(record.kind, max(self._rates.values(), default=0.0))
+
     async def _charge(self, record: JobRecord, state: JobState, actions: Counter[str]) -> None:
-        """From first submission to now, capped at the platform timeout, at the on-demand rate.
-        The part a step already watched may count twice: never zero (the budget errs high).
-        Job row and ledger entries are written in one transaction, once."""
+        """From first submission to now, capped at the platform timeout, at the on-demand rate
+        of where the job runs. The part a step already watched may count twice: never zero (the
+        budget errs high). Job row and ledger entries are written in one transaction, once."""
         started = _aware(record.created_at)
         now = self._clock()
         elapsed_s = max(0.0, (min(now, started + PLATFORM_TIMEOUT) - started).total_seconds())
-        rate = self._rates.get(record.kind, max(self._rates.values(), default=0.0))
-        cost = rate * elapsed_s / 3600
+        cost = self._rate(record) * elapsed_s / 3600
         gpu = record.kind == JobKind.EXEC.value
         day = now.astimezone(UTC).date()
         ledger: list[tuple[str | None, date, str, float]] = [

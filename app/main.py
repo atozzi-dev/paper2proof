@@ -536,7 +536,7 @@ def build_runtime(
     return Runtime(
         settings, store, budget, limits, built, lm, steps, orchestrator, state, http, cpu_pool,
         late,
-        Reaper(store, built.jobs, built.bundles, budget, rates=reaper_rates(cloud))
+        Reaper(store, built.jobs, built.bundles, budget, rates=reaper_rates(cloud), cloud=cloud)
         if built.reap
         else None,
         public_key,

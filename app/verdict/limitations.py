@@ -14,6 +14,7 @@ _EXIT = {
     "experiment_error": "at least one seed failed (experiment error)",
     "budget_timeout": "the run hit its time budget before every seed finished",
     "contract_error": "the results broke the execution contract",
+    "capacity": "no GPU capacity was available, so the experiment did not run",
 }
 
 

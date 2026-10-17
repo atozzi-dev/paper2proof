@@ -5,6 +5,9 @@ resumed step re-attaches to its job with the very manifest the job received.
 A preemptible job that ends without its results (or with partial results written on SIGTERM
 before its budget ran out) is retried once on demand when the GPU budget left allows it;
 otherwise VERDICT reports what there is (INCONCLUSIVE/BUDGET when no seed finished).
+A job the platform refuses for lack of GPU capacity is tried again on gpu-l40s-a after 2
+minutes, up to 3 times, then once on gpu-l40s-d; with no capacity on either the attempt ends
+without a job (INCONCLUSIVE/CAPACITY), see execution-contracts §8.
 `live.log` is read from the bucket while the job runs and shown as `job.log` events: it is
 written next to untrusted code, so it is only ever displayed, truncated.
 """
@@ -15,8 +18,9 @@ import logging
 import math
 import unicodedata
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -24,17 +28,22 @@ from app.domain.contracts import ArchiveDigests, ExecManifest, ManifestPaths, Sc
 from app.domain.errors import P2PError
 from app.domain.events import MAX_LINES, EventType
 from app.domain.models import ClaimType, ErrorCode, Plan, RunStatus, Scale, StepName
-from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
+from app.execution.backend import CapacityError, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
 from app.execution.run_storage import RunStorage
 from app.models.pricing import CloudPrices
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
-from app.orchestrator.cost_estimate import EXEC_PLATFORM, EXEC_PRESET
+from app.orchestrator.cost_estimate import (
+    EXEC_FALLBACK_PLATFORM,
+    EXEC_FALLBACK_PRESET,
+    EXEC_PLATFORM,
+    EXEC_PRESET,
+)
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of, selected_claim
-from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
+from app.orchestrator.steps.jobs import JobOutcome, run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
 from app.verdict.results import MAX_RESULTS_BYTES
 
@@ -48,6 +57,11 @@ MAX_LIVE_LOG_BYTES = 512 * 1024
 LINE_CHARS = 500
 LIVE_LINES = 200  # what the runner mirrors into live.log
 EXEC_DISK_GIB = 100
+PRIMARY = (EXEC_PLATFORM, EXEC_PRESET)
+FALLBACK = (EXEC_FALLBACK_PLATFORM, EXEC_FALLBACK_PRESET)  # execution-contracts §8
+CAPACITY_RETRIES = 3  # on the primary platform, before the fallback (architecture §15)
+CAPACITY_WAIT_S = 120
+NO_CAPACITY = "NO_GPU_CAPACITY"
 _REASONS = frozenset({"completed", "experiment_error", "budget_timeout", "contract_error"})
 
 
@@ -126,6 +140,15 @@ class _LiveLog:
                 )
         except Exception:
             log.debug("live.log not shown", extra={"run_id": self._ctx.run_id}, exc_info=True)
+
+
+@dataclass(frozen=True)
+class _Placed:
+    outcome: JobOutcome
+    spec: JobSpec
+
+
+_Unplaced = Literal["no_capacity", "cancelled"]
 
 
 class ExecutingStep:
@@ -239,14 +262,16 @@ class ExecutingStep:
         await self._put(key, manifest.model_dump(mode="json", by_alias=True))
         return manifest
 
-    def _spec(self, manifest: ExecManifest, bucket: str, preemptible: bool) -> JobSpec:
+    def _spec(
+        self, manifest: ExecManifest, bucket: str, preemptible: bool, where: tuple[str, str]
+    ) -> JobSpec:
         body = manifest.model_dump_json(by_alias=True).encode()
         return JobSpec(
             name=job_name(JobKind.EXEC, manifest.run_id, manifest.attempt),
             kind=JobKind.EXEC,
             image_digest_ref=self._config.runner_image,
-            platform=EXEC_PLATFORM,
-            preset=EXEC_PRESET,
+            platform=where[0],
+            preset=where[1],
             disk_gib=EXEC_DISK_GIB,
             subnet_id=self._config.subnet_exec,
             volumes=[
@@ -273,11 +298,14 @@ class ExecutingStep:
         self,
         ctx: RunContext,
         manifest: ExecManifest,
-        state: JobState,
+        state: JobState | None,
         *,
+        where: tuple[str, str] | None,
         has_results: bool,
         exit_reason: str | None = None,
     ) -> StepResult:
+        """`state` and `where` None: no job was ever created for the attempt (no GPU capacity).
+        `where` is the platform and preset the attempt's job ran on (the run's conditions)."""
         key = f"runs/{ctx.run_id}/execution_{manifest.attempt}.json"
         await self._put(
             key,
@@ -285,10 +313,89 @@ class ExecutingStep:
                 "manifest": manifest.model_dump(mode="json", by_alias=True),
                 "results_key": f"results/{manifest.attempt}/results.json" if has_results else None,
                 "exit_reason": None if has_results else exit_reason,
-                "job_state": state.value,
+                "job_state": None if state is None else state.value,
+                "platform": None if where is None else where[0],
+                "preset": None if where is None else where[1],
             },
         )
         return StepResult(next=StepName.ANALYZING, output_ref=key)
+
+    def _placement_key(self, ctx: RunContext, attempt: int) -> str:
+        return f"runs/{ctx.run_id}/exec_platform_{attempt}.json"
+
+    async def _moved(self, ctx: RunContext, attempt: int) -> bool:
+        """Whether the attempt moved to the fallback platform (kept before that submission, so
+        a resumed step finds its job and pays the right price)."""
+        try:
+            await self._json(self._placement_key(ctx, attempt))
+        except FileNotFoundError:
+            return False
+        return True
+
+    async def _placements(self, ctx: RunContext, attempt: int) -> list[tuple[str, str]]:
+        """Where the attempt's job may be created, in order: the primary platform and its
+        retries, then the fallback; only the fallback once the step moved there."""
+        if await self._moved(ctx, attempt):
+            return [FALLBACK]
+        return [PRIMARY] * (1 + CAPACITY_RETRIES) + [FALLBACK]
+
+    async def _ran_on(self, ctx: RunContext, attempt: int) -> tuple[str, str]:
+        """Where an attempt that had a job ran: the fallback once it moved there, else the
+        primary platform (a job is only ever created on one of the two)."""
+        return FALLBACK if await self._moved(ctx, attempt) else PRIMARY
+
+    async def _no_capacity(self, ctx: RunContext, message: str) -> None:
+        await ctx.emit(EventType.WARNING, {"code": NO_CAPACITY, "message": message})
+
+    async def _place(
+        self,
+        ctx: RunContext,
+        manifest: ExecManifest,
+        bucket: str,
+        preemptible: bool,
+        tail: Callable[[], Awaitable[None]],
+    ) -> _Placed | _Unplaced:
+        """Submit and watch the attempt's job where there is GPU capacity (architecture §15).
+        Every try uses the same job name: a refused creation leaves no job behind."""
+        places = await self._placements(ctx, manifest.attempt)
+        for i, where in enumerate(places):
+            if i > 0:
+                if where == places[i - 1]:
+                    await self._no_capacity(
+                        ctx, f"no GPU capacity on {where[0]}: retrying in 2 minutes"
+                    )
+                    await self._sleep(CAPACITY_WAIT_S)
+                else:
+                    await self._no_capacity(
+                        ctx, f"no GPU capacity on {places[i - 1][0]}: trying {where[0]}"
+                    )
+                    await self._put(
+                        self._placement_key(ctx, manifest.attempt),
+                        {"platform": where[0], "preset": where[1]},
+                    )
+                run = await ctx.store.get_run(ctx.run_id)
+                if run is None or run.status is not RunStatus.RUNNING:
+                    return "cancelled"
+            spec = self._spec(manifest, bucket, preemptible, where)
+            await self._clear_stale(ctx, spec.name, manifest.attempt)
+            try:
+                outcome = await run_job(
+                    ctx,
+                    spec,
+                    usd_per_hour=self._cloud.hourly(where[0], where[1], preemptible=preemptible),
+                    poll_s=self._poll_s,
+                    clock=self._clock,
+                    sleep=self._sleep,
+                    gpu=True,
+                    on_poll=tail,
+                )
+            except CapacityError:
+                log.info("no GPU capacity", extra={"run_id": ctx.run_id, "platform": where[0]})
+                continue
+            return _Placed(outcome, spec)
+        tried = " or ".join(dict.fromkeys(p for p, _ in places))
+        await self._no_capacity(ctx, f"no GPU capacity on {tried}: the GPU job did not run")
+        return "no_capacity"
 
     async def _warn(self, ctx: RunContext, message: str) -> None:
         await ctx.emit(EventType.WARNING, {"code": "JOB_PREEMPTED", "message": message})
@@ -315,23 +422,11 @@ class ExecutingStep:
             preemptible = self._config.preemptible_gpu and attempt == 1
             if previous is not None:
                 await self._warn(ctx, "the GPU job was preempted: retrying once on demand")
-            spec = self._spec(manifest, await ctx.jobs.ensure_run_bucket(ctx.run_id), preemptible)
+            bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
             await ctx.jobs.ensure_gateway_up()
-            await self._clear_stale(ctx, spec.name, attempt)
             tail = _LiveLog(ctx, self._storage, f"results/{attempt}/live.log")
             try:
-                outcome = await run_job(
-                    ctx,
-                    spec,
-                    usd_per_hour=self._cloud.hourly(
-                        EXEC_PLATFORM, EXEC_PRESET, preemptible=preemptible
-                    ),
-                    poll_s=self._poll_s,
-                    clock=self._clock,
-                    sleep=self._sleep,
-                    gpu=True,
-                    on_poll=tail,
-                )
+                placed = await self._place(ctx, manifest, bucket, preemptible, tail)
             except (BudgetExceeded, KillSwitchActive) as err:
                 if previous is None:
                     raise
@@ -341,6 +436,16 @@ class ExecutingStep:
                     kept, state, _ = previous  # it may still write: never read attempt 1
                     return await self._no_retry(ctx, kept, state, None)
                 return await self._no_retry(ctx, *previous)
+            if placed == "cancelled":
+                return StepResult(next=RunStatus.CANCELLED)
+            if placed == "no_capacity":
+                if previous is None:
+                    return await self._done(
+                        ctx, manifest, None, where=None, has_results=False, exit_reason="capacity"
+                    )
+                await self._warn(ctx, "the on-demand retry was not started (no GPU capacity)")
+                return await self._no_retry(ctx, *previous)
+            outcome, spec = placed.outcome, placed.spec
             await tail()
             if outcome.run_cancelled:
                 return StepResult(next=RunStatus.CANCELLED)
@@ -349,8 +454,11 @@ class ExecutingStep:
                     ErrorCode.TIMEOUT,
                     f"the GPU job did not finish within {spec.watchdog_s} s",
                 )
+            ran_on = (spec.platform, spec.preset)
             if outcome.state is JobState.SUCCEEDED:
-                return await self._done(ctx, manifest, outcome.state, has_results=True)
+                return await self._done(
+                    ctx, manifest, outcome.state, where=ran_on, has_results=True
+                )
             reason, wall = await self._exit_info(ctx, attempt)
             preempted = reason is None or (
                 reason == "budget_timeout"
@@ -361,6 +469,7 @@ class ExecutingStep:
                     ctx,
                     manifest,
                     outcome.state,
+                    where=ran_on,
                     has_results=reason is not None,
                     exit_reason="experiment_error",
                 )
@@ -400,7 +509,13 @@ class ExecutingStep:
     async def _no_retry(
         self, ctx: RunContext, manifest: ExecManifest, state: JobState, reason: str | None
     ) -> StepResult:
-        """Partial results of the preempted job if it wrote any, else none (INCONCLUSIVE/BUDGET)."""
+        """Partial results of the preempted job if it wrote any, else none (INCONCLUSIVE/BUDGET).
+        `manifest` is the preempted attempt's: its record names where that job ran."""
         return await self._done(
-            ctx, manifest, state, has_results=reason is not None, exit_reason="budget_timeout"
+            ctx,
+            manifest,
+            state,
+            where=await self._ran_on(ctx, manifest.attempt),
+            has_results=reason is not None,
+            exit_reason="budget_timeout",
         )

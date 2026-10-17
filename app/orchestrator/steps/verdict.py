@@ -44,11 +44,16 @@ LABELS = {
     VerdictKind.NOT_REPRODUCED: NOT_REPRODUCED_LABEL,
     VerdictKind.INCONCLUSIVE: "Inconclusive",
 }
-_EXIT_REASONS = {"budget_timeout": ReasonCode.BUDGET, "experiment_error": ReasonCode.RUNTIME_ERROR}
+_EXIT_REASONS = {
+    "budget_timeout": ReasonCode.BUDGET,
+    "experiment_error": ReasonCode.RUNTIME_ERROR,
+    "capacity": ReasonCode.CAPACITY,
+}
 
 
 def adjust_reason(verdict: Verdict, exit_reason: str) -> Verdict:
-    """Too few seeds because the run timed out or crashed says more than INSUFFICIENT_SEEDS."""
+    """Too few seeds because the run timed out, crashed or found no GPU says more than
+    INSUFFICIENT_SEEDS."""
     if verdict.reason is ReasonCode.INSUFFICIENT_SEEDS and exit_reason in _EXIT_REASONS:
         return verdict.model_copy(update={"reason": _EXIT_REASONS[exit_reason]})
     return verdict

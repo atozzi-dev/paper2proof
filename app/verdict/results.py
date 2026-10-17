@@ -21,7 +21,10 @@ from app.domain.models import ClaimType, Measurements, Scale
 MAX_RESULTS_BYTES = 256 * 1024
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "results.schema.json"
 _GPU = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()/+-]{0,63}")  # shown as hardware: plain text only
-ExitReason = Literal["completed", "experiment_error", "budget_timeout", "contract_error"]
+# `capacity` never comes from results.json: EXECUTING found no GPU to run the job on.
+ExitReason = Literal[
+    "completed", "experiment_error", "budget_timeout", "contract_error", "capacity"
+]
 
 
 class Analysis(BaseModel):
@@ -115,8 +118,9 @@ def analyze_results(raw: bytes, manifest: ExecManifest) -> Analysis:
 
 
 def no_results(manifest: ExecManifest, exit_reason: ExitReason) -> Analysis:
-    """The exec job ended without a results.json (preempted with no retry, or it died before
-    writing one): no seed counts, and the ending explains why (VERDICT adjusts the reason)."""
+    """The exec job ended without a results.json (preempted with no retry, it died before
+    writing one, or it never ran for lack of GPU capacity): no seed counts, and the ending
+    explains why (VERDICT adjusts the reason)."""
     relative = manifest.claim_type is ClaimType.RELATIVE
     measurements = Measurements(
         scale=Scale.FULL if manifest.scale.full else Scale.REDUCED,
