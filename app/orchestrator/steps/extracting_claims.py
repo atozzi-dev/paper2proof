@@ -20,6 +20,7 @@ from app.orchestrator.steps.common import output_of
 from app.storage.artifacts import ArtifactStore
 
 MAX_PAPER_CHARS = 300_000
+READER_PROMPT = "reader_extract_claims"
 MAX_CLAIMS = 15
 SELECTED = 3
 _TABLE_REF = re.compile(r"\btab(?:le|\.)?\s*(\d+)", re.IGNORECASE)
@@ -132,6 +133,35 @@ def _score(claim: Claim) -> int:
     )
 
 
+def reader_messages(paper: IngestedPaper) -> list[Message]:
+    """The Reader request for a paper: the prompt plus the paper wrapped as untrusted data.
+    Shared with the extraction eval (eval/run_set_c.py), so the eval measures this prompt."""
+    prompt = load_prompt(READER_PROMPT)
+    text = "\n\n".join(f"## {s.title}\n{s.text}" for s in paper.sections)
+    document = wrap_untrusted(text, source=f"arxiv:{paper.arxiv_id}", max_chars=MAX_PAPER_CHARS)
+    return [
+        Message(role="system", content=f"{prompt.body}\n{UNTRUSTED_NOTICE}"),
+        Message(role="user", content=document),
+    ]
+
+
+TableRows = dict[int, list[tuple[str, list[float | None]]]]
+
+
+def latex_table_rows(paper: IngestedPaper) -> TableRows:
+    return {t.number: _latex_rows(t) for t in paper.tables}
+
+
+def fill_from_tables(claim: Claim, table_rows: TableRows) -> Claim:
+    """A claim without a number takes it from the table its source_ref names, if it can."""
+    number = _table_number(claim.source_ref)
+    if claim.reported_value is None and number in table_rows:
+        value = _row_value(table_rows[number], claim)
+        if value is not None:
+            return claim.model_copy(update={"reported_value": value})
+    return claim
+
+
 def select(claims: list[Claim], hint: str | None) -> set[str]:
     hinted = []
     if hint:
@@ -150,20 +180,13 @@ class ExtractingClaimsStep:
         self._artifacts = artifacts
 
     async def _read(self, ctx: RunContext, paper: IngestedPaper) -> list[ReaderClaim]:
-        prompt = load_prompt("reader_extract_claims")
-        text = "\n\n".join(f"## {s.title}\n{s.text}" for s in paper.sections)
-        document = wrap_untrusted(text, source=f"arxiv:{paper.arxiv_id}", max_chars=MAX_PAPER_CHARS)
-        messages = [
-            Message(role="system", content=f"{prompt.body}\n{UNTRUSTED_NOTICE}"),
-            Message(role="user", content=document),
-        ]
         output = await self._models.structured(
             Role.READER,
-            messages,
+            reader_messages(paper),
             ReaderOutput,
             run_id=ctx.run_id,
             step=ctx.step.value,
-            prompt=prompt.name,
+            prompt=READER_PROMPT,
         )
         return output.claims
 
@@ -219,7 +242,7 @@ class ExtractingClaimsStep:
         if not drafts:
             raise P2PError(ErrorCode.NO_CLAIMS, "no testable quantitative claims found")
 
-        table_rows = {t.number: _latex_rows(t) for t in paper.tables}
+        table_rows = latex_table_rows(paper)
         if paper.page_images and any(d.reported_value is None for d in drafts):
             table_rows.update(await self._vision_rows(ctx, paper))
 
@@ -232,12 +255,7 @@ class ExtractingClaimsStep:
                 metric=metric,
                 higher_is_better=higher,
             )
-            number = _table_number(claim.source_ref)
-            if claim.reported_value is None and number in table_rows:
-                value = _row_value(table_rows[number], claim)
-                if value is not None:
-                    claim = claim.model_copy(update={"reported_value": value})
-            claims.append(claim)
+            claims.append(fill_from_tables(claim, table_rows))
 
         run = await ctx.store.get_run(ctx.run_id)
         chosen = select(claims, run.claim_hint if run else None)
