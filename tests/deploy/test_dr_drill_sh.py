@@ -19,6 +19,7 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash")
 IMAGE = "cr.eu-north1.nebius.cloud/reg/p2p-api@sha256:" + "a" * 64
 RUN_ID = "r_01jb7z00000000000000000042"
 SID = "sid-of-the-drill"  # the session cookie's value: never on argv, never printed
+DRAIN_BODY = '{"error": "deploy in progress"}'  # tests/api/test_runs.py pins the app's side
 OLD_TS = "2000-01-01T00:00:00Z"  # written by the old instance, before the stop
 NEW_TS = "2099-01-01T00:00:00.123456"  # written by the new instance (naive = UTC, as SQLite)
 
@@ -41,7 +42,11 @@ exit 0
 # run's routes answer 404 (curl exit 22) unless the session arrives, either from a -b jar whose
 # host matches the URL's (as real curl does) or from a -H @file "Cookie:" header. Once the
 # endpoint has been recreated, the run is $STATUS_AFTER and events.json?after=1 is $AFTER_PAGE;
-# $RESTORE_LOST makes the run 404, $CANCEL_FAILS fails the cancel.
+# $RESTORE_LOST makes the run (and its cancel) 404, $CANCEL_FAILS fails the cancel. The run
+# creation needs the session (401 otherwise) and answers $CREATE_STATUS (default 202) with
+# $CREATE_BODY (default the run), honouring -o, -w '%{http_code}' and -f as real curl does;
+# $CREATE_EXIT fails it like a timeout (28), $CREATE_NO_FILE writes no -o file, $CREATE_KILL
+# sends TERM to the drill ($DRILL_PID) during the request.
 CURL = r"""#!/bin/sh
 echo "curl $*" >> "$CALLS"
 cat > /dev/null
@@ -77,7 +82,9 @@ case "$*" in
   *"/events.json?after=1"*)
     if [ "$after" = 1 ]; then printf '%s' "$AFTER_PAGE"; else printf '{"events": []}'; fi ;;
   *"/events.json"*) printf '{"events": []}' ;;
-  *"/cancel"*) [ -n "${CANCEL_FAILS:-}" ] && exit 22 ;;
+  *"/cancel"*)
+    [ "$after" = 1 ] && [ -n "${RESTORE_LOST:-}" ] && exit 22
+    [ -n "${CANCEL_FAILS:-}" ] && exit 22 ;;
   *"/api/runs/r_"*)
     if [ "$after" = 1 ]; then
       [ -n "${RESTORE_LOST:-}" ] && exit 22
@@ -85,7 +92,32 @@ case "$*" in
     else
       printf '{"status": "RUNNING"}'
     fi ;;
-  *"/api/runs"*) printf '{"run_id": "%s", "events_url": "x"}' "$RUN_ID" ;;
+  *"/api/runs"*)
+    out="" fmt="" fail=0 prev=""
+    for a in "$@"; do
+      case "$prev" in -o) out="$a" ;; -w) fmt="$a" ;; esac
+      case "$a" in --fail | -[!-]*f*) fail=1 ;; esac
+      prev="$a"
+    done
+    if [ -n "${CREATE_KILL:-}" ]; then  # the operator interrupts the drill mid-request
+      kill -TERM "$(cat "$DRILL_PID")"; command -p sleep 1
+    fi
+    if [ -n "${CREATE_EXIT:-}" ]; then
+      [ -n "$fmt" ] && printf '000'
+      echo "curl: ($CREATE_EXIT) Operation timed out" >&2; exit "$CREATE_EXIT"
+    fi
+    code="${CREATE_STATUS:-202}"
+    body="${CREATE_BODY-$(printf '{"run_id": "%s", "events_url": "x"}' "$RUN_ID")}"
+    if [ "$cookie" != 1 ]; then code=401 body='{"error": "a valid session is required"}'; fi
+    if [ "$fail" = 1 ] && [ "$code" -ge 400 ]; then
+      [ -z "$fmt" ] || printf '%s' "$code"
+      echo "curl: (22) The requested URL returned error: $code" >&2; exit 22
+    fi
+    if [ -n "${CREATE_NO_FILE:-}" ]; then :
+    elif [ -n "$out" ]; then printf '%s' "$body" > "$out"
+    else printf '%s' "$body"
+    fi
+    [ -z "$fmt" ] || printf '%s' "$code" ;;
 esac
 exit 0
 """
@@ -115,7 +147,7 @@ def _endpoint(state: str, url: str, image: str = IMAGE) -> str:
 
 
 def _run(
-    tmp_path: Path, *args: str, image: str = IMAGE, **env: str
+    tmp_path: Path, *args: str, image: str = IMAGE, background: bool = False, **env: str
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -160,8 +192,13 @@ def _run(
         "P2P_DRAIN_WAIT_S": "0",
     }
     assert BASH is not None
+    command = [BASH, str(SCRIPT), *args, str(env_file)]
+    if background:  # started by a shell that notes its pid in $DRILL_PID, so stubs can signal it
+        base["DRILL_PID"] = str(tmp_path / "drill.pid")
+        wrapper = '"$BASH" "$0" "$@" & echo $! > "$DRILL_PID"; wait $!'
+        command = [BASH, "-c", wrapper, *command[1:]]
     done = subprocess.run(  # noqa: S603 - the repo's own script with a test environment
-        [BASH, str(SCRIPT), *args, str(env_file)],
+        command,
         env={**base, **env},
         capture_output=True,
         stdin=subprocess.DEVNULL,
@@ -249,9 +286,149 @@ def test_the_real_drill_ignores_inherited_dry_run_and_skip_drain(tmp_path: Path)
 def test_a_lost_database_fails_the_drill_and_cancels_nothing_it_cannot_see(
     tmp_path: Path,
 ) -> None:
-    done, _ = _run(tmp_path, "2410.01234", RESTORE_LOST="1")
+    done, calls = _run(tmp_path, "2410.01234", RESTORE_LOST="1")
     assert done.returncode != 0
-    assert "restore" in done.stderr and "FAILED" in done.stderr
+    assert f"restore: run {RUN_ID} is gone after the recreate" in done.stderr
+    assert len(_cancels(calls)) == 1  # tried, answered 404: the run is not there
+    assert f"cancelled the drill's run {RUN_ID}" not in done.stderr
+    assert "the cancel failed: the drill's run" in done.stderr
+    match = re.search(r"-H @(\S+cookie\.hdr) (https://\S+/cancel)", done.stderr)
+    assert match, done.stderr
+    assert _bash_cat(match.group(1)).strip() == f"Cookie: __Host-p2p_session={SID}"
+
+
+def _endpoint_stub(tmp_path: Path) -> Path:
+    """A deploy/endpoint.sh that replaces nothing and never says when it stopped the old
+    instance; it records whether it saw the drill's invite code."""
+    stub = tmp_path / "endpoint_stub.sh"
+    stub.write_text(
+        '#!/bin/sh\necho "endpoint.sh invite=${P2P_DRILL_INVITE:-unset}" >> "$CALLS"\n'
+        'echo "replaced p2p-api"\nexit 0\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    return stub
+
+
+def test_an_endpoint_script_that_never_says_when_it_stopped_fails_closed(
+    tmp_path: Path,
+) -> None:
+    done, calls = _run(tmp_path, "2410.01234", P2P_ENDPOINT_SH=str(_endpoint_stub(tmp_path)))
+    assert done.returncode != 0
+    assert "did not say when it stopped the old instance" in done.stderr
+    assert "resume     ok" not in done.stdout
+    assert len(_cancels(calls)) == 1
+    assert f"cancelled the drill's run {RUN_ID}" in done.stderr
+    assert list((tmp_path / "tmp").iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", [(), ("--dry-run",)], ids=["real", "dry-run"])
+def test_the_endpoint_script_never_sees_the_invite_code(
+    tmp_path: Path, mode: tuple[str, ...]
+) -> None:
+    _, calls = _run(tmp_path, *mode, "2410.01234", P2P_ENDPOINT_SH=str(_endpoint_stub(tmp_path)))
+    assert "endpoint.sh invite=unset" in calls
+
+
+def _kept_session(done: subprocess.CompletedProcess[str]) -> str:
+    match = re.search(r"-H @(\S+cookie\.hdr) (https://\S+/cancel)", done.stderr)
+    assert match, done.stderr
+    return _bash_cat(match.group(1)).strip()
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"CREATE_EXIT": "28"},  # --max-time: the app may have created the run
+        {"CREATE_STATUS": "500"},
+        {"CREATE_STATUS": "502", "CREATE_BODY": "<html>bad gateway</html>"},
+        {"CREATE_STATUS": "503", "CREATE_BODY": '{"error": "upstream unavailable"}'},
+        {"CREATE_STATUS": "503", "CREATE_BODY": ""},
+        {"CREATE_STATUS": "408"},  # a proxy's 4xx, maybe after it forwarded the request
+        {"CREATE_BODY": "not json"},
+        {"CREATE_BODY": '{"run_id": "r_short"}'},
+        {"CREATE_NO_FILE": "1"},
+    ],
+    ids=[
+        "timeout",
+        "500",
+        "502",
+        "503-not-the-drain",
+        "503-empty",
+        "408",
+        "unparsable",
+        "bad-run-id",
+        "no-body",
+    ],
+)
+def test_an_ambiguous_run_creation_keeps_the_session(tmp_path: Path, env: dict[str, str]) -> None:
+    """Only the drill's session could cancel a run created behind an error: keep it."""
+    done, calls = _run(tmp_path, "2410.01234", **env)
+    assert done.returncode != 0
+    assert "a run may have been created" in done.stderr
+    assert "app.admin_cli --url https://p2p-api.endpoints.example runs" in done.stderr
+    assert "server logs" in done.stderr
+    assert "kill switch" not in done.stderr and "quota" not in done.stderr
+    assert "draining" not in done.stderr
+    assert "/api/runs/RUN_ID_HERE/cancel && rm -rf" in done.stderr
+    assert _kept_session(done) == f"Cookie: __Host-p2p_session={SID}"
+    assert SID not in done.stderr + done.stdout
+    assert _cancels(calls) == []  # no run id to cancel
+    assert not any(" stop " in c or " delete " in c for c in calls)
+
+
+def test_a_timeout_reports_curls_exit_code(tmp_path: Path) -> None:
+    done, _ = _run(tmp_path, "2410.01234", CREATE_EXIT="28")
+    assert "no run id from the run creation (HTTP 000, curl exit 28)" in done.stderr
+
+
+def test_an_interrupt_during_the_run_creation_keeps_the_session(tmp_path: Path) -> None:
+    done, calls = _run(tmp_path, "2410.01234", background=True, CREATE_KILL="1")
+    assert done.returncode == 143, done.stderr
+    assert "interrupted during the run creation: a run may have been created" in done.stderr
+    assert _kept_session(done) == f"Cookie: __Host-p2p_session={SID}"
+    assert not any(" stop " in c or " delete " in c for c in calls)
+
+
+def test_events_that_are_not_numbers_never_reach_bash_arithmetic(tmp_path: Path) -> None:
+    odd = {**STARTED_2, "id": 'a[$(echo "arithmetic ran" >> "$CALLS")]'}
+    done, calls = _run(tmp_path, "2410.01234", BEFORE_PAGE=_page(STATUS_1, odd))
+    assert done.returncode != 0
+    assert f"could not read the events of run {RUN_ID}" in done.stderr
+    assert "arithmetic ran" not in calls
+    assert len(_cancels(calls)) == 1
+    assert not any(" stop " in c or " delete " in c for c in calls)
+
+
+@pytest.mark.parametrize(
+    ("env", "hint", "not_hints"),
+    [
+        ({"CREATE_STATUS": "402"}, "kill switch is on", ("quota", "draining")),
+        ({"CREATE_STATUS": "429"}, "invite's daily quota", ("kill switch", "draining")),
+        (
+            {"CREATE_STATUS": "503", "CREATE_BODY": DRAIN_BODY},
+            "draining",
+            ("kill switch", "quota"),
+        ),
+        ({"CREATE_STATUS": "400"}, "refused the arXiv ID", ("kill switch", "quota", "draining")),
+        ({"CREATE_STATUS": "401"}, "refused the drill's session", ("kill switch", "quota")),
+        ({"CREATE_STATUS": "413"}, "refused the request body", ("kill switch", "quota")),
+    ],
+    ids=["402", "429", "503-drain", "400", "401", "413"],
+)
+def test_a_refused_run_creation_says_why_and_removes_the_session(
+    tmp_path: Path, env: dict[str, str], hint: str, not_hints: tuple[str, ...]
+) -> None:
+    done, calls = _run(tmp_path, "2410.01234", **env)
+    assert done.returncode != 0
+    assert "the drill's run was not created" in done.stderr
+    assert f"HTTP {env['CREATE_STATUS']}" in done.stderr
+    assert hint in done.stderr
+    assert not any(h in done.stderr for h in not_hints)
+    assert "may have been created" not in done.stderr
+    assert _cancels(calls) == []
+    assert list((tmp_path / "tmp").iterdir()) == []
+    assert not any(" stop " in c or " delete " in c for c in calls)
 
 
 def test_lost_events_fail_the_restore_check(tmp_path: Path) -> None:
@@ -287,6 +464,21 @@ def test_no_resume_of_the_running_step_fails_the_drill_and_cancels_the_run(
     assert len(_cancels(calls)) == 1
     assert f"cancelled the drill's run {RUN_ID}" in done.stderr
     assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_a_server_clock_ahead_of_the_operator_never_passes_the_resume_check(
+    tmp_path: Path,
+) -> None:
+    """The noted step.started itself is never its own resume, however late its timestamp
+    looks to the operator's clock: a skew can fail the drill, never pass it."""
+    skewed = _event(2, "step.started", NEW_TS, step="EXECUTING", attempt=1)
+    done, calls = _run(
+        tmp_path, "2410.01234", BEFORE_PAGE=_page(STATUS_1, skewed), AFTER_PAGE=_page(skewed)
+    )
+    assert done.returncode != 0
+    assert "resume: no step.started of EXECUTING attempt 1" in done.stderr
+    assert "resume     ok" not in done.stdout
+    assert len(_cancels(calls)) == 1
 
 
 def test_a_run_that_finished_before_the_stop_does_not_count_as_resumed(tmp_path: Path) -> None:

@@ -241,8 +241,8 @@ and about 5 minutes of downtime: run it when nobody is using the service, never 
    lasts well beyond the replacement (about 5 minutes) but is cheap; the drill cancels it once
    it has resumed (`P2P_DRILL_KEEP_RUN=1` keeps it). Optionally set `P2P_EXPECT_COMMIT` to the
    commit you expect in production: the drill stops before any change if `/readyz` reports
-   another one. `DRY_RUN`, `P2P_SKIP_DRAIN` and `P2P_DRAIN_WAIT_S` from your shell are never
-   passed on to `deploy/endpoint.sh`. The drill:
+   another one. `P2P_DRILL_INVITE`, `DRY_RUN`, `P2P_SKIP_DRAIN` and `P2P_DRAIN_WAIT_S` from your
+   shell are never passed on to `deploy/endpoint.sh`. The drill:
    1. reads the endpoint, its image digest and URL, and the commit `/readyz` reports;
    2. logs in with `P2P_DRILL_INVITE` (on stdin) and starts a run, then waits until the run is
       RUNNING with a `step.started`, and notes its last event (id and type) and the step and
@@ -255,7 +255,12 @@ and about 5 minutes of downtime: run it when nobody is using the service, never 
    5. checks the resume: a `step.started` written after the old instance was told to stop, for
       the step and attempt that were RUNNING when it stopped (the `step.started` right before
       it in event order). A run that finished before the stop fails the drill ("resume not
-      exercised"), as does a run that ends, or starts another step or attempt, without it;
+      exercised"), as does a run that ends, or starts another step or attempt, without it.
+      The reference is the stop, not `/readyz`: the app resumes runs in its lifespan, before
+      `/readyz` answers, so the resume can come before the drill sees the new instance ready.
+      The stop time comes from your clock and the event times from the server's, so keep your
+      clock NTP-synced. Only an event after the noted one counts, so a skew can fail the drill
+      but never pass it falsely;
    6. cancels the run and prints a summary with the **RTO** (from the start of the replacement
       to `/readyz`) and the **recovery** time (until the drill saw the step started again).
 3. Paste the summary into the H-08 issue as `Notes (YYYY-MM-DD): ...`.
@@ -275,6 +280,16 @@ curl -fsS --proto =https -X POST -H @/tmp/tmp.XXXX/cookie.hdr https://<endpoint>
 Run it once the endpoint answers again (with its current URL if it moved); until then the run
 keeps spending budget. A failed final cancel makes the drill exit non-zero after the summary.
 The header file is a live session: delete its directory when done.
+
+The run creation itself can be ambiguous. Only the app's refusals mean that no run was
+created: 400, 401, 403, 402 (kill switch), 413, 429 (invite quota) or the drain's 503 (body
+`{"error": "deploy in progress"}`), and the drill says which. A timeout, any other status (a
+proxy's 408 or 5xx included), an answer without a run id, or an interrupt while the request
+is in flight may hide a created run: the drill keeps the header file the same way and prints
+the cancel command with `RUN_ID_HERE` in place of the id. Find the id with
+`uv run python -m app.admin_cli --url <endpoint> runs --limit 5` (newest first, the drill's
+arXiv ID; the drill prints the command with the URL) or in the server logs. The UI cannot show
+it: the run is private to the drill's session.
 
 If the drill fails, the summary is not printed and the message says which check failed. A
 failure during the replacement leaves `deploy/endpoint.sh`'s own recovery in place (un-drain

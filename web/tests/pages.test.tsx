@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
-import { verdictSummaryText } from '../src/run/verdictCopy'
+import { verdictSummaryText, warningTitle } from '../src/run/verdictCopy'
 import type { RunEvent, RunView } from '../src/types/api'
 import { ev, fullRun, runConditions } from './fixtures'
 
@@ -145,6 +145,25 @@ describe('Run page', () => {
     expect(within(section).getByRole('link', { name: 'Download the Proof Bundle' })).toBeInTheDocument()
   })
 
+  it('says in plain words that no GPU was available', async () => {
+    const events = [
+      ...fullRun(),
+      ev('warning', { code: 'NO_GPU_CAPACITY', message: 'no GPU capacity on gpu-h100-sxm: retrying in 2 minutes' }),
+    ]
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'RUNNING' }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(events), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const notices = (await screen.findByRole('heading', { name: 'Notices' })).closest('section') as HTMLElement
+    await waitFor(() =>
+      expect(notices).toHaveTextContent('No GPU available: no GPU capacity on gpu-h100-sxm: retrying in 2 minutes'),
+    )
+    expect(notices).not.toHaveTextContent('NO_GPU_CAPACITY')
+  })
+
   it('lets the owner approve a pending plan', async () => {
     const approvals: string[] = []
     mockFetch((url, init) => {
@@ -183,6 +202,17 @@ describe('Run page', () => {
     window.location.hash = `#/runs/${RUN_ID}`
     render(<App />)
     expect(await screen.findByRole('heading', { name: 'Run not found' })).toBeInTheDocument()
+  })
+})
+
+describe('warningTitle', () => {
+  it('names the capacity warning in plain words', () => {
+    expect(warningTitle('NO_GPU_CAPACITY')).toBe('No GPU available')
+  })
+
+  it('shows a code it does not know as it came', () => {
+    expect(warningTitle('SOMETHING_NEW')).toBe('SOMETHING_NEW')
+    expect(warningTitle('toString')).toBe('toString')
   })
 })
 

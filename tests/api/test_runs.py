@@ -74,6 +74,8 @@ async def test_draining_is_503_with_retry_after(client: httpx.AsyncClient, state
     response = await _create(client)
     assert response.status_code == 503
     assert response.headers["retry-after"].isdigit()
+    # deploy/dr_drill.sh tells the drain from other 503s by this body (DRAIN_BODY in its tests)
+    assert response.json() == {"error": "deploy in progress"}
 
 
 async def test_invite_quota_is_429(client: httpx.AsyncClient, store: Store) -> None:

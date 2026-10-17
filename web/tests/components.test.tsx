@@ -160,6 +160,24 @@ describe('VerdictCard without the full context', () => {
     expect(list).not.toHaveTextContent('None recorded')
   })
 
+  it('says that no GPU was available when the verdict is INCONCLUSIVE for capacity', () => {
+    const noGpu: Verdict = {
+      kind: 'INCONCLUSIVE',
+      reason: 'CAPACITY',
+      n_seeds: 0,
+      mean: null,
+      std: null,
+      ci_low: null,
+      ci_high: null,
+      tolerance: {},
+    }
+    render(<VerdictCard claim={claimAbs} verdict={noGpu} explanationMd="" plan={null} warnings={[]} jobs={{}} />)
+    const card = screen.getByRole('article')
+    expect(within(card).getByRole('heading', { name: 'Inconclusive' })).toBeInTheDocument()
+    expect(card).toHaveTextContent('No GPU was available on any platform we tried, so the claim could not be tested.')
+    expect(card).not.toHaveTextContent('Not reproduced')
+  })
+
   it('still shows a verdict whose claim is not loaded', () => {
     render(<VerdictCard claimId="c9" claim={null} verdict={notReproduced} explanationMd="" {...conditions} />)
     expect(screen.getByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()

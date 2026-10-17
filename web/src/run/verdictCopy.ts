@@ -19,7 +19,7 @@ export const VERDICT_HEADLINE: Record<VerdictKind, string> = {
 
 export const REASON_TEXT: Record<ReasonCode, string> = {
   BUDGET: 'The run reached its budget before enough measurements were collected.',
-  CAPACITY: 'No GPU capacity was available in time.',
+  CAPACITY: 'No GPU was available on any platform we tried, so the claim could not be tested.',
   MISSING_DATA: 'Data the experiment needs was not available.',
   RUNTIME_ERROR: 'The experiment failed while running.',
   UNDERSPECIFIED_CLAIM: 'The claim does not state a value we can test.',
@@ -28,6 +28,24 @@ export const REASON_TEXT: Record<ReasonCode, string> = {
   REDUCED_SCALE_ABSOLUTE:
     'An absolute number cannot be checked at reduced scale; the measured values are shown for reference.',
   REDUCED_SCALE_CONTRADICTS: 'The claimed trend was not observed at reduced scale.',
+}
+
+/** Plain-words titles of the warning codes (docs/specs/api-and-events.md, `warning` event). */
+const WARNING_TITLE: Readonly<Record<string, string>> = {
+  DISCOVERY_DEGRADED: 'Search partly unavailable',
+  ABSOLUTE_AT_REDUCED_SCALE: 'Absolute value at reduced scale',
+  PACKAGE_REJECTED: 'Package rejected',
+  PACKAGES_REQUESTED: 'Packages requested',
+  REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
+  JOB_PREEMPTED: 'GPU job preempted',
+  NO_GPU_CAPACITY: 'No GPU available',
+  BUNDLE_UNSIGNED: 'Proof Bundle not signed',
+  BUNDLE_FAILED: 'No Proof Bundle',
+}
+
+/** The title of a warning; a code the UI does not know yet is shown as it came. */
+export function warningTitle(code: string): string {
+  return Object.hasOwn(WARNING_TITLE, code) ? WARNING_TITLE[code] : code
 }
 
 /** Warnings that change the experiment, listed as deviations from the paper's setup. */

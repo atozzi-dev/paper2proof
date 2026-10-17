@@ -9,6 +9,7 @@ import { PlanCard } from '../components/PlanCard'
 import { StatusTimeline } from '../components/StatusTimeline'
 import { VerdictCard } from '../components/VerdictCard'
 import { useRunStream } from '../run/useRunStream'
+import { warningTitle } from '../run/verdictCopy'
 import { href } from '../router'
 import { TERMINAL_STATUSES, type RunView } from '../types/api'
 
@@ -97,7 +98,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
             ))}
             {state.warnings.map((w, i) => (
               <li key={`w${i}`} className="warning">
-                <strong>{w.code}</strong>: {w.message}
+                <strong>{warningTitle(w.code)}</strong>: {w.message}
               </li>
             ))}
             {state.egressBlocked.map((b, i) => (
