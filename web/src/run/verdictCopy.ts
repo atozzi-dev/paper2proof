@@ -1,5 +1,14 @@
 // UI copy rules for verdicts (docs/specs/api-and-events.md "Copy rules", invariant 10).
-import type { EventPayloads, PlanReady, ReasonCode, Verdict, VerdictKind, Warning } from '../types/api'
+import type {
+  EventPayloads,
+  PlanReady,
+  ReasonCode,
+  RunConditions,
+  Scale,
+  Verdict,
+  VerdictKind,
+  Warning,
+} from '../types/api'
 
 export const VERDICT_HEADLINE: Record<VerdictKind, string> = {
   REPRODUCED: 'Reproduced',
@@ -39,49 +48,80 @@ export interface ConditionInputs {
   plan: PlanReady | null
   warnings: readonly Warning[]
   jobs: Readonly<Record<string, EventPayloads['job.status']>>
+  /** Recorded by the server once the results are analyzed (RunView.conditions); preferred. */
+  conditions?: RunConditions | null
+}
+
+const NO_SCALE_FACTOR = 'Reduced scale (smaller than the paper; the scale factor is not reported for this run)'
+
+function scaleText(scale: Scale, factor: RunConditions['scale'] | null): string {
+  if (scale === 'FULL') return 'Full scale, as in the paper'
+  if (!factor) return NO_SCALE_FACTOR
+  const parts: string[] = []
+  if (factor.fraction_of_data !== null && factor.fraction_of_data !== undefined) {
+    parts.push(`${fmtNum(factor.fraction_of_data * 100)}% of the data`)
+  }
+  if (factor.epochs !== null && factor.epochs !== undefined) {
+    parts.push(
+      factor.paper_epochs !== null && factor.paper_epochs !== undefined
+        ? `${factor.epochs} of the paper's ${factor.paper_epochs} epochs`
+        : `${factor.epochs} epochs`,
+    )
+  }
+  return parts.length ? `Reduced scale: ${parts.join(', ')}` : NO_SCALE_FACTOR
+}
+
+function hardwareText(
+  recorded: RunConditions['hardware'] | null,
+  jobs: Readonly<Record<string, EventPayloads['job.status']>>,
+): string {
+  const parts: string[] = []
+  if (recorded?.platform) {
+    const preset = recorded.preset ? `, preset ${recorded.preset}` : ''
+    const mode = recorded.preemptible === null ? '' : recorded.preemptible ? ' (preemptible)' : ' (on demand)'
+    parts.push(`Nebius AI Cloud ${recorded.platform}${preset}${mode}`)
+  }
+  if (recorded?.gpu) parts.push(`GPU reported by the job: ${recorded.gpu}`)
+  if (parts.length) return parts.join(' · ')
+  const exec = Object.values(jobs).filter((j) => j.kind === 'exec')
+  return exec.length ? `Nebius AI Cloud GPU job ${exec.map((j) => j.name).join(', ')}` : 'Not reported for this run'
 }
 
 /** The conditions a verdict was reached under: scale, seeds, hardware, code, deviations. */
-export function verdictConditions(verdict: Verdict, { plan, warnings, jobs }: ConditionInputs): Condition[] {
+export function verdictConditions(
+  verdict: Verdict,
+  { plan, warnings, jobs, conditions = null }: ConditionInputs,
+): Condition[] {
   const p = plan?.plan
+  const c = conditions
   const out: Condition[] = []
-  if (!p) out.push({ label: 'Scale', value: 'not reported yet' })
-  else {
-    out.push({
-      label: 'Scale',
-      value:
-        p.scale === 'FULL'
-          ? 'Full scale, as in the paper'
-          : 'Reduced scale (smaller than the paper; the scale factor is not reported for this run)',
-    })
-  }
-  const seeds = p ? ` (seeds ${p.seeds.join(', ')})` : ''
+  const scale = c?.scale.scale ?? p?.scale
+  out.push({ label: 'Scale', value: scale ? scaleText(scale, c?.scale ?? null) : 'not reported yet' })
+  const used = c?.seeds_used ?? p?.seeds
+  const planned = c?.seeds_planned ?? p?.seeds
+  let seeds = ''
+  if (used && planned && used.join() !== planned.join()) {
+    seeds = ` (seeds ${used.join(', ')} of the planned ${planned.join(', ')})`
+  } else if (used) seeds = ` (seeds ${used.join(', ')})`
   out.push({ label: 'Seeds', value: `${verdict.n_seeds} seeds${seeds}` })
-  const exec = Object.values(jobs).filter((j) => j.kind === 'exec')
-  out.push({
-    label: 'Hardware',
-    value: exec.length
-      ? `Nebius AI Cloud GPU job ${exec.map((j) => j.name).join(', ')}`
-      : 'Not reported for this run',
-  })
-  if (p) {
+  out.push({ label: 'Hardware', value: hardwareText(c?.hardware ?? null, jobs) })
+  const mode = c?.code ?? p?.mode
+  if (mode) {
     out.push({
       label: 'Code',
-      value:
-        p.mode === 'REPO_FIRST'
-          ? "Adapted from the authors' repository"
-          : 'Written from the paper (no official code used)',
+      value: mode === 'REPO_FIRST' ? "Adapted from the authors' repository" : 'Written from the paper (no official code used)',
     })
   }
+  const known = c !== null || p !== undefined
   const deviations = [
-    ...(p?.notes ?? []),
+    ...(c?.deviations ?? p?.notes ?? []),
     ...warnings.filter((w) => DEVIATION_WARNINGS.has(w.code)).map((w) => w.message),
   ]
   const unique = [...new Set(deviations)]
   out.push({
     label: 'Deviations from the paper',
     // Without the plan we can't know: never claim there were none.
-    value: unique.length ? unique.join(' · ') : p ? 'None recorded' : 'not available yet',
+    value: unique.length ? unique.join(' · ') : known ? 'None recorded' : 'not available yet',
   })
   return out
 }

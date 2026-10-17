@@ -6,7 +6,7 @@ import { LogPanel } from '../src/components/LogPanel'
 import { SafeMarkdown } from '../src/components/SafeMarkdown'
 import { VerdictCard } from '../src/components/VerdictCard'
 import type { Verdict } from '../src/types/api'
-import { claimAbs, claimRel, notReproduced, plan, reproduced } from './fixtures'
+import { claimAbs, claimRel, notReproduced, plan, reproduced, runConditions } from './fixtures'
 
 const conditions = {
   plan: { plan, est_cost_usd: 1, needs_approval: false },
@@ -34,6 +34,45 @@ describe('VerdictCard', () => {
     render(<VerdictCard claim={claimRel} verdict={v} explanationMd="" {...reduced} />)
     expect(screen.getByRole('heading', { name: 'Reproduced at reduced scale' })).toBeInTheDocument()
     expect(screen.getByRole('list', { name: 'Conditions' })).toHaveTextContent('Reduced scale')
+  })
+
+  it('lists the recorded conditions: scale factor, seeds used and the hardware', () => {
+    render(
+      <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={runConditions} />,
+    )
+    const card = screen.getByRole('article')
+    expect(within(card).getByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()
+    const list = within(card).getByRole('list', { name: 'Conditions' })
+    expect(list).toHaveTextContent("Scale: Reduced scale: 10% of the data, 5 of the paper's 200 epochs")
+    expect(list).toHaveTextContent('Seeds: 3 seeds (seeds 0, 1 of the planned 0, 1, 2)')
+    expect(list).toHaveTextContent(
+      'Hardware: Nebius AI Cloud gpu-l40s-a, preset 1gpu-8vcpu-32gb (preemptible) · GPU reported by the job: NVIDIA L40S',
+    )
+    expect(list).toHaveTextContent('Code: Written from the paper')
+    expect(list).toHaveTextContent('Smaller model than the paper.')
+    expect(list).toHaveTextContent('The GPU job was preempted')
+    expect(list).not.toHaveTextContent(/not reported/)
+  })
+
+  it('shows the scale factor next to a reduced-scale reproduction', () => {
+    const v: Verdict = { ...reproduced, kind: 'REPRODUCED_AT_REDUCED_SCALE' }
+    const onlyData = { ...runConditions, scale: { ...runConditions.scale, epochs: null, paper_epochs: null } }
+    render(<VerdictCard claim={claimRel} verdict={v} explanationMd="" {...conditions} conditions={onlyData} />)
+    expect(screen.getByRole('list', { name: 'Conditions' })).toHaveTextContent('Reduced scale: 10% of the data')
+  })
+
+  it('says when a reduced run recorded no scale factor and when no hardware was recorded', () => {
+    const bare = {
+      ...runConditions,
+      scale: { scale: 'REDUCED' as const, fraction_of_data: null, epochs: null, paper_epochs: null },
+      hardware: { platform: null, preset: null, preemptible: null, gpu: null },
+    }
+    render(
+      <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} jobs={{}} conditions={bare} />,
+    )
+    const list = screen.getByRole('list', { name: 'Conditions' })
+    expect(list).toHaveTextContent('the scale factor is not reported for this run')
+    expect(list).toHaveTextContent('Hardware: Not reported for this run')
   })
 
   it('shows INCONCLUSIVE with a human-readable reason', () => {

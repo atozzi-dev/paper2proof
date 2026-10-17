@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.types import Receive, Scope, Send
 
+from app.api.conditions import RunConditions, run_conditions
 from app.api.deps import (
     Session,
     api_rate_limit,
@@ -74,6 +75,7 @@ class RunView(BaseModel):
     steps: list[StepView]
     claims: list[ClaimView]
     verdicts: list[VerdictView]
+    conditions: RunConditions | None  # what the verdicts were reached under (invariant 10)
 
 
 class EventsPage(BaseModel):
@@ -112,7 +114,8 @@ async def create_run(
 @router.get("/api/runs/{run_id}")
 async def get_run(run_id: str, request: Request) -> RunView:
     run = await visible_run(request, run_id)
-    store = get_state(request).store
+    state = get_state(request)
+    store = state.store
     return RunView(
         id=run.id,
         arxiv_id=run.arxiv_id,
@@ -125,6 +128,7 @@ async def get_run(run_id: str, request: Request) -> RunView:
         steps=[StepView.model_validate(st.model_dump()) for st in await store.get_steps(run_id)],
         claims=[ClaimView(claim=c, selected=s) for c, s in await store.get_claims(run_id)],
         verdicts=[VerdictView(claim_id=c, verdict=v) for c, v in await store.list_verdicts(run_id)],
+        conditions=await run_conditions(store, state.artifacts, run_id),
     )
 
 

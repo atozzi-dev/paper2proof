@@ -1,4 +1,4 @@
-import type { Claim, Plan, RunEvent, Verdict } from '../src/types/api'
+import type { Claim, Plan, RunConditions, RunEvent, Verdict } from '../src/types/api'
 
 export const claimAbs: Claim = {
   id: 'c1',
@@ -37,6 +37,18 @@ export const plan: Plan = {
   entrypoint_hint: 'train.py',
   gpu_minutes_est: 12,
   notes: ['Learning-rate schedule not specified in the paper: cosine used.'],
+}
+
+/** What GET /api/runs/{id} reports once the results are analyzed (app/api/conditions.py). */
+export const runConditions: RunConditions = {
+  attempt: 1,
+  scale: { scale: 'REDUCED', fraction_of_data: 0.1, epochs: 5, paper_epochs: 200 },
+  seeds_planned: [0, 1, 2],
+  seeds_used: [0, 1],
+  hardware: { platform: 'gpu-l40s-a', preset: '1gpu-8vcpu-32gb', preemptible: true, gpu: 'NVIDIA L40S' },
+  code: 'FROM_SCRATCH',
+  deviations: ['Smaller model than the paper.'],
+  exit_reason: 'completed',
 }
 
 export const notReproduced: Verdict = {

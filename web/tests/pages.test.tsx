@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { verdictSummaryText } from '../src/run/verdictCopy'
 import type { RunEvent, RunView } from '../src/types/api'
-import { fullRun } from './fixtures'
+import { fullRun, runConditions } from './fixtures'
 
 const RUN_ID = 'r_' + 'a'.repeat(26)
 
@@ -24,6 +24,7 @@ function runView(over: Partial<RunView> = {}): RunView {
     steps: [],
     claims: [],
     verdicts: [],
+    conditions: null,
     ...over,
   }
 }
@@ -104,6 +105,30 @@ describe('Run page', () => {
       `/api/runs/${RUN_ID}/bundle`,
     )
     expect(screen.getByRole('table', { name: 'Cost receipt' })).toHaveTextContent('Total$0.41')
+  })
+
+  it('shows the conditions the server recorded next to the verdict, as soon as it is out', async () => {
+    let loads = 0
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) {
+        loads += 1 // the run is still building its bundle: only the verdict is out
+        return json(runView({ conditions: loads === 1 ? null : runConditions }))
+      }
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun().slice(0, 18)), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const card = (await screen.findByRole('heading', { name: 'Not reproduced under our conditions' })).closest('article')
+    expect(card).not.toBeNull()
+    await waitFor(() =>
+      expect(within(card as HTMLElement).getByRole('list', { name: 'Conditions' })).toHaveTextContent(
+        'Nebius AI Cloud gpu-l40s-a, preset 1gpu-8vcpu-32gb (preemptible)',
+      ),
+    )
+    expect(within(card as HTMLElement).getByRole('list', { name: 'Conditions' })).toHaveTextContent(
+      '10% of the data',
+    )
   })
 
   it('lets the owner approve a pending plan', async () => {

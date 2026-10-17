@@ -239,6 +239,10 @@ class ExecutingStep:
         await self._put(key, manifest.model_dump(mode="json", by_alias=True))
         return manifest
 
+    def _preemptible(self, attempt: int) -> bool:
+        """Only the first attempt may be preemptible; the retry after a preemption is not."""
+        return self._config.preemptible_gpu and attempt == 1
+
     def _spec(self, manifest: ExecManifest, bucket: str, preemptible: bool) -> JobSpec:
         body = manifest.model_dump_json(by_alias=True).encode()
         return JobSpec(
@@ -286,6 +290,11 @@ class ExecutingStep:
                 "results_key": f"results/{manifest.attempt}/results.json" if has_results else None,
                 "exit_reason": None if has_results else exit_reason,
                 "job_state": state.value,
+                "hardware": {  # what the job was submitted with (the verdict's conditions)
+                    "platform": EXEC_PLATFORM,
+                    "preset": EXEC_PRESET,
+                    "preemptible": self._preemptible(manifest.attempt),
+                },
             },
         )
         return StepResult(next=StepName.ANALYZING, output_ref=key)
@@ -312,7 +321,7 @@ class ExecutingStep:
                     ctx, "the GPU job was preempted; no retry: the GPU budget left is too small"
                 )
                 return await self._no_retry(ctx, *previous)
-            preemptible = self._config.preemptible_gpu and attempt == 1
+            preemptible = self._preemptible(attempt)
             if previous is not None:
                 await self._warn(ctx, "the GPU job was preempted: retrying once on demand")
             spec = self._spec(manifest, await ctx.jobs.ensure_run_bucket(ctx.run_id), preemptible)

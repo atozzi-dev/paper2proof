@@ -333,6 +333,10 @@ def test_dev_has_no_reaper(runtime: main.Runtime) -> None:
     assert runtime.reaper is None
 
 
+def test_the_api_reads_verdict_conditions_from_the_run_artifacts(runtime: main.Runtime) -> None:
+    assert runtime.state.artifacts is runtime.adapters.artifacts
+
+
 def test_an_existing_key_file_or_link_is_replaced_owner_only(tmp_path: Path) -> None:
     target = tmp_path / "keys" / "k.json"
     target.parent.mkdir()
