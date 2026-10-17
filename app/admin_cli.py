@@ -20,6 +20,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
@@ -30,6 +31,7 @@ import httpx
 DEFAULT_QUOTA = 3  # app.api.admin.DEFAULT_QUOTA (not imported: the CLI stays light)
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 TIMEOUT_S = 30.0
+RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")  # app.api.deps.RUN_ID: never a path or a query
 
 
 class UsageError(Exception):
@@ -84,7 +86,9 @@ def _base_url(raw: str | None) -> str:
     return f"{url.scheme}://{url.netloc}"
 
 
-def _request(args: argparse.Namespace, stdin: TextIO) -> tuple[str, str, object, dict[str, str]]:
+def _request(
+    args: argparse.Namespace, stdin: TextIO, prompt: Callable[[str], str]
+) -> tuple[str, str, object, dict[str, str]]:
     """(method, path, json body, query) for the parsed command."""
     if args.command == "invite" and args.action == "create":
         return (
@@ -97,7 +101,8 @@ def _request(args: argparse.Namespace, stdin: TextIO) -> tuple[str, str, object,
         return "GET", "/admin/invites", None, {}
     if args.command == "invite":
         if args.code_stdin:
-            code = stdin.readline().strip()
+            # typed at a terminal: not echoed
+            code = (prompt("Invite code: ") if stdin.isatty() else stdin.readline()).strip()
             if not code:
                 raise UsageError("no invite code on stdin")
             ident = hashlib.sha256(code.encode("utf-8")).hexdigest()
@@ -110,6 +115,8 @@ def _request(args: argparse.Namespace, stdin: TextIO) -> tuple[str, str, object,
             query = {"listed": "true" if args.listed else "false", **query}
         return "GET", "/admin/runs", None, query
     if args.command == "gallery":
+        if not RUN_ID.fullmatch(args.run_id):
+            raise UsageError("not a run id (r_ and 26 lowercase letters or digits)")
         body = {"listed": args.action == "add", "reviewed": bool(getattr(args, "reviewed", False))}
         return "POST", f"/admin/gallery/{args.run_id}", body, {}
     return "POST", f"/admin/{args.command}", {"on": args.state == "on"}, {}
@@ -130,7 +137,7 @@ def main(
     args = _parser().parse_args(argv)
     try:
         base = _base_url(args.url or env.get("P2P_API_URL"))
-        method, path, body, query = _request(args, stdin or sys.stdin)
+        method, path, body, query = _request(args, stdin or sys.stdin, prompt)
     except UsageError as error:
         print(f"admin_cli: {error}", file=err)
         return 2
@@ -138,7 +145,10 @@ def main(
     if not token:
         print("admin_cli: no admin token", file=err)
         return 2
-    with httpx.Client(base_url=base, transport=transport, timeout=TIMEOUT_S) as client:
+    # trust_env=False: no HTTP(S)_PROXY or netrc, which would get the token (clear for http)
+    with httpx.Client(
+        base_url=base, transport=transport, trust_env=False, timeout=TIMEOUT_S
+    ) as client:
         try:
             response = client.request(
                 method,

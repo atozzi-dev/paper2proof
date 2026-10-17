@@ -145,3 +145,58 @@ def test_runs_listing_passes_the_filters() -> None:
     assert code == 0 and json.loads(out) == [{"id": "r_x"}]
     assert request.url.path == "/admin/runs"
     assert dict(request.url.params) == {"listed": "false", "limit": "10"}
+
+
+@pytest.mark.parametrize("run_id", ["../drain", "r_x?listed=1", "r_" + "A" * 26])
+def test_gallery_refuses_anything_but_a_run_id(run_id: str) -> None:
+    recorder = Recorder(204)
+    code, _, err = _run(["gallery", "add", run_id], recorder)
+    assert code == 2 and "run id" in err and not recorder.requests
+
+
+def test_the_token_never_appears_in_the_output() -> None:
+    for recorder in (Recorder(401, {"error": "admin token required"}), Recorder(204)):
+        _, out, err = _run(["drain", "on"], recorder)
+        assert TOKEN not in out + err
+
+
+def test_proxies_and_netrc_from_the_environment_are_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy variable would otherwise receive the token in clear for http://localhost."""
+    seen: list[object] = []
+    real = httpx.Client
+
+    def client(**kwargs: object) -> httpx.Client:
+        seen.append(kwargs.get("trust_env"))
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(admin_cli.httpx, "Client", client)
+    assert _run(["drain", "on"], Recorder(204))[0] == 0
+    assert seen == [False]
+
+
+def test_a_code_typed_at_a_terminal_is_not_echoed() -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    asked: list[str] = []
+
+    def prompt(label: str) -> str:
+        asked.append(label)
+        return "typed-code"
+
+    recorder = Recorder(204)
+    out, err = io.StringIO(), io.StringIO()
+    code = admin_cli.main(
+        ["invite", "revoke", "--code-stdin"],
+        environ={"ADMIN_TOKEN": TOKEN, "P2P_API_URL": URL},
+        transport=httpx.MockTransport(recorder),
+        stdin=Terminal(""),
+        stdout=out,
+        stderr=err,
+        prompt=prompt,
+    )
+    assert code == 0 and asked == ["Invite code: "]
+    assert json.loads(recorder.only().content) == {"id": hashlib.sha256(b"typed-code").hexdigest()}

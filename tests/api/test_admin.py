@@ -136,6 +136,24 @@ async def test_admin_lists_runs_to_curate(client: httpx.AsyncClient, store: Stor
     assert (await client.get("/admin/runs?limit=0", headers=HEAD)).status_code == 400
 
 
+async def test_every_new_admin_route_needs_the_token(client: httpx.AsyncClient) -> None:
+    run_id = "r_" + "0" * 26
+    calls = [
+        ("GET", "/admin/runs", None),
+        ("GET", "/admin/invites", None),
+        ("POST", "/admin/invites", {}),
+        ("POST", "/admin/invites/revoke", {"id": "ab" * 6}),
+        ("POST", f"/admin/gallery/{run_id}", {"listed": False}),
+    ]
+    for method, path, body in calls:
+        response = await client.request(method, path, json=body, headers={"X-Admin-Token": "x"})
+        assert response.status_code == 401, path
+
+
+async def test_a_malformed_run_id_is_not_found(client: httpx.AsyncClient) -> None:
+    assert (await _curate(client, "not-a-run", listed=False)).status_code == 404
+
+
 async def test_admin_routes_are_not_in_the_public_schema() -> None:
     paths = json.loads(build())["paths"]
     assert paths and not [p for p in paths if p.startswith("/admin")]
