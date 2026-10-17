@@ -25,6 +25,7 @@ _VERSION = r"[A-Za-z0-9.*+!_-]{1,40}"
 _OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
 _SPEC = re.compile(rf"^ *{_OP} *{_VERSION}(?: *, *{_OP} *{_VERSION})* *$")  # plain spaces only
 TYPOSQUAT_DISTANCE = 2
+SHORT_NAME = 5  # below this many characters a single edit is already a different name
 
 
 class Reason(StrEnum):
@@ -109,6 +110,12 @@ def levenshtein(a: str, b: str, cap: int = 10) -> int:
             current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
         previous = current
     return previous[-1]
+
+
+def typosquat_threshold(name: str, popular: str) -> int:
+    """Edits within which `name` counts as a typosquat of `popular`: 1 when the shorter name has
+    fewer than 5 characters (a fixed 2 flags most 2-4 letter names, e.g. mlx against jax)."""
+    return 1 if min(len(name), len(popular)) < SHORT_NAME else TYPOSQUAT_DISTANCE
 
 
 class PackageInfo(BaseModel):
@@ -196,7 +203,7 @@ class PackagePolicy:
             close = sorted(
                 p
                 for p in cfg.popular
-                if levenshtein(name, p, TYPOSQUAT_DISTANCE) <= TYPOSQUAT_DISTANCE
+                if levenshtein(name, p, TYPOSQUAT_DISTANCE) <= typosquat_threshold(name, p)
             )
             if close:
                 return decision(Reason.REJECT_TYPOSQUAT, f"looks like {close[0]}")

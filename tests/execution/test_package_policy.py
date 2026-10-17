@@ -15,6 +15,7 @@ from app.execution.package_policy import (
     levenshtein,
     load_policy_config,
     parse_repo_requirements,
+    typosquat_threshold,
 )
 from app.storage.store import Store
 
@@ -87,6 +88,30 @@ async def test_bad_specifiers_are_rejected(policy: PackagePolicy) -> None:
 async def test_typosquat_is_rejected(policy: PackagePolicy) -> None:
     respx.get("https://pypi.org/pypi/reqeusts/json").mock(return_value=_pypi("reqeusts"))
     assert await _decide(policy, "reqeusts") == [Reason.REJECT_TYPOSQUAT]
+
+
+def test_typosquat_threshold_scales_with_length() -> None:
+    assert typosquat_threshold("mlx", "jax") == 1  # 2-4 letters: one edit only
+    assert typosquat_threshold("torh", "torch") == 1  # the shorter name decides
+    assert typosquat_threshold("reqeusts", "requests") == 2
+    assert typosquat_threshold("numpyy", "numpy") == 2
+
+
+@respx.mock
+@pytest.mark.parametrize("name", ["mlx", "pot", "ogb", "tfds"])
+async def test_short_real_names_are_not_typosquats(policy: PackagePolicy, name: str) -> None:
+    """Two edits from jax/six/py/dgl/tqdm, but real packages: a fixed distance of 2 is noise."""
+    respx.get(f"https://pypi.org/pypi/{name}/json").mock(return_value=_pypi(name))
+    assert await _decide(policy, name) == [Reason.ACCEPT]
+
+
+@respx.mock
+@pytest.mark.parametrize("name", ["jaxx", "torh", "nmpy"])
+async def test_one_edit_from_a_short_popular_name_is_a_typosquat(
+    policy: PackagePolicy, name: str
+) -> None:
+    respx.get(f"https://pypi.org/pypi/{name}/json").mock(return_value=_pypi(name))
+    assert await _decide(policy, name) == [Reason.REJECT_TYPOSQUAT]
 
 
 @respx.mock
