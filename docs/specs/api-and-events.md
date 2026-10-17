@@ -28,8 +28,13 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | GET | `/api/stats` | — | — | eval numbers, aggregate spend, runs by verdict |
 | POST | `/admin/drain` | admin | `{"on": bool}` | `204` |
 | POST | `/admin/kill-switch` | admin | `{"on": bool}` | `204` |
-| POST | `/admin/gallery/{id}` | admin | `{"listed": bool}` | `204` |
-| POST | `/admin/invites` | admin | `{"quota_per_day": int, "expires_at": iso}` | `201 {"code"}` (shown once) |
+| GET | `/admin/runs` | admin | query `listed` (optional bool), `limit` (1–200, default 50) | `[AdminRun]`, newest first: `{id, arxiv_id, status, listed, created_at, verdicts: [VerdictKind]}` (curation candidates) |
+| POST | `/admin/gallery/{id}` | admin | `{"listed": bool, "reviewed": bool = false}` | `204` · `404` · `409` when listing a run that is not terminal, or one with a `NOT_REPRODUCED` verdict without `"reviewed": true` (architecture §16.1). Listing stores `verdict_summary` (the verdict kinds) for the gallery card; unlisting always succeeds (takedown) |
+| POST | `/admin/invites` | admin | `{"quota_per_day": int = 3, "expires_at": iso \| null}` | `201 {"code"}` (shown once: only its sha256 is stored) |
+| GET | `/admin/invites` | admin | — | `[InviteView]`: `{id, quota_per_day, used_today, used_on, expires_at, active}`; `id` is the first 12 hex characters of the code's sha256, never the code |
+| POST | `/admin/invites/revoke` | admin | `{"id": hex}` (12–64 characters: a prefix of the code's sha256) | `204` (the invite expires now: no new session, no new run) · `404` · `409` if the prefix matches several invites |
+
+Admin routes are not part of the public OpenAPI schema (`/api/openapi.json`). `python -m app.admin_cli` calls them with the admin token read from `ADMIN_TOKEN` or a prompt, never from the command line (docs/OPERATIONS.md).
 
 `arxiv_id` must match `^\d{4}\.\d{4,5}(v\d+)?$`.
 
