@@ -27,6 +27,7 @@ RUN3 = "r_01jb7z00000000000000000002"
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
 DIGEST = "cr.eu-north1.nebius.cloud/reg/p2p-runner@sha256:" + "a" * 64
 RATES = {"prov": 0.132, "exec": 1.55, "smoke": 0.132}
+CLOUD = load_cloud_prices(ROOT / "config" / "pricing.yaml")
 
 
 class Clock:
@@ -77,7 +78,13 @@ class World:
         limits = load_budget_limits(ROOT / "config" / "budgets.yaml")
         self.budget = Budget(store, limits, env="test", now=self.clock)
         self.reaper = Reaper(
-            store, self.backend, self.bundles, self.budget, rates=RATES, clock=self.clock
+            store,
+            self.backend,
+            self.bundles,
+            self.budget,
+            rates=RATES,
+            cloud=CLOUD,
+            clock=self.clock,
         )
 
     async def run(self, run_id: str, status: RunStatus, step: StepName | None = None) -> None:
@@ -487,6 +494,56 @@ def test_rates_cover_every_job_kind() -> None:
     assert set(rates) == {kind.value for kind in JobKind}
     assert rates["exec"] > rates["prov"] > 0
     assert rates["fetch"] == rates["prov"]  # same image, platform and preset
+
+
+def test_an_exec_job_of_unknown_platform_is_charged_at_the_dearer_gpu_platform() -> None:
+    """A job the reaper records itself (submitted before a crash) may be on the fallback."""
+    rates = reaper_rates(CLOUD)
+    primary = CLOUD.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    fallback = CLOUD.hourly("gpu-l40s-d", "1gpu-16vcpu-96gb")
+    assert fallback > primary
+    assert rates["exec"] == max(primary, fallback)
+
+
+@pytest.mark.parametrize(
+    ("platform", "preset"),
+    [("gpu-l40s-a", "1gpu-8vcpu-32gb"), ("gpu-l40s-d", "1gpu-16vcpu-96gb")],
+)
+async def test_a_recorded_exec_job_is_charged_at_its_own_platform_rate(
+    world: World, platform: str, preset: str
+) -> None:
+    await world.run(RUN, RunStatus.FAILED)
+    started = NOW - timedelta(minutes=30)
+    handle = add_job(world.backend, JobKind.EXEC, RUN, JobState.SUCCEEDED, started)
+    await world.store.record_job(
+        RUN,
+        "exec",
+        handle.name,
+        handle.nebius_id,
+        bucket_name(RUN),
+        deadline=started + timedelta(minutes=40),
+        at=started,
+        platform=platform,
+        preset=preset,
+    )
+    assert (await world.reaper.tick())["ledger_reconciled"] == 1
+    expected = CLOUD.hourly(platform, preset) * 0.5  # on demand: the upper bound
+    assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(expected)
+
+
+async def test_a_recorded_platform_missing_from_the_prices_falls_back_to_the_kind_rate(
+    world: World,
+) -> None:
+    await world.run(RUN, RunStatus.FAILED)
+    started = NOW - timedelta(minutes=30)
+    handle = add_job(world.backend, JobKind.EXEC, RUN, JobState.SUCCEEDED, started)
+    await world.store.record_job(
+        RUN, "exec", handle.name, handle.nebius_id, bucket_name(RUN), at=started,
+        platform="gpu-unknown", preset="1gpu-8vcpu-32gb",
+    )  # fmt: skip
+    await world.reaper.tick()
+    expected = RATES["exec"] * 0.5
+    assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(expected)
 
 
 async def test_reaper_spend_and_actions_are_exported(

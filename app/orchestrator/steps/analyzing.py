@@ -76,7 +76,8 @@ class AnalyzingStep:
         if execution.get("results_key") is None:  # EXECUTING found no results to read
             reason = execution.get("exit_reason")
             analysis = no_results(
-                manifest, "budget_timeout" if reason == "budget_timeout" else "experiment_error"
+                manifest,
+                reason if reason in ("budget_timeout", "capacity") else "experiment_error",
             )
         else:
             analysis = await self._analyze(ctx, manifest, str(execution["results_key"]))

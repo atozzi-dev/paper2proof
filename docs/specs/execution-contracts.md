@@ -211,6 +211,20 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 
 Retries are decided by the orchestrator, never by the platform.
 
+**No GPU capacity** (architecture §15). `submit()` raises `CapacityError` when the platform refuses
+to create the job for lack of capacity (gRPC `RESOURCE_EXHAUSTED` on create, or a create operation
+that ends with it: GPU quota used up, "not enough resources"); no job exists afterwards and the
+refused creation costs nothing (the reservation is released at 0). EXECUTING then retries the same
+attempt (same job name) on `gpu-l40s-a` after 2 minutes, up to 3 times, then once on
+`gpu-l40s-d` / `1gpu-16vcpu-96gb` (same preemptibility, priced from `config/pricing.yaml`). Each
+retry emits a `NO_GPU_CAPACITY` warning. The fallback platform is kept in
+`runs/<run_id>/exec_platform_<attempt>.json` before that submission, so a resumed step re-attaches
+to the job where it was created. When neither platform has capacity, the attempt ends without a
+job: `execution_<attempt>.json` has `results_key: null`, `exit_reason: "capacity"` and VERDICT
+reports `INCONCLUSIVE/CAPACITY` (an on-demand retry after a preemption that finds no capacity keeps
+the first attempt's outcome instead). A run cancelled during the 2-minute waits stops there.
+`CapacityError` from any other job (provision, fetch, smoke) fails the run with `CAPACITY`.
+
 ## 9. Interfaces
 
 ```python
@@ -235,10 +249,12 @@ class JobState(StrEnum): PENDING; STARTING; RUNNING; SUCCEEDED; FAILED; CANCELLE
 
 class JobHandle(BaseModel): name: str; nebius_id: str
 
+class CapacityError(Exception): ...  # submit(): no capacity, the job was not created
+
 class JobBackend(Protocol):
     async def ensure_run_bucket(self, run_id: str) -> str: ...
     async def delete_run_bucket(self, run_id: str) -> None: ...
-    async def submit(self, spec: JobSpec) -> JobHandle: ...           # get-by-name first
+    async def submit(self, spec: JobSpec) -> JobHandle: ...           # get-by-name first; CapacityError
     async def status(self, handle: JobHandle) -> JobState: ...
     async def cancel(self, handle: JobHandle) -> None: ...
     async def ensure_gateway_up(self) -> None: ...                    # start VM if stopped, wait ready

@@ -145,6 +145,9 @@ class JobRow(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float)
     deadline: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    # Where the job runs (the reaper charges its on-demand price); None: not known.
+    platform: Mapped[str | None] = mapped_column(String(32))
+    preset: Mapped[str | None] = mapped_column(String(32))
 
 
 class VerdictRow(Base):

@@ -847,7 +847,8 @@
               "completed",
               "experiment_error",
               "budget_timeout",
-              "contract_error"
+              "contract_error",
+              "capacity"
             ],
             "title": "Exit Reason",
             "type": "string"

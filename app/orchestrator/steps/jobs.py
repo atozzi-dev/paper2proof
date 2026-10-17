@@ -15,7 +15,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from app.domain.events import EventType
 from app.domain.models import RunStatus
-from app.execution.backend import JobHandle, JobSpec, JobState
+from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState
 from app.execution.naming import bucket_name
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
@@ -146,8 +146,9 @@ async def run_job(
                 await _cancel_unwatched(ctx, existing)
             raise
 
-    async def settle() -> None:
-        watched_s = max(0.0, (clock() - began).total_seconds())
+    async def settle(refused: bool = False) -> None:
+        # A creation refused for lack of capacity left no job behind: nothing to pay.
+        watched_s = 0.0 if refused else max(0.0, (clock() - began).total_seconds())
         await ctx.budget.commit(cost, usd_per_hour * watched_s / 3600)
         if minutes is not None:
             await ctx.budget.commit(minutes, watched_s / 60)
@@ -171,6 +172,8 @@ async def run_job(
             bucket_name(ctx.run_id),
             deadline=started + watchdog,
             at=started,
+            platform=spec.platform,
+            preset=spec.preset,
         )
         last: JobState | None = None
         while True:
@@ -198,11 +201,11 @@ async def run_job(
         # reaper cancels it at its deadline if nobody does).
         await settle()
         raise
-    except Exception:
+    except Exception as err:
         if handle is not None and not state.is_terminal:  # nobody would watch it any more
             with contextlib.suppress(Exception):
                 await asyncio.shield(ctx.jobs.cancel(handle))
-        await settle()
+        await settle(refused=handle is None and isinstance(err, CapacityError))
         raise
     await settle()
     elapsed_s = max(0.0, (clock() - started).total_seconds())

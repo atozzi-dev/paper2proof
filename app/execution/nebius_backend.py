@@ -15,10 +15,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from nebius.aio.request_status import RequestStatus
 from nebius.aio.service_error import RequestError
 from nebius.api.nebius.ai.v1 import (
     CancelJobRequest,
     CreateJobRequest,
+    DeleteJobRequest,
     FollowsSpotPriceSpec,
     GetJobByNameRequest,
     GetJobRequest,
@@ -54,7 +56,7 @@ from nebius.api.nebius.storage.v1 import (
 from nebius.sdk import SDK
 from pydantic import SecretStr
 
-from app.execution.backend import JobHandle, JobSpec, JobState
+from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState
 from app.execution.naming import bucket_name
 from app.execution.s3 import S3Client, S3RunStorage, empty_bucket, make_s3_client
 
@@ -92,6 +94,7 @@ class Operation(Protocol):
     def resource_id(self) -> str: ...
     def successful(self) -> bool: ...
     def done(self) -> bool: ...
+    def status(self) -> RequestStatus | None: ...
     def wait(self) -> Awaitable[None]: ...
 
 
@@ -101,6 +104,7 @@ class JobsClient(Protocol):
     def list(self, request: ListJobsRequest) -> Awaitable[ListJobsResponse]: ...
     def create(self, request: CreateJobRequest) -> Awaitable[Operation]: ...
     def cancel(self, request: CancelJobRequest) -> Awaitable[Operation]: ...
+    def delete(self, request: DeleteJobRequest) -> Awaitable[Operation]: ...
 
 
 class BucketsClient(Protocol):
@@ -117,10 +121,14 @@ class InstancesClient(Protocol):
 
 
 # gRPC status codes by name (grpc ships no type stubs).
-NOT_FOUND, ALREADY_EXISTS, FAILED_PRECONDITION = (
+NOT_FOUND, ALREADY_EXISTS, FAILED_PRECONDITION, RESOURCE_EXHAUSTED = (
     "NOT_FOUND",
     "ALREADY_EXISTS",
     "FAILED_PRECONDITION",
+    # [S-4] how "no GPU capacity" / quota used up is reported. Every RESOURCE_EXHAUSTED on a
+    # job creation becomes CapacityError, API rate limiting included: S-4 must confirm the
+    # message or detail that tells a request quota apart from missing GPU capacity.
+    "RESOURCE_EXHAUSTED",
 )
 
 
@@ -295,6 +303,9 @@ class NebiusJobBackend:
         try:
             op = await self._jobs.create(request)
         except RequestError as err:
+            if _code(err) == RESOURCE_EXHAUSTED:
+                await self._discard_refused(spec, "")
+                raise CapacityError(f"{spec.name}: no capacity on {spec.platform}") from None
             if _code(err) != ALREADY_EXISTS:
                 raise
             existing = await self._job_by_name(spec.name)  # a concurrent submit won
@@ -309,6 +320,10 @@ class NebiusJobBackend:
             pass
         else:
             if not op.successful():
+                status = op.status()
+                if status is not None and status.code.name == RESOURCE_EXHAUSTED:
+                    await self._discard_refused(spec, op.resource_id)
+                    raise CapacityError(f"{spec.name}: no capacity on {spec.platform}")
                 raise JobBackendError(f"{spec.name}: job creation failed")
         job_id = op.resource_id
         if not job_id:
@@ -318,6 +333,58 @@ class NebiusJobBackend:
             job_id = found.metadata.id
         log.info("job submitted", extra={"job": spec.name, "nebius_id": job_id})
         return JobHandle(name=spec.name, nebius_id=job_id)
+
+    async def _discard_refused(self, spec: JobSpec, job_id: str) -> None:
+        """CapacityError promises that no job was created: the caller records nothing and tries
+        again under the same name, on the fallback platform too. A job object left by the refused
+        creation [S-4] would be outside the ledger and the reaper's watch, and every retry would
+        re-attach to it. So delete what is left and confirm it is gone; when that can't be
+        confirmed, fail with JobBackendError (the step fails, the reaper finds the job by name)."""
+        ids = {job_id} if job_id else set()
+        try:
+            found = await self._job_by_name(spec.name)
+            if found is not None:
+                ids.add(found.metadata.id)
+            left = sorted(ids)
+            for left_id in left:
+                await self._delete_job(left_id, spec.name)
+            gone = [await self._job_gone(left_id) for left_id in left]
+            if not all(gone) or await self._job_by_name(spec.name) is not None:
+                raise JobBackendError(f"{spec.name}: still there after deletion")
+        except (RequestError, JobBackendError) as err:
+            raise JobBackendError(
+                f"{spec.name}: refused for lack of capacity, and its job may remain"
+            ) from err
+        if left:
+            log.info("refused job deleted", extra={"job": spec.name, "nebius_ids": left})
+
+    async def _delete_job(self, job_id: str, name: str) -> None:
+        try:  # [S-4] whether a job must be terminal before it can be deleted
+            op = await self._jobs.cancel(CancelJobRequest(id=job_id))
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return
+            if _code(err) != FAILED_PRECONDITION:  # FAILED_PRECONDITION: already finished
+                raise
+        else:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(op.wait(), self._op_timeout_s)
+        try:
+            op = await self._jobs.delete(DeleteJobRequest(id=job_id))
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return
+            raise
+        await self._finish(op, f"{name}: deletion of {job_id}")
+
+    async def _job_gone(self, job_id: str) -> bool:
+        try:
+            await self._jobs.get(GetJobRequest(id=job_id))
+        except RequestError as err:
+            if _code(err) == NOT_FOUND:
+                return True
+            raise
+        return False
 
     async def status(self, handle: JobHandle) -> JobState:
         try:

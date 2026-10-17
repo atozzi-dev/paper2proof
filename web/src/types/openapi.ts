@@ -504,7 +504,7 @@ export interface components {
              * Exit Reason
              * @enum {string}
              */
-            exit_reason: "completed" | "experiment_error" | "budget_timeout" | "contract_error";
+            exit_reason: "completed" | "experiment_error" | "budget_timeout" | "contract_error" | "capacity";
             hardware: components["schemas"]["HardwareView"];
             scale: components["schemas"]["ScaleView"];
             /** Seeds Planned */

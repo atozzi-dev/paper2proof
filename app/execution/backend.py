@@ -148,6 +148,11 @@ class JobHandle(BaseModel):
     nebius_id: str
 
 
+class CapacityError(Exception):
+    """submit(): the platform has no capacity for the job's platform and preset right now (GPU
+    quota used up, "not enough resources"). The job was not created (execution-contracts §8)."""
+
+
 class JobBackend(Protocol):
     async def ensure_run_bucket(self, run_id: str) -> str: ...
     async def delete_run_bucket(self, run_id: str) -> None: ...

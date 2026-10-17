@@ -2,7 +2,8 @@
 
 1. GitHub links written by the authors (arXiv comment/abstract, HF summary): official, no LLM.
 2. Otherwise Tavily search (basic, then advanced), extract on the top 3 URLs, Utility ranking.
-3. Tavily problems degrade discovery (warning DISCOVERY_DEGRADED); the run never fails here.
+3. Tavily or Hugging Face problems degrade discovery (warning DISCOVERY_DEGRADED); the run
+   never fails here.
 4. Canary papers (allowlisted sha256) skip discovery entirely: their titles are public, so a
    repository anyone could publish must never steer the Coder whose code runs locally.
 """
@@ -12,7 +13,7 @@ from datetime import timedelta
 
 import httpx
 
-from app.discovery.hf_papers import HfPapers
+from app.discovery.hf_papers import HfPapers, HfUnavailable
 from app.discovery.rank import github_repos, rank_candidates
 from app.discovery.tavily import TavilyClient, TavilyResult, TavilyUnavailable
 from app.domain.discovery import HF_DATASET_ID, Discovery, RepoRef
@@ -109,12 +110,13 @@ class DiscoveringStep:
             note = "canary paper: no repository or dataset discovery (self-contained experiment)"
             return await self._done(ctx, Discovery(repo=None, datasets=[], notes=[note]))
         meta = await self._metadata(arxiv_id)
-        hf_summary = await self._hf.summary(arxiv_id)
-        datasets = [
-            DatasetReq(kind="hf", id=d)
-            for d in await self._hf.dataset_ids(arxiv_id)
-            if HF_DATASET_ID.fullmatch(d)
-        ]
+        hf_summary, hf_datasets = "", []
+        try:
+            hf_summary = await self._hf.summary(arxiv_id)
+            hf_datasets = await self._hf.dataset_ids(arxiv_id)
+        except HfUnavailable as err:
+            await self._degrade(ctx, notes, f"{err}: no Hugging Face links or datasets")
+        datasets = [DatasetReq(kind="hf", id=d) for d in hf_datasets if HF_DATASET_ID.fullmatch(d)]
 
         official = [
             RepoRef(url=url, source="paper", official=True)
@@ -127,10 +129,13 @@ class DiscoveringStep:
                 repo = await self._search(ctx, meta.title, arxiv_id, notes)
             except (TavilyUnavailable, BudgetExceeded) as err:
                 reason = str(err) if isinstance(err, TavilyUnavailable) else "Tavily budget reached"
-                notes.append(f"{DEGRADED}: {reason}")
-                await ctx.emit(EventType.WARNING, {"code": DEGRADED, "message": reason})
+                await self._degrade(ctx, notes, reason)
 
         return await self._done(ctx, Discovery(repo=repo, datasets=datasets, notes=notes))
+
+    async def _degrade(self, ctx: RunContext, notes: list[str], reason: str) -> None:
+        notes.append(f"{DEGRADED}: {reason}")
+        await ctx.emit(EventType.WARNING, {"code": DEGRADED, "message": reason})
 
     async def _done(self, ctx: RunContext, discovery: Discovery) -> StepResult:
         key = f"runs/{ctx.run_id}/discovery.json"
