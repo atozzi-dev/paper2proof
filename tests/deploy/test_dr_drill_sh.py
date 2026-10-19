@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.deploy._settings import ENV_LINES
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "deploy" / "dr_drill.sh"
 BASH = shutil.which("bash")
@@ -161,9 +163,7 @@ def _run(
     endpoint = tmp_path / "endpoint.json"
     endpoint.write_text(_endpoint("RUNNING", "p2p-api.endpoints.example", image))
     env_file = tmp_path / "prod.env"
-    env_file.write_text(
-        "S3_REGION=eu-north1\nP2P_STATE_BUCKET=p2p-state\n", encoding="utf-8", newline="\n"
-    )
+    env_file.write_text(ENV_LINES, encoding="utf-8", newline="\n")
     calls = tmp_path / "calls.log"
     calls.touch()
     base = {

@@ -2,8 +2,8 @@
 
 P2P_PROD_ENV (a `prod` environment variable) holds the non-secret settings of
 deploy/prod.env.example except the three job images, which come from a digests.json written by
-the deploy workflow (this deploy, or the previous one for a rollback). endpoint.sh checks every
-key against deploy/prod.env.example and refuses secret-looking names.
+the deploy workflow (this deploy, or the previous one for a rollback). endpoint.sh accepts only
+the keys of deploy/prod.env.example (its own allowlist), so a secret name is always refused.
 
     python3 .github/scripts/prod_env.py deploy/digests.json > "$RUNNER_TEMP/prod.env"
 """
