@@ -135,7 +135,8 @@ async def test_an_exec_job_runs_isolated_without_network(tmp_path: Path) -> None
     run = _run_argv(docker)
     for flag in ("--network=none", "--read-only", "--cap-drop=ALL",
                  "--security-opt=no-new-privileges", "--user=10001:10001",
-                 "--memory=8g", "--memory-swap=8g", "--log-opt=max-size=10m"):  # fmt: skip
+                 "--memory=8g", "--memory-swap=8g", "--log-driver=json-file",
+                 "--log-opt=max-size=10m", "--log-opt=max-file=2"):  # fmt: skip
         assert flag in run, flag
     bucket_dir = (tmp_path / "buckets" / bucket).resolve()
     assert f"type=bind,source={bucket_dir},target=/mnt/run" in run
