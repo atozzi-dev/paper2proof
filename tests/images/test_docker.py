@@ -398,3 +398,10 @@ def test_the_cpu_runner_runs_a_canary_workspace_to_a_valid_results_json(tmp_path
                  *mount, image, "-R", "a+rwX", "/mnt/run"],
                 timeout=60,
             )  # fmt: skip
+
+
+def test_the_api_image_holds_the_canary_papers_only() -> None:
+    out = _run("p2p-api", "/srv/p2p/eval/canaries", "-type", "f", entrypoint="find")
+    names = sorted({Path(line).name for line in out.split()})
+    assert names == ["paper.tex", "truth.yaml"]
+    assert len(out.split()) == 20  # ten canaries

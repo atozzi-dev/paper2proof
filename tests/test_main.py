@@ -464,3 +464,12 @@ def test_the_local_docker_backend_refuses_the_test_environment(tmp_path: Path) -
     settings = _settings(tmp_path, p2p_job_backend="docker", p2p_env="test")
     with pytest.raises(LocalTrustedRefused):
         main.dev_adapters(settings)
+
+
+async def test_canary_papers_are_ingested_from_the_repository(runtime: main.Runtime) -> None:
+    """A-25 / eval set A / H-09: 0000.000NN IDs are served from eval/canaries, not arXiv."""
+    from eval.canaries import build
+
+    step = runtime.steps[StepName.INGESTING]
+    canary = build.discover()[0]
+    assert await step._papers.source(canary.truth.arxiv_id) == build.source_bytes(canary)  # type: ignore[attr-defined]

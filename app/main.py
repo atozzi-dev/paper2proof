@@ -53,6 +53,7 @@ from app.execution.run_storage import FakeRunStorage, RunStorage
 from app.execution.s3 import S3ArtifactStore
 from app.execution.smoke_factory import SmokeOptions, build_smoke_executor
 from app.ingestion.arxiv import ArxivClient
+from app.ingestion.canaries import PaperRouter, load_canary_papers
 from app.models.client import (
     Completion,
     ModelClient,
@@ -83,6 +84,7 @@ from app.storage.store import Store
 __all__ = ["ConfigError", "RouterError", "Runtime", "build_runtime", "create"]
 log = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
+CANARIES_DIR = ROOT / "eval" / "canaries"  # paper.tex + truth.yaml, also in the api image
 PLACEHOLDER = "local/{}@sha256:" + "0" * 64  # dev/test only: no job ever runs these
 PUBLIC_KEY = ROOT / "docs" / "bundle-public-key.pem"
 
@@ -486,7 +488,13 @@ def build_runtime(
         commit=settings.p2p_build_commit,
     )
     steps: dict[StepName, Step] = {
-        StepName.INGESTING: IngestingStep(ArxivClient(http), artifacts),
+        StepName.INGESTING: IngestingStep(
+            PaperRouter(
+                ArxivClient(http),
+                load_canary_papers(CANARIES_DIR, config_dir / "canary_allowlist.yaml"),
+            ),
+            artifacts,
+        ),
         StepName.EXTRACTING_CLAIMS: ExtractingClaimsStep(lm, artifacts),
         StepName.DISCOVERING: DiscoveringStep(
             store=store,

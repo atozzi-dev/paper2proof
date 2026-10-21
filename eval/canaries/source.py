@@ -1,8 +1,8 @@
 """A dev PaperSource that serves the canary e-prints under their `0000.000NN` arXiv IDs.
 
 Month 00 does not exist on arXiv, so these IDs never shadow a real paper. The bytes are the
-ones whose sha256 is in config/canary_allowlist.yaml. Not for prod: wire it only with
-P2P_ENV=dev (the first end-to-end run, A-25, and eval set A).
+ones whose sha256 is in config/canary_allowlist.yaml. The app serves them through
+app/ingestion/canaries.py (PaperRouter); this dev-only source remains for offline eval tooling.
 """
 
 from app.ingestion.arxiv import ArxivMetadata

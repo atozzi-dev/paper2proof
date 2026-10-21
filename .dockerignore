@@ -11,6 +11,9 @@
 !scripts/runner_constraints.py
 !scripts/split_lock.py
 !web/
+# the canary papers INGESTING serves as 0000.000NN (A-25, eval set A, H-09): never their code
+!eval/canaries/*/paper.tex
+!eval/canaries/*/truth.yaml
 web/node_modules/
 web/dist/
 **/__pycache__/
