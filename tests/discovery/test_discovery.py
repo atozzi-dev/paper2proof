@@ -172,6 +172,17 @@ async def test_cache_prevents_a_second_http_call(store: Store, tmp_path: Path) -
     assert respx.calls.call_count == 3  # HF paper, HF repos, arXiv metadata: once each
 
 
+@respx.mock
+async def test_a_failed_metadata_fetch_is_not_cached(store: Store, tmp_path: Path) -> None:
+    """arXiv down once must not hide the paper's code link for the next 24 hours."""
+    _routes(hf_summary="Code at https://github.com/microsoft/LoRA", atom=NO_CODE_ATOM)
+    respx.get(EXPORT_API).mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, content=NO_CODE_ATOM)]
+    )
+    await _discover(store, tmp_path, runs=2)
+    assert respx.get(EXPORT_API).call_count == 2  # asked again: the failure was not cached
+
+
 @pytest.mark.parametrize(
     "response",
     [
