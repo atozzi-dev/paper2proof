@@ -4,7 +4,8 @@
     {"id": "nvidia/nemotron-3-super-120b-a12b", "object": "model", "context_length": 262144},
     {"id": "nvidia/Nemotron-3-Ultra-550b-a55b", "object": "model", "context_length": 131072},
     {"id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B", "object": "model"},
-    {"id": "nvidia/Nemotron-3-Nano-Omni", "object": "model"},
+    {"id": "nvidia/Nemotron-3.5-Super-VL", "object": "model"},
+    {"id": "nvidia/Nemotron-3_5-Lightning", "object": "model"},
     {"id": "meta-llama/Llama-3.3-70B-Instruct", "object": "model"}
   ]
 }

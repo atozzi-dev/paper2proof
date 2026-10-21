@@ -11,7 +11,7 @@ def test_one_match_per_role_resolves() -> None:
     assert resolved[Role.READER].context_window == 262144
     assert resolved[Role.PLANNER].model_id == ULTRA
     assert resolved[Role.UTILITY].model_id == NANO
-    assert resolved[Role.VISION].model_id == "nvidia/Nemotron-3-Nano-Omni"
+    assert resolved[Role.VISION].model_id == "nvidia/Nemotron-3.5-Super-VL"  # spike S-2
     assert resolved[Role.UTILITY].context_window is None
     assert set(resolved) == set(Role)
 
