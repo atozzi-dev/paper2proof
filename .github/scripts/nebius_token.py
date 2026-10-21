@@ -98,6 +98,9 @@ async def _sdk_token(kind: ExchangeKind, path: Path, sa_id: str | None) -> str:
         sdk = SDK(credentials_file_name=str(path))
     try:
         token = await sdk.get_token(timeout=EXCHANGE_TIMEOUT_S)
+        with contextlib.suppress(Exception):  # cosmetic: never fails a good exchange
+            if token.expiration is not None:  # not a secret: when a later step needs a new one
+                print(f"Nebius token expires at {token.expiration.isoformat()}", flush=True)
         return str(token.token)
     finally:
         await sdk.close()
