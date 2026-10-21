@@ -11,10 +11,10 @@ import pytest
 
 from app.domain.contracts import ArchiveDigests, DataArchive
 from app.domain.models import StepName
-from app.execution.backend import JobKind, JobSpec, JobState
+from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
 from app.execution.config import ExecutionConfig
 from app.execution.fake_backend import FakeJobBackend
-from app.execution.job_smoke import JobSmokeExecutor
+from app.execution.job_smoke import SMOKE_SETUP_S, JobSmokeExecutor
 from app.execution.naming import bucket_name
 from app.execution.run_storage import FakeRunStorage
 from app.execution.smoke import SmokeContractError, SmokeUnavailable
@@ -297,4 +297,22 @@ async def test_the_watchdog_leaves_room_for_setup(store: Store) -> None:
     env = await smoke.prepare(RUN, {"train.py": b"a"})
     await smoke.run(env, ARGV, {}, 60)
     ((_, _, _, spec),) = jobs.jobs.values()
-    assert spec.watchdog_s == 60 + 180
+    assert spec.watchdog_s == 60 + SMOKE_SETUP_S
+    assert SMOKE_SETUP_S >= 218 + 60  # S12: 218 s from create to start, plus extraction
+
+
+class AlwaysQueued(FakeJobBackend):
+    async def status(self, handle: JobHandle) -> JobState:
+        return JobState.CANCELLED if handle.name in self.cancelled else JobState.PENDING
+
+
+async def test_a_smoke_job_that_never_leaves_the_queue_makes_the_executor_unavailable(
+    store: Store,
+) -> None:
+    storage = FakeRunStorage()
+    jobs = AlwaysQueued(on_submit=_writes_result(storage))
+    smoke, _ = await _executor(store, jobs, storage)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    with pytest.raises(SmokeUnavailable, match="queue"):
+        await smoke.run(env, ARGV, {}, 60)
+    assert jobs.cancelled == [f"p2p-smoke-{RUN[2:]}-1"]

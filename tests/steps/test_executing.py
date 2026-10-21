@@ -33,6 +33,7 @@ from app.models.pricing import load_cloud_prices
 from app.orchestrator.budget import Budget, BudgetExceeded, SpendKind
 from app.orchestrator.context import RunContext
 from app.orchestrator.steps.executing import EXEC_MARGIN_S, ExecutingStep, exit_info, new_lines
+from app.orchestrator.steps.jobs import QUEUE_CAP_S
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import ROOT, RUN, ctx_at
@@ -387,8 +388,9 @@ async def test_a_retry_refused_by_the_daily_cloud_cap_keeps_the_first_attempt(
 ) -> None:
     ctx, artifacts, storage = await _setup(store, tmp_path)
     cloud = load_cloud_prices(ROOT / "config" / "pricing.yaml")
-    first = cloud.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb", preemptible=True) * 900 / 3600
-    retry = cloud.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb") * 900 / 3600
+    reserved_s = 900 + QUEUE_CAP_S  # USD is reserved for the queue too (PROVISIONING may bill)
+    first = cloud.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb", preemptible=True) * reserved_s / 3600
+    retry = cloud.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb") * reserved_s / 3600
     assert retry > first * 1.05
     limits = ctx.limits.model_copy(
         update={
@@ -713,3 +715,51 @@ async def test_a_smoke_result_without_a_workspace_digest_is_an_internal_error(
     with pytest.raises(P2PError) as err:
         await _step(artifacts, storage, FakeClock()).run(_with(ctx, ScriptedBackend({})))
     assert err.value.code is ErrorCode.INTERNAL_ERROR
+
+
+class RetryNeverStops(ScriptedBackend):
+    """The retry job stays queued, then ignores its cancellation (Nebius CANCELLING)."""
+
+    async def status(self, handle: JobHandle) -> JobState:
+        if handle.name.endswith("-2") and handle.name in self.cancelled:
+            return JobState.RUNNING
+        return await super().status(handle)
+
+
+async def test_a_queued_retry_that_does_not_stop_never_lets_attempt_1_be_read(
+    store: Store, tmp_path: Path
+) -> None:
+    """The retry may have started between the last poll and the cancel: it mounts the bucket
+    read-write, so attempt 1's partial results can't be trusted any more."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+
+    def partial(name: str, n: int) -> None:
+        if name.endswith("-1"):
+            storage.objects[(RUN, "results/1/results.json")] = _results(1, "budget_timeout", 120)
+
+    backend = RetryNeverStops({1: [JobState.FAILED], 2: [JobState.PENDING]}, on_status=partial)
+    result = await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert [s.name for s in backend.specs] == [f"p2p-exec-{SLUG}-1", f"p2p-exec-{SLUG}-2"]
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert stored["manifest"]["attempt"] == 1
+    assert (stored["results_key"], stored["exit_reason"]) == (None, "budget_timeout")
+    codes = [p.code for p in await _events(store) if isinstance(p, WarningPayload)]
+    assert "NO_GPU_CAPACITY" in codes
+
+
+async def test_a_queued_retry_that_stopped_still_never_lets_attempt_1_be_read(
+    store: Store, tmp_path: Path
+) -> None:
+    """It may have run between the last poll and the cancel, then stopped: no way to tell."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+
+    def partial(name: str, n: int) -> None:
+        if name.endswith("-1"):
+            storage.objects[(RUN, "results/1/results.json")] = _results(1, "budget_timeout", 120)
+
+    backend = ScriptedBackend({1: [JobState.FAILED], 2: [JobState.PENDING]}, on_status=partial)
+    result = await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert (stored["results_key"], stored["exit_reason"]) == (None, "budget_timeout")

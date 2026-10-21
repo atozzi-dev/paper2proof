@@ -38,6 +38,7 @@ from app.storage.tables import (
 )
 
 TERMINAL_STEP_STATUSES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+JOB_ACTIVE = "ACTIVE"  # a job row that left the platform queue (its deadline counts from then)
 
 
 class StateConflict(Exception):
@@ -422,6 +423,17 @@ class Store:
                 )
                 for row in rows
             ]
+
+    async def mark_job_active(self, name: str, *, deadline: datetime) -> bool:
+        """A submitted job left the queue: its deadline now counts from then. Only once, and
+        never for a settled job (compare-and-set on the SUBMITTED status)."""
+        async with self._session() as s, s.begin():
+            return await self._cas(
+                s,
+                update(JobRow)
+                .where(JobRow.name == name, JobRow.status == "SUBMITTED")
+                .values(status=JOB_ACTIVE, deadline=deadline),
+            )
 
     async def update_job(
         self,

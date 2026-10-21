@@ -375,6 +375,31 @@ async def test_no_capacity_anywhere_ends_inconclusive_capacity(
     assert "no GPU capacity" in explanation  # the Limitations say why
 
 
+async def test_a_gpu_job_that_never_leaves_the_queue_ends_inconclusive_capacity(
+    store: Store, tmp_path: Path
+) -> None:
+    """S4: the platform accepts the job and waits for a GPU with no error. Past the queue cap
+    it is cancelled (its name is taken: no other placement) and nothing is charged."""
+    ctx, _, _ = await executing_setup(store, tmp_path)
+    artifacts, storage, clock = LocalArtifactStore(tmp_path), FakeRunStorage(), FakeClock()
+    backend = CapacityBackend({1: [JobState.PENDING]}, {})
+    steps: dict[StepName, Step] = {
+        StepName.EXECUTING: _step(artifacts, storage, clock),
+        StepName.ANALYZING: AnalyzingStep(artifacts, storage),
+        StepName.VERDICT: VerdictStep(FakeModelClient(LLM_FIXTURES, case="honest"), artifacts),
+    }
+    [task] = await _orchestrator(store, backend, steps).resume_all()
+
+    assert await task is RunStatus.COMPLETED
+    verdict = await store.get_verdict(RUN, "c1")
+    assert verdict is not None
+    assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.CAPACITY)
+    assert [s.name for s in backend.specs] == [EXEC_1] and backend.cancelled == [EXEC_1]
+    assert await ctx.budget.run_spend(RUN, SpendKind.GPU_MINUTES) == 0
+    [warning] = await _warnings(store, "NO_GPU_CAPACITY")
+    assert "20 minutes" in warning
+
+
 async def test_a_run_cancelled_while_waiting_for_capacity_stops(
     store: Store, tmp_path: Path
 ) -> None:
