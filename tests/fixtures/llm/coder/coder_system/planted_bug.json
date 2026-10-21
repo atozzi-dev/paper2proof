@@ -40,7 +40,7 @@
    {
     "id": "call_5",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"workspace/train.py\", \"args\": [], \"expected_outputs\": [\"metrics.json\"]}"
+    "arguments": "{\"entrypoint\": \"workspace/train.py\", \"args\": [], \"expected_outputs\": [\"metrics.json\"], \"metric_unit\": \"fraction\"}"
    }
   ]
  }

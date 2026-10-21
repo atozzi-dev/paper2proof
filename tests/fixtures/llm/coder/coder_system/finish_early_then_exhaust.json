@@ -13,7 +13,7 @@
    {
     "id": "call_2",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": []}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"metric_unit\": \"fraction\"}"
    }
   ]
  },

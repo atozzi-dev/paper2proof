@@ -124,6 +124,7 @@ async def test_a_planted_bug_is_fixed_and_finished(store: Store, tmp_path: Path)
     assert result.output_ref is not None
     final = artifacts.get_json(result.output_ref)
     assert final["entrypoint"] == "workspace/train.py"
+    assert final["metric_unit"] == "fraction"  # what VERDICT aligns a percent claim with
     archive = storage.objects[(RUN, "staging/workspace.tar")]
     assert archive == pack_workspace(files)  # exactly what the last smoke run tested
     assert final["workspace_sha256"] == hashlib.sha256(archive).hexdigest()
@@ -258,6 +259,27 @@ async def test_finish_needs_the_workspace_that_passed(store: Store, tmp_path: Pa
     result = await step.run(ctx)
     assert result.next is StepName.EXECUTING
     assert any("changed since" in r for r in _tool_results(models))
+
+
+async def test_the_declared_metric_unit_must_fit_the_smoke_values(
+    store: Store, tmp_path: Path
+) -> None:
+    """94.0 is not a fraction: finish without a unit, then as "fraction", is refused."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    in_percent = PASS.model_copy(
+        update={"metrics": {"top1_accuracy": 94.0, "baseline/top1_accuracy": 93.0}}
+    )
+    step, models = _step(
+        "unit_mismatch", artifacts, FakeSmokeExecutor([in_percent]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert len(errors) == 2
+    assert "metric_unit" in errors[0]
+    assert "not a fraction" in errors[1] and "top1_accuracy" in errors[1]
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["metric_unit"] == "percent"
 
 
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from app.execution.smoke import (
     validate_workspace,
 )
 from app.models.client import ToolDef
+from app.verdict.scale import MetricUnit
 
 MAX_READ_CHARS = 200 * 1024
 MAX_WRITE_BYTES = 100 * 1024
@@ -68,6 +69,7 @@ class Finish(_Args):
     entrypoint: str = Field(max_length=200)
     args: list[str] = Field(default_factory=list, max_length=20)
     expected_outputs: list[str] = Field(default_factory=list, max_length=10)
+    metric_unit: MetricUnit  # checked against the smoke values; VERDICT aligns with it
 
 
 ARGS: dict[str, type[_Args]] = {
@@ -92,12 +94,18 @@ _DESCRIPTIONS = {
     "request_packages": "Ask for missing pip packages (max 5). Nothing is installed by you: "
     "deterministic code validates them and provisions again.",
     "finish": "Declare the experiment ready: the entrypoint (workspace script) passed its last "
-    "smoke run and writes the claim's metric (and baseline/<metric> for RELATIVE claims).",
+    "smoke run and writes the claim's metric (and baseline/<metric> for RELATIVE claims). "
+    "metric_unit says how metrics.json writes it: fraction (0.941 means 94.1%), percent (94.1, "
+    "or 0.9 for a 0.9% error rate) or raw (not a share: loss, BLEU, reward). It must fit the "
+    "smoke values.",
 }
 TOOL_DEFS = [
     ToolDef(name=name, description=_DESCRIPTIONS[name], parameters=model.model_json_schema())
     for name, model in ARGS.items()
 ]
+
+
+_NOT_NAME = re.compile(r"[^\w.]")
 
 
 def parse_args(name: str, raw: str) -> _Args:
@@ -108,8 +116,14 @@ def parse_args(name: str, raw: str) -> _Args:
         data: Any = json.loads(raw or "{}")
         return model.model_validate(data)
     except (ValueError, RecursionError, ValidationError) as err:
-        first = err.errors()[0]["msg"] if isinstance(err, ValidationError) else "invalid JSON"
-        raise ToolError(f"invalid arguments for {name}: {first}") from None
+        if isinstance(err, ValidationError):
+            first = err.errors()[0]
+            # names the field to fix; an unknown key is the model's own text: no markup back
+            where = _NOT_NAME.sub("_", ".".join(str(part) for part in first["loc"]))[:60]
+            why = f"{where}: {first['msg']}" if where else first["msg"]
+        else:
+            why = "invalid JSON"
+        raise ToolError(f"invalid arguments for {name}: {why}") from None
 
 
 def check_user_args(args: list[str]) -> list[str]:

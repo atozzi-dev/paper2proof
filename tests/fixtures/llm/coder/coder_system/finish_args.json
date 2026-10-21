@@ -22,7 +22,7 @@
    {
     "id": "call_3",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--seed\", \"0\"], \"expected_outputs\": []}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--seed\", \"0\"], \"expected_outputs\": [], \"metric_unit\": \"fraction\"}"
    }
   ]
  },
@@ -31,7 +31,7 @@
    {
     "id": "call_4",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--sm\"], \"expected_outputs\": []}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--sm\"], \"expected_outputs\": [], \"metric_unit\": \"fraction\"}"
    }
   ]
  },
@@ -49,7 +49,7 @@
    {
     "id": "call_6",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--epochs\", \"2\"], \"expected_outputs\": []}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--epochs\", \"2\"], \"expected_outputs\": [], \"metric_unit\": \"fraction\"}"
    }
   ]
  },
@@ -67,7 +67,7 @@
    {
     "id": "call_8",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--epochs\", \"2\"], \"expected_outputs\": []}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [\"--epochs\", \"2\"], \"expected_outputs\": [], \"metric_unit\": \"fraction\"}"
    }
   ]
  }
