@@ -37,6 +37,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   PACKAGE_REJECTED: 'Package rejected',
   PACKAGES_REQUESTED: 'Packages requested',
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
+  VISION_PAGE_SKIPPED: 'A page could not be read',
   JOB_PREEMPTED: 'GPU job preempted',
   NO_GPU_CAPACITY: 'No GPU available',
   BUNDLE_UNSIGNED: 'Proof Bundle not signed',

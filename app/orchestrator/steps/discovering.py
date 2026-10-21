@@ -17,6 +17,7 @@ from app.discovery.hf_papers import HfPapers, HfUnavailable
 from app.discovery.rank import github_repos, rank_candidates
 from app.discovery.tavily import TavilyClient, TavilyResult, TavilyUnavailable
 from app.domain.discovery import HF_DATASET_ID, Discovery, RepoRef
+from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import DatasetReq, StepName
 from app.ingestion.arxiv import ArxivClient, ArxivMetadata
@@ -127,8 +128,13 @@ class DiscoveringStep:
         if repo is None:
             try:
                 repo = await self._search(ctx, meta.title, arxiv_id, notes)
-            except (TavilyUnavailable, BudgetExceeded) as err:
-                reason = str(err) if isinstance(err, TavilyUnavailable) else "Tavily budget reached"
+            except (TavilyUnavailable, BudgetExceeded, P2PError) as err:
+                if isinstance(err, P2PError):  # the Utility ranker failed: no repository
+                    reason = f"the search results could not be ranked ({err.code.value})"
+                elif isinstance(err, TavilyUnavailable):
+                    reason = str(err)
+                else:
+                    reason = "Tavily budget reached"
                 await self._degrade(ctx, notes, reason)
 
         return await self._done(ctx, Discovery(repo=repo, datasets=datasets, notes=notes))

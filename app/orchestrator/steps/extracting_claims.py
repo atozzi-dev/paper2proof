@@ -19,6 +19,8 @@ from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of
 from app.storage.artifacts import ArtifactStore
 
+VISION_SKIPPED = "VISION_PAGE_SKIPPED"
+
 MAX_PAPER_CHARS = 300_000
 READER_PROMPT = "reader_extract_claims"
 MAX_CLAIMS = 15
@@ -212,7 +214,8 @@ class ExtractingClaimsStep:
     async def _vision_rows(
         self, ctx: RunContext, paper: IngestedPaper
     ) -> dict[int, list[tuple[str, list[float | None]]]]:
-        """Table number -> rows read by the Vision role from rasterized pages (PDF papers)."""
+        """Table number -> rows read by the Vision role from rasterized pages (PDF papers). A
+        page the model can't read is skipped with a warning: the others still count."""
         prompt = load_prompt("vision_table_numbers")
         tables: dict[int, list[tuple[str, list[float | None]]]] = {}
         for image in paper.page_images:
@@ -222,14 +225,24 @@ class ExtractingClaimsStep:
                 {"type": "text", "text": prompt.body},
                 {"type": "image_url", "image_url": {"url": url}},
             ]
-            read = await self._models.structured(
-                Role.VISION,
-                [Message(role="user", content=content)],
-                TableNumbers,
-                run_id=ctx.run_id,
-                step=ctx.step.value,
-                prompt=prompt.name,
-            )
+            try:
+                read = await self._models.structured(
+                    Role.VISION,
+                    [Message(role="user", content=content)],
+                    TableNumbers,
+                    run_id=ctx.run_id,
+                    step=ctx.step.value,
+                    prompt=prompt.name,
+                )
+            except P2PError as err:  # budget and kill switch are not P2PError: they still stop
+                await ctx.emit(
+                    EventType.WARNING,
+                    {
+                        "code": VISION_SKIPPED,
+                        "message": f"page {image.page} was not read ({err.code.value})",
+                    },
+                )
+                continue
             number = _table_number(read.table_label or "")
             if number is not None:
                 tables[number] = [(r.name, r.values) for r in read.rows]
