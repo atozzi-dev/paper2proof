@@ -54,6 +54,7 @@ from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of, selected_claim
 from app.storage.artifacts import ArtifactStore
+from app.verdict.scale import unit_mismatch
 
 SMOKE_TIMEOUT_S = 150
 SEARCH_LIMIT = 5
@@ -491,6 +492,8 @@ class SmokeTestingStep:
         missing = [m for m in needed if m not in metrics]
         if missing:
             raise ToolError(f"metrics.json lacks {', '.join(missing)}")
+        if wrong := unit_mismatch(args.metric_unit, {m: metrics[m] for m in needed}):
+            raise ToolError(wrong)
         try:
             validate_argv(["python", script, *args.args])
         except SmokeContractError as err:
@@ -505,6 +508,7 @@ class SmokeTestingStep:
             {
                 "entrypoint": f"workspace/{script}",
                 "args": list(args.args),
+                "metric_unit": args.metric_unit,
                 "smoke_metrics": metrics,
                 "files": sorted(ws.files),
                 "workspace_sha256": digest,

@@ -143,3 +143,14 @@ def test_model_written_deviations_stay_one_plain_line_each() -> None:
 )
 def test_any_verdict_word_is_detected(text: str, found: bool) -> None:
     assert mentions_verdict(text) is found
+
+
+def test_a_scale_conversion_has_its_own_line_before_the_deviations() -> None:
+    from app.verdict.scale import ScaleNote
+
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=[0], used_seeds=[0], gpu="NVIDIA L40S",
+        exit_reason="completed", deviations=["Smaller model."], scale_note=ScaleNote.TO_PERCENT,
+    )  # fmt: skip
+    lines = text.split("\n")
+    assert lines[3:] == [f"- {ScaleNote.TO_PERCENT}", "- Deviation: Smaller model."]

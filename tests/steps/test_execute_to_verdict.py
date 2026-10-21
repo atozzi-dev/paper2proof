@@ -34,6 +34,7 @@ from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
 FIXTURES = ROOT / "tests" / "fixtures" / "contracts"
 EXECUTION_KEY = f"runs/{RUN}/execution_1.json"
 PLAN_KEY = f"runs/{RUN}/plan.json"
+SMOKE_KEY = f"runs/{RUN}/smoke_result.json"
 CLAIM = Claim(
     id="c1",
     text="Ours beats ResNet-18 by 1.7 points on CIFAR-10",
@@ -75,8 +76,11 @@ async def _setup(
     step: StepName,
     full: bool = False,
     missing: str | None = None,
+    unit: str | None = "raw",
 ) -> tuple[RunContext, LocalArtifactStore, FakeRunStorage]:
     artifacts = LocalArtifactStore(tmp_path)
+    smoke: dict[str, Any] = {"entrypoint": "workspace/train.py", "args": []}
+    artifacts.put_json(SMOKE_KEY, smoke if unit is None else {**smoke, "metric_unit": unit})
     plan = Plan(
         mode=PlanMode.FROM_SCRATCH, claim_ids=["c1"], claim_types={"c1": ClaimType.RELATIVE},
         scale=Scale.REDUCED, seeds=[0, 1, 2], gpu_minutes_est=10,
@@ -100,7 +104,7 @@ async def _setup(
         (StepName.DISCOVERING, "d"),
         (StepName.PLANNING, PLAN_KEY),
         (StepName.PROVISIONING, "p"),
-        (StepName.SMOKE_TESTING, "s"),
+        (StepName.SMOKE_TESTING, SMOKE_KEY),
         (StepName.EXECUTING, EXECUTION_KEY),
     ]
     if step is StepName.VERDICT:
@@ -117,9 +121,10 @@ async def _verdict(
     case: str = "honest",
     full: bool = False,
     missing: str | None = None,
+    unit: str | None = "raw",
 ) -> tuple[Any, list[Any]]:
     ctx, artifacts, storage = await _setup(
-        store, tmp_path, results, StepName.ANALYZING, full, missing
+        store, tmp_path, results, StepName.ANALYZING, full, missing, unit
     )
     analyzed = await AnalyzingStep(artifacts, storage).run(ctx)
     assert analyzed.next is StepName.VERDICT and analyzed.output_ref is not None
@@ -346,14 +351,33 @@ async def test_the_log_summary_is_plain_text(store: Store, tmp_path: Path) -> No
 async def test_fractions_against_a_points_claim_are_aligned_and_noted(
     store: Store, tmp_path: Path
 ) -> None:
-    """The claim says "by 1.7 points"; the script wrote accuracies as fractions."""
-    from app.verdict.scale import NOTE
+    """The claim says "by 1.7 points"; the Coder declared the script writes fractions."""
+    from app.verdict.scale import ScaleNote
 
     raw = _results([0.950, 0.951, 0.949], [0.933, 0.934, 0.932], scale=FULL)
-    verdict, events = await _verdict(store, tmp_path, raw, full=True)
+    verdict, events = await _verdict(store, tmp_path, raw, full=True, unit="fraction")
     assert verdict is not None and verdict.kind is VerdictKind.REPRODUCED
     ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
-    assert NOTE in ready.explanation_md
+    assert (
+        f"- {ScaleNote.TO_PERCENT}" in ready.explanation_md
+    )  # its own line, not a model "Deviation"
     record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    assert record["scale_factor"] == 100
     assert record["measured"]["per_seed"] == [0.950, 0.951, 0.949]
     assert record["measurements"]["per_seed"] == pytest.approx([95.0, 95.1, 94.9])
+
+
+@pytest.mark.parametrize("unit", [None, "raw", "FRACTION", 5, ["fraction"]])
+async def test_without_a_declared_fraction_nothing_is_scaled(
+    store: Store, tmp_path: Path, unit: Any
+) -> None:
+    """A run from before metric_unit existed (None), a raw metric or a tampered unit is decided
+    as written."""
+    raw = _results([0.950, 0.951, 0.949], [0.933, 0.934, 0.932], scale=FULL)
+    verdict, events = await _verdict(store, tmp_path, raw, full=True, unit=unit)
+    assert verdict is not None and verdict.kind is not VerdictKind.REPRODUCED
+    ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
+    assert "Scale:" not in ready.explanation_md
+    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    assert record["scale_factor"] == 1
+    assert record["measurements"] == record["measured"]

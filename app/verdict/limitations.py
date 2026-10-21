@@ -1,9 +1,11 @@
 """The Limitations section of every verdict, written by code from the manifest and the results
-(never by a model): scale, seeds, hardware and deviations from the paper's setup."""
+(never by a model): scale, seeds, hardware, any percent/fraction conversion and deviations
+from the paper's setup."""
 
 import re
 
 from app.domain.contracts import ScaleSpec
+from app.verdict.scale import ScaleNote
 
 DEVIATION_CHARS = 300
 _SPACE = re.compile(r"\s+")
@@ -26,6 +28,7 @@ def limitations(
     gpu: str | None,
     exit_reason: str,
     deviations: list[str],
+    scale_note: ScaleNote | None = None,
 ) -> str:
     lines: list[str] = []
     if scale.full:
@@ -44,6 +47,8 @@ def limitations(
     problem = _EXIT.get(exit_reason)
     if problem:
         lines.append(f"Execution: {problem}.")
+    if scale_note:  # written by app/verdict/scale.py, never by a model
+        lines.append(scale_note)
     lines += [f"Deviation: {_plain(d)}" for d in deviations if _plain(d)]
     return "\n".join(f"- {line}" for line in lines)
 

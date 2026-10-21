@@ -141,8 +141,13 @@ class VerdictStep:
         claim = claims.get(manifest.claim_ref)
         if claim is None or analysis.measurements is None:
             raise P2PError(ErrorCode.INTERNAL_ERROR, "no claim or measurements to decide on")
-        # deterministic percent/fraction alignment, noted in the Limitations (verdict/scale.py)
-        measurements, scale_note = align_to_claim(claim, analysis.measurements)
+        # deterministic percent/fraction alignment from the unit declared and checked at
+        # finish, noted in the Limitations (verdict/scale.py); runs from before it: no unit
+        smoke = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
+        unit = smoke.get("metric_unit") if isinstance(smoke, dict) else None
+        measurements, scale_factor, scale_note = align_to_claim(
+            claim, analysis.measurements, unit if unit in ("fraction", "percent", "raw") else None
+        )
         verdict = adjust_reason(decide(claim, measurements, self._config), analysis.exit_reason)
         limits = limitations(
             scale=manifest.scale,
@@ -150,7 +155,8 @@ class VerdictStep:
             used_seeds=analysis.used_seeds,
             gpu=analysis.gpu,
             exit_reason=analysis.exit_reason,
-            deviations=[*plan.notes, *([scale_note] if scale_note else [])],
+            deviations=plan.notes,
+            scale_note=scale_note,
         )
         text = await self._explain(ctx, verdict, json.dumps(claim.model_dump(mode="json")), limits)
         if text is None or contradicts(text, verdict.kind):
@@ -175,6 +181,7 @@ class VerdictStep:
                 "verdict": verdict.model_dump(mode="json"),
                 "measurements": measurements.model_dump(mode="json"),
                 "measured": analysis.measurements.model_dump(mode="json"),  # as the script wrote
+                "scale_factor": scale_factor,
                 "config": self._config.model_dump(mode="json"),
                 "config_sha256": self._config_sha,
                 "limitations": limits,
