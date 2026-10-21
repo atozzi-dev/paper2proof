@@ -126,10 +126,38 @@ def test_github_oidc_subject_pins_environment_and_branch() -> None:
     main = _code(PROJECT_IAM / "main.tf")
     variables = _code(PROJECT_IAM / "variables.tf")
     assert (
-        '"repo:${var.github_repo}:environment:${var.github_environment}:ref:${var.github_ref}"'
+        '"repo:${local.github_repo_claim}:environment:${var.github_environment}:ref:${var.github_ref}"'
         in main
     )
     assert re.search(r'variable "github_ref" \{[^}]*default\s*=\s*"refs/heads/main"', variables)
+
+
+def test_github_oidc_subject_carries_the_numeric_ids_github_signs() -> None:
+    """Spike S-7: GitHub's sub is repo:<owner>@<owner id>/<name>@<repo id>:...; the name-only
+    form never matches."""
+    main = _code(PROJECT_IAM / "main.tf")
+    assert "${var.github_owner_id}" in main and "${var.github_repo_id}" in main
+    env = _code(ROOT / "infra" / "terraform" / "envs" / "prod-iam" / "variables.tf")
+    assert re.search(r'variable "github_owner_id" \{[^}]*default\s*=\s*"261738626"', env)
+    assert re.search(r'variable "github_repo_id" \{[^}]*default\s*=\s*"1420235945"', env)
+    wiring = _code(ROOT / "infra" / "terraform" / "envs" / "prod-iam" / "main.tf")
+    for name in ("github_owner_id", "github_repo_id", "github_oidc_subject"):
+        assert re.search(rf"\b{name}\s*=\s*var\.{name}\b", wiring), name
+
+
+def test_the_subject_override_accepts_the_id_form() -> None:
+    variables = _code(PROJECT_IAM / "variables.tf")
+    block = re.search(r'variable "github_oidc_subject" \{.*?\n\}', variables, re.S)
+    assert block is not None
+    pattern = re.search(r'regex\("([^"]+)"', block.group(0))
+    assert pattern is not None
+    regex = pattern.group(1).replace("\\\\", "\\")
+    subject = (
+        "repo:atozzi-dev@261738626/paper2proof@1420235945:environment:prod:ref:refs/heads/main"
+    )
+    assert re.fullmatch(regex, subject)
+    assert re.fullmatch(regex, "repo:atozzi-dev/paper2proof:environment:prod:ref:refs/heads/main")
+    assert not re.fullmatch(regex, "repo:atozzi-dev/paper2proof:ref:refs/heads/main")
 
 
 def test_payload_viewer_only_on_the_app_secret() -> None:
@@ -142,3 +170,14 @@ def test_payload_viewer_only_on_the_app_secret() -> None:
     assert bodies
     for body in bodies:
         assert re.search(r"resource_id\s*=\s*var\.secrets_id\b", body), body
+
+
+def test_the_federated_credential_refuses_a_subject_that_widens_the_pin() -> None:
+    """An override may only add the numeric IDs: repo, environment and branch stay pinned."""
+    main = _code(PROJECT_IAM / "main.tf")
+    body = main[main.index('resource "nebius_iam_v1_federated_credentials" "github"') :]
+    body = body[: body.index("\n}\n") + 3]
+    assert "precondition" in body
+    assert ':environment:${var.github_environment}:ref:${var.github_ref}"' in body
+    assert '"/@[0-9]+/"' in body and "== var.github_repo" in body
+    assert "(var.github_owner_id == null) == (var.github_repo_id == null)" in body

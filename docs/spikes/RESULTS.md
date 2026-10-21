@@ -10,7 +10,7 @@
 | S4 | PASS | L40S job ran; provisioning waited ~16 min for capacity with no error |
 | S5 | FAIL → rerun | job volumes need the bucket **ID**, not its name: rerun the baseline with the ID; fix the Nebius backend |
 | S6 | FAIL → rerun | quota `compute.instance.non-gpu.vcpu` was 0 (raise requested); endpoints count against it |
-| S7 | pending | — |
+| S7 | PASS | CI deploys use OIDC: GitHub token with audience `sts.nebius.com`, subject with numeric IDs, exchanged by the SDK (`nebius_token.py`) |
 | S8 | PASS | Tavily key works; 4125 credits |
 | S9 | PARTIAL | HF Papers has no structured repo field; parse GitHub URLs from the HF summary/arXiv abstract, Tavily as fallback (A-17) |
 | S10 | pending | — |
@@ -55,6 +55,8 @@
   - Super does not honour `response_format=json_schema` (empty content); Ultra and Nano do. Forced tool calls work on all three.
   - Reasoning is switched only by `chat_template_kwargs: {enable_thinking: false|true}`; system-prompt flags do nothing.
   - Ultra with thinking on takes up to ~2 minutes for a short prompt.
+  - Catalog context windows (not exposed by `/models`): Super 256K, Ultra 1,024K, Nano 262K tokens.
+  - `nvidia/Nemotron-3.5-Super-VL` is served by the API (a chat call answers, with `reasoning_content` when thinking is on) but is not listed in the public model catalog; Nemotron-3-Nano-Omni and Nemotron-Nano-V2-12b (vision) are "Dedicated" only.
 - **Decision:**
   - `vision` role → `nvidia/Nemotron-3.5-Super-VL` (an NVIDIA open model with image input). Its price is not yet in `config/pricing.yaml`: the ledger charges unpriced calls at the worst-case price until A-30 reconciles prices.
   - Keep `reasoning_toggle: chat_template_kwargs` and `structured_output: tool` for every role (Super needs it).
@@ -108,6 +110,7 @@
 - **Verdict:** FAIL (wrong volume source), to rerun
 - **Facts:** for **jobs**, `VolumeMount.source` is a Nebius Storage **bucket ID** or a filesystem ID (SDK docstring: "Use a Nebius Storage bucket ID or Compute filesystem ID"); the CLI reads the part before the first `-` as the source type, so a bucket name such as `p2p-...` fails. Endpoints and Devlabs accept a name or an ID.
 - **Decision:** rerun the baseline with `S5_BUCKET=<bucket ID>`. The Nebius backend must resolve each bucket name to its ID before creating a job (A-20 follow-up: today it passes the name).
+- **Rerun (2026-10-21) with the bucket ID:** the create passed the volume validation and stopped on the vCPU quota (`compute.instance.non-gpu.vcpu`, limit 0), so the ID form is accepted. Mount and egress still to observe.
 
 ## S6 — Endpoint update by digest; container disk is ephemeral; Litestream restore works after stop/start
 
@@ -127,10 +130,28 @@
 
 - **Question:** Federated credentials with GitHub Actions OIDC?
 - **Command:** `spikes/s7_oidc.yml` copied to `.github/workflows/` on branch `spike/oidc`
-- **Output:**
-- **Verdict:** pending
+- **Output (key facts, run of the probe that uses `.github/scripts/nebius_token.py`):**
+  ```
+  first probe (hand-made RFC 8693 over HTTP):
+    auth.eu.nebius.com/oauth2/token/exchange -> HTTP 403 "error code: 1010" (Cloudflare)
+    sts.nebius.com/oauth2/token/exchange -> HTTP 400 "Incorrect subject id:
+      repo:atozzi-dev@261738626/paper2proof@1420235945:ref:refs/heads/spike/oidc"
+  deploy path (SDK FederatedCredentialsBearer: subject = service account id, actor = GitHub JWT):
+    aud https://github.com/atozzi-dev -> INVALID_ARGUMENT "JWT audience is missing or unsupported"
+    aud token-service.iam.new.nebiuscloud.net -> same; aud https://sts.nebius.com -> same
+    aud sts.nebius.com -> "Nebius token (oidc) written"; nebius iam whoami OK
+  VERDICT: PASS
+  ```
+- **Verdict:** PASS
 - **Facts:**
+  - The exchange works through the Nebius SDK's federated-credentials flow (gRPC token service): `subject_token` = the service account ID (`urn:nebius:params:oauth:token-type:subject_identifier`), `actor_token` = the GitHub JWT. The first probe's HTTP requests had the roles swapped.
+  - The GitHub token must be requested with audience **`sts.nebius.com`** (no scheme). The federated credential has no audience field.
+  - GitHub's `sub` claim for this repository carries the numeric owner and repository IDs: `repo:atozzi-dev@261738626/paper2proof@1420235945:ref:<ref>`. The federated subject must match it exactly.
+  - The token works with the CLI (`NEBIUS_IAM_TOKEN=<token> nebius iam whoami`).
 - **Decision:**
+  - CI deploys use OIDC: environment `prod` variables `NEBIUS_AUTH_MODE=oidc` and `NEBIUS_OIDC_AUDIENCE=sts.nebius.com`. No long-lived key in GitHub.
+  - `envs/prod-iam` composes the ID form by default (`github_owner_id` 261738626, `github_repo_id` 1420235945). With the custom subject template (H-04 step 0: repo, context, ref) it is expected to be `repo:atozzi-dev@261738626/paper2proof@1420235945:environment:prod:ref:refs/heads/main`. The first CI deploy confirms it: `nebius_token.py` prints `GitHub OIDC token claims: sub=...`, and only on a mismatch is `github_oidc_subject` set to that value (a precondition keeps repo, environment and branch pinned).
+  - The throwaway service account, the federated credential and the `spike/oidc` branch were deleted after the run.
 
 ## S8 — Tavily key and credits
 

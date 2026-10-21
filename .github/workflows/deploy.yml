@@ -164,7 +164,7 @@ jobs:
       BUILD_DIGESTS: ${{ needs.build.outputs.digests }}
       NEBIUS_AUTH_MODE: ${{ vars.NEBIUS_AUTH_MODE }}
       NEBIUS_CI_SA_ID: ${{ vars.NEBIUS_CI_SA_ID }}
-      NEBIUS_OIDC_AUDIENCE: ${{ vars.NEBIUS_OIDC_AUDIENCE }}
+      NEBIUS_OIDC_AUDIENCE: ${{ vars.NEBIUS_OIDC_AUDIENCE || 'sts.nebius.com' }}  # S-7
       NEBIUS_REGISTRY_HOST: ${{ vars.NEBIUS_REGISTRY_HOST }}
       REGISTRY_CONTROL: ${{ vars.REGISTRY_CONTROL }}
       REGISTRY_SANDBOX: ${{ vars.REGISTRY_SANDBOX }}
@@ -239,8 +239,8 @@ jobs:
             --require-hashes --only-binary :all: --no-deps -r .github/deploy-requirements.txt
 
       # The fallback key reaches the step only in key mode; in oidc mode its mere presence
-      # fails the step, so it gets deleted once S-7 passes.
-      - name: Get a Nebius token (OIDC; S-7 pending, fallback key)
+      # fails the step, so it is deleted (S-7 passed: OIDC with audience sts.nebius.com).
+      - name: Get a Nebius token (OIDC, or the fallback key)
         env:
           NEBIUS_SA_CREDENTIALS: ${{ vars.NEBIUS_AUTH_MODE == 'key' && secrets.NEBIUS_SA_CREDENTIALS || '' }}
           NEBIUS_SA_CREDENTIALS_SET: ${{ secrets.NEBIUS_SA_CREDENTIALS != '' }}

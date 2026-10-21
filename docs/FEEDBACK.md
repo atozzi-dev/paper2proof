@@ -22,6 +22,14 @@ Collected during development. Consolidated into the Devpost feedback field at su
 - **Suggestion:** Add a short "Pricing and billing" section, including how credits apply during the beta.
 - **Severity:** minor
 
+### 2026-10-21 — Sandboxes with networking disabled are isolated and fast (praise)
+- **Context:** spike S3 (H-03), smoke tests of agent-written code.
+- **What happened:** after activation, a disposable run with networking disabled had only `lo` and could not connect out, and started in 1.5 s (11 s with networking on). `whoami` lists permissions and limits clearly.
+- **Expected:** this.
+- **Impact:** smoke tests can move from CPU jobs to Sandboxes.
+- **Suggestion:** none; document the per-run cost.
+- **Severity:** praise
+
 ## Serverless AI (Endpoints, Jobs)
 
 ### 2026-10-15 — `ai job get`, job states and `ai endpoint update` are undocumented
@@ -32,15 +40,55 @@ Collected during development. Consolidated into the Devpost feedback field at su
 - **Suggestion:** Add get/get-by-name and update examples plus a states table to both pages, and a JSON output example showing `status.state`.
 - **Severity:** major
 
+### 2026-10-21 — A job volume needs a bucket ID; a name fails as "unsupported volume source type"
+- **Context:** spikes S5 and S11 (H-03), per-run bucket mounted in a Serverless job.
+- **What happened:** `nebius ai job create --volume p2p-spike-s5-...:/mnt/run:rw` failed with `InvalidArgument: unsupported volume source type "p2p"`: the CLI reads the text before the first `-` as a source type. The CLI reference does not define SOURCE; only the SDK docstring says jobs take "a Nebius Storage bucket ID or Compute filesystem ID". Endpoints and Devlabs accept a name or an ID.
+- **Expected:** the same rule for jobs as for endpoints (name or ID), or at least a documented SOURCE and an error such as "use the bucket ID".
+- **Impact:** a production bug found only by the spike (the backend passed names), plus a backend fix that looks every bucket up first.
+- **Suggestion:** accept bucket names for jobs, and document `--volume` with examples.
+- **Severity:** major
+
+### 2026-10-21 — New tenants have 0 non-GPU vCPUs, so no Serverless job or endpoint can start
+- **Context:** spikes S5 and S6 (H-03).
+- **What happened:** even a CPU-only job and a 2-vCPU endpoint failed with `ResourceExhausted: compute.instance.non-gpu.vcpu (limit 0, requested 2)`, while GPU jobs on L40S worked within the GPU quota. The increase request has been "waiting for approval" for hours.
+- **Expected:** a small default CPU quota (a few vCPUs), or a hint in the Serverless quickstart that this quota must be raised first.
+- **Impact:** endpoint, network and mount spikes blocked for a day during a 2-week hackathon.
+- **Suggestion:** grant a default CPU quota with the account, or auto-approve small increases.
+- **Severity:** blocker
+
+### 2026-10-21 — A GPU job waits ~16 minutes for capacity without any signal
+- **Context:** spike S4 (H-03), one L40S job.
+- **What happened:** the logs showed "Waiting before retrying resource provisioning" and the job started after ~16 minutes of wall time; the job state stayed in provisioning with no reason or estimate.
+- **Expected:** a state detail ("waiting for capacity") so that an orchestrator can choose another platform or report the wait.
+- **Impact:** our timeouts and GPU budgets must count from `started_at`, and the capacity fallback cannot trigger on a slow start.
+- **Suggestion:** expose the provisioning reason in `status.state_details`.
+- **Severity:** minor
+
 ## Networking, IAM, Storage, KMS
 
 ### 2026-10-15 — No guide for GitHub Actions OIDC → Nebius access token (federated credentials)
 - **Context:** A-02, spike S7 (keyless CI deploys with `sa-ci-deployer`).
 - **What happened:** `nebius iam federated-credentials create` is documented (issuer URL, subject id, federated subject from `sub`), but nothing explains how a workload then exchanges its external JWT for a Nebius access token: endpoint, grant type, `subject_token_type`, how the service account is selected. The WIF pages only cover the outbound direction (Nebius token → external OIDC token via sts.nebius.com).
 - **Expected:** A "GitHub Actions" how-to with the exact token-exchange request (or a CLI/action that performs it), as other clouds provide. https://docs.nebius.com/cli/reference/iam/federated-credentials/create
-- **Impact:** The S7 spike has to try several endpoints and parameter shapes; if none works we fall back to a long-lived access key in GitHub Environments.
+- **Impact:** The S7 spike has to try several endpoints and parameter shapes; if none works we fall back to a long-lived access key in GitHub Environments. Resolved on 2026-10-21 by trial (see the two entries below): SDK flow, audience `sts.nebius.com`, subject with numeric IDs.
 - **Suggestion:** Publish an end-to-end GitHub Actions example (federated credential + workflow snippet), ideally an official `nebius/login` action.
 - **Severity:** major
+
+### 2026-10-21 — Federated credentials: the expected JWT audience is not documented
+- **Context:** spike S7 (H-03), keyless CI deploys with GitHub Actions OIDC.
+- **What happened:** the exchange (SDK `FederatedCredentialsBearer`) failed with `INVALID_ARGUMENT: JWT audience is missing or unsupported: '[https://github.com/atozzi-dev]'` (GitHub's default), then with `token-service.iam.new.nebiuscloud.net` and `https://sts.nebius.com`. Only `sts.nebius.com` (no scheme) works, found by trying candidates in a workflow. The federated credential resource has no audience field, and the error does not say which value is expected.
+- **Expected:** the accepted audience in the federated-credentials docs and in the error message. https://docs.nebius.com/cli/reference/iam/federated-credentials/create
+- **Impact:** about two hours and four CI runs.
+- **Suggestion:** document `aud = sts.nebius.com` with a GitHub Actions example, and print the expected audience in the error.
+- **Severity:** major
+
+### 2026-10-21 — GitHub OIDC subjects carry numeric IDs; the HTTP exchange endpoint answers a Cloudflare 1010
+- **Context:** spike S7 (H-03).
+- **What happened:** GitHub's `sub` for this repository is `repo:atozzi-dev@261738626/paper2proof@1420235945:ref:refs/heads/...`, not the name-only form that federated-credential examples use, so the first credential never matched (`Incorrect subject id: ...`, which at least prints the value). `https://auth.eu.nebius.com/oauth2/token/exchange` answered GitHub-hosted runners with HTTP 403 "error code: 1010" (Cloudflare), so the documented HTTP exchange cannot be used from CI; the SDK's gRPC token service works.
+- **Expected:** an example subject in the ID form, and one supported exchange path for CI.
+- **Impact:** two extra CI runs.
+- **Suggestion:** show both subject forms in the docs, and say that CI should use the SDK/CLI flow rather than the HTTP gateway.
+- **Severity:** minor
 
 ## Observability (Tracing, Monitoring, Logs)
 
@@ -79,6 +127,22 @@ Collected during development. Consolidated into the Devpost feedback field at su
 - **Severity:** praise
 
 ## Nemotron models (Nano, Super, Ultra, Nano Omni)
+
+### 2026-10-21 — Super ignores `response_format=json_schema`; thinking is switched only by `chat_template_kwargs`
+- **Context:** spike S2 (H-03), structured extraction of claims.
+- **What happened:** `nvidia/nemotron-3-super-120b-a12b` returned HTTP 200 with empty content for `response_format: json_schema`, while Ultra and Nano honour it; forced tool calls work on all three. Reasoning ignores the system-prompt switches (`/no_think`, "detailed thinking off") and turns off only with `chat_template_kwargs: {enable_thinking: false}`.
+- **Expected:** consistent structured-output support across the Nemotron family, and the thinking switch in the model card.
+- **Impact:** we route every role through tool calls instead.
+- **Suggestion:** document per model which structured-output modes and reasoning switches are supported.
+- **Severity:** minor
+
+### 2026-10-21 — The model catalog and `/models` disagree
+- **Context:** spike S2 (H-03), choosing the vision model.
+- **What happened:** `GET /v1/models` lists `nvidia/Nemotron-3.5-Super-VL` and it answers, but the public catalog does not show it; Nemotron-3-Nano-Omni (our planned vision model) is listed as "Dedicated" only. Context windows are shown in the catalog but not in `/models`.
+- **Expected:** one source of truth, with context length and modality in `/models`.
+- **Impact:** a failed role resolution at the first run and a manual check of the catalog.
+- **Suggestion:** expose `context_length` and modalities in `/models`, and keep the catalog in sync.
+- **Severity:** minor
 
 ## NemoClaw / OpenShell
 
