@@ -122,15 +122,44 @@ Use `scipy.stats.t.ppf`. If `s == 0`, then `half = 0` (deterministic runs are al
 ## Scale alignment before `decide()` (`app/verdict/scale.py`)
 
 Papers often state accuracy-like metrics in percent ("94.1%", "by 1.7 points") while scripts
-write fractions (0.941). VERDICT calls `align_to_claim(claim, measurements)` before `decide()`.
-It multiplies every measured value (both arms of a RELATIVE claim) by 100 only when:
-- the claim's text says percent (`%`, "percent", "points", "pp");
-- the claim's number (`reported_value`, or `claimed_delta` for RELATIVE) is in (1, 100];
-- every measured value is in [0, 1].
+write fractions (0.941). The factor is decided from two declared facts, never inferred from the
+measured values:
+- **the metric's unit**: the Coder's `finish` call must declare `metric_unit` (`fraction`,
+  `percent` or `raw`). SMOKE_TESTING refuses it when the last smoke run's values do not fit
+  (`fraction` in [0, 1], `percent` in [0, 100]; `raw` is unchecked) and stores it in
+  `smoke_result.json`;
+- **whether the claim is in percent**: the claim's own number (`reported_value`, or
+  `claimed_delta` for RELATIVE, compared without its sign) appears in its text followed by `%`
+  (LaTeX `\%` too), "percent", "per cent", "points" or "pp", optionally with a `± std` in
+  between (`94.1 ± 0.2%`, `94.1 \pm 0.2\%`). A `%` attached to any other number does not
+  count.
 
-Anything else is left unchanged. The conversion is deterministic (invariant 2 holds) and is
-written into the verdict's Limitations. `verdict.json` keeps both `measurements` (aligned) and
-`measured` (as the script wrote them). The Coder is also told to write the paper's scale.
+VERDICT calls `align_to_claim(claim, measurements, unit)` before `decide()`:
+
+| Unit | Claim | Factor |
+|---|---|---|
+| `fraction` | in percent | ×100 (both arms of a RELATIVE claim) |
+| `percent` | ABSOLUTE, higher is better, not in percent, number in [0, 1] | ×0.01 |
+| anything else (incl. `raw`, or no unit in a run from before this field) | any | ×1 |
+
+- A bare RELATIVE delta measured in percent is never divided: "improves by 0.5" may be in
+  points.
+- A lower-is-better metric is never divided: shrinking an error or a loss makes it look
+  better, and the one-sided ABSOLUTE comparison would turn a failure into REPRODUCED.
+- The decided values (both arms) are checked against the declared unit again, since the smoke
+  run was only a sample. If they don't fit, the factor is ×1 and the `Scale:` line says so.
+
+The conversion is deterministic (invariant 2 holds). It gets its own `Scale:` line in the
+verdict's Limitations, and that line is written by code: one of the `ScaleNote` constants.
+`verdict.json` keeps `measurements` (aligned), `measured` (as the script wrote them) and
+`scale_factor`.
+
+Known limit: for values in [0, 1], both units pass the smoke check, so the Coder's declaration
+alone picks ×100 or ×1. A wrong declaration there can mislead in either direction: a 0.9%
+success rate declared as a fraction becomes 90. That gives the Coder no power it lacks
+already, since it writes the script that produces the values. The declared unit is recorded
+in `smoke_result.json` and the Proof Bundle, and the factor in `verdict.json` and the
+`Scale:` line, so a reviewer can always see it.
 
 ## Required tests (`tests/verdict/test_engine.py`)
 
