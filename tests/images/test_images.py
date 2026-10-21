@@ -257,3 +257,15 @@ def test_the_api_image_carries_its_build_commit() -> None:
     assert "org.opencontainers.image.revision=$BUILD_COMMIT" in text
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "--build-arg BUILD_COMMIT=$$(git rev-parse HEAD)" in makefile
+
+
+@pytest.mark.parametrize("dockerfile", DOCKERFILES, ids=lambda p: p.parent.name)
+def test_opt_p2p_is_created_traversable_before_files_land_in_it(dockerfile: Path) -> None:
+    """Recent BuildKit applies `COPY --chmod` to the directories it creates too: a 0444
+    /opt/p2p has no search bit, and the non-root user cannot open its own entrypoint."""
+    final = dockerfile.read_text(encoding="utf-8").split("\nFROM ")[-1]
+    copy = re.search(r"^COPY [^\n]*\s/opt/p2p/", final, re.MULTILINE)
+    assert copy is not None, "every image copies its scripts into /opt/p2p/: update this test"
+    # root-owned: no -o/-g (owned by p2p, untrusted code could replace the entrypoint)
+    created = re.search(r"install -d -m 0755 /opt/p2p(?=\s|$)", final)
+    assert created is not None and created.start() < copy.start()

@@ -36,13 +36,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/srv/p2p \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin
 # the slim base has no useradd: the user is written directly
+# /opt/p2p is created here as root 0755: when a COPY --chmod=0444 creates it, recent BuildKit
+# leaves it without a search bit and p2p cannot open its own scripts.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/* \
  && echo 'p2p:x:10001:' >> /etc/group \
  && echo 'p2p:x:10001:10001:p2p:/home/p2p:/usr/sbin/nologin' >> /etc/passwd \
  && install -d -o 10001 -g 10001 -m 0750 /home/p2p \
- && install -d -o 10001 -g 10001 /var/lib/p2p
+ && install -d -o 10001 -g 10001 /var/lib/p2p \
+ && install -d -m 0755 /opt/p2p
 COPY --from=build /opt/venv /opt/venv
 # uv leaves a world-writable lock file in the venv: nothing in it may be writable by p2p
 RUN rm -f /opt/venv/.lock

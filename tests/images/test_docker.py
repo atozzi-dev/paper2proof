@@ -69,6 +69,27 @@ def test_runner_constraints_are_root_owned_and_read_only(image: str) -> None:
     assert out.split() == ["root", "444"]
 
 
+@pytest.mark.parametrize("image", ALL)
+def test_opt_p2p_is_a_root_owned_traversable_directory(image: str) -> None:
+    """A COPY --chmod=0444 that creates /opt/p2p leaves it without a search bit on recent
+    BuildKit; owned by p2p, untrusted code could replace the entrypoint."""
+    out = _run(image, "-c", "%U %a", "/opt/p2p", entrypoint="stat")
+    assert out.split() == ["root", "755"]
+
+
+def test_the_api_start_script_and_config_are_read_only() -> None:
+    out = _run("p2p-api", "-c", "%U %a %n", "/opt/p2p/start.sh", "/opt/p2p/litestream.yml",
+               entrypoint="stat")  # fmt: skip
+    assert out.split() == [
+        "root",
+        "555",
+        "/opt/p2p/start.sh",
+        "root",
+        "444",
+        "/opt/p2p/litestream.yml",
+    ]
+
+
 def test_constraints_match_the_cpu_runner_s_versions() -> None:
     script = (
         "import importlib.metadata as m\n"

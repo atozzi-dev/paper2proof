@@ -23,6 +23,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
+# /opt/p2p is created here as root 0755: when a COPY --chmod=0444 creates it, recent BuildKit
+# leaves it without a search bit and p2p cannot open its own scripts.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini zstd \
  && rm -rf /var/lib/apt/lists/* \
@@ -30,6 +32,7 @@ RUN apt-get update \
  && echo 'p2p:x:10001:10001:p2p:/home/p2p:/usr/sbin/nologin' >> /etc/passwd \
  && install -d -o 10001 -g 10001 -m 0750 /home/p2p \
  && install -d -o 10001 -g 10001 /work \
+ && install -d -m 0755 /opt/p2p \
  && find / -xdev -perm /6000 -type f -exec chmod a-s {} +  # no setuid path to root
 COPY --from=build /opt/venv /opt/venv
 # uv leaves a world-writable lock file in the venv: nothing in it may be writable by p2p
