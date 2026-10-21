@@ -153,6 +153,11 @@ class CapacityError(Exception):
     quota used up, "not enough resources"). The job was not created (execution-contracts §8)."""
 
 
+class JobStatusUnavailable(Exception):
+    """status(): the platform could not be asked right now (unavailable, timeout, internal
+    error). Not a fact about the job: callers keep watching it and never cancel because of it."""
+
+
 class QuotaExceeded(Exception):
     """submit(): a project quota other than GPUs (vCPU, disks, instances...) is used up. Not a
     capacity verdict: waiting or another GPU platform never helps, an operator must raise it.

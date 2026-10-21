@@ -57,7 +57,14 @@ from nebius.api.nebius.storage.v1 import (
 from nebius.sdk import SDK
 from pydantic import SecretStr
 
-from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState, QuotaExceeded
+from app.execution.backend import (
+    CapacityError,
+    JobHandle,
+    JobSpec,
+    JobState,
+    JobStatusUnavailable,
+    QuotaExceeded,
+)
 from app.execution.naming import bucket_name
 from app.execution.s3 import S3Client, S3RunStorage, empty_bucket, make_s3_client
 
@@ -145,6 +152,10 @@ _NON_GPU_NAMES = frozenset({"compute.instance.count"})
 _MESSAGE_CHARS = 1024
 _MAX_QUOTAS = 5
 _TRANSIENT = frozenset({"too_many_requests", "not_enough_resources"})
+# status() errors that say nothing about the job: an outage of the control plane
+_TRANSIENT_CODES = frozenset(
+    {"UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "UNKNOWN", RESOURCE_EXHAUSTED, "ABORTED"}
+)
 
 
 def _code(err: RequestError) -> str:
@@ -214,7 +225,8 @@ _STATES: dict[JobStatus.State, JobState] = {
     JobStatus.State.FAILED: JobState.FAILED,
     JobStatus.State.ERROR: JobState.FAILED,
     JobStatus.State.CANCELLED: JobState.CANCELLED,
-}  # [S-4] how a preempted job ends; DELETING and unknown values map to UNKNOWN (not terminal)
+    JobStatus.State.DELETING: JobState.CANCELLED,  # it runs no more: reaper, gateway idle
+}  # [S-4] how a preempted job ends; unknown values map to UNKNOWN (not terminal)
 
 
 def job_state(job: Job) -> JobState:
@@ -480,6 +492,8 @@ class NebiusJobBackend:
         except RequestError as err:
             if _code(err) == NOT_FOUND:
                 return JobState.UNKNOWN
+            if _code(err) in _TRANSIENT_CODES:
+                raise JobStatusUnavailable(f"{handle.name}: {_code(err)}") from err
             raise
         if job.metadata.name != handle.name:
             raise JobBackendError(f"job {handle.nebius_id} does not match {handle.name}")
@@ -491,6 +505,8 @@ class NebiusJobBackend:
         except RequestError as err:
             if _code(err) in (NOT_FOUND, FAILED_PRECONDITION):
                 return  # gone, or already finished
+            if _code(err) in _TRANSIENT_CODES:
+                raise JobStatusUnavailable(f"{handle.name}: cancel {_code(err)}") from err
             raise
         with contextlib.suppress(TimeoutError):  # callers poll status() until it is terminal
             await asyncio.wait_for(op.wait(), self._op_timeout_s)
