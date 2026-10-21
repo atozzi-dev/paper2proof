@@ -95,17 +95,23 @@ def test_spike_never_prints_raw_credentials(name: str) -> None:
     assert not leaks, f"spikes/{name} prints a credential: {leaks}"
 
 
-def test_s7_prints_only_allowlisted_exchange_fields() -> None:
+def test_s7_exchanges_through_the_deploy_script_and_never_prints_a_token() -> None:
     text = _text("s7_oidc.yml")
+    assert 'python" -I .github/scripts/nebius_token.py' in text  # masks the JWT and the token
     assert "json.dumps(payload)" not in text
-    assert "SAFE_KEYS" in text
+    assert not re.search(r"(echo|cat|printf)[^\n|]*\$(NEBIUS_IAM_TOKEN|\{?jwt)", text)
+    assert 'rm -f "$RUNNER_TEMP/nebius.token"' in text
 
 
 def test_s7_installs_cli_from_a_pinned_checksum_before_any_token() -> None:
     text = _text("s7_oidc.yml")
     assert "| bash" not in text
     assert "sha256sum -c" in text
-    assert text.index("sha256sum -c") < text.index("ACTIONS_ID_TOKEN_REQUEST_URL")
+    assert text.index("sha256sum -c") < text.index(".github/scripts/nebius_token.py \\")
+
+
+def test_s7_requests_the_audience_nebius_accepts() -> None:
+    assert "'sts.nebius.com'" in _text("s7_oidc.yml")  # spike S-7, 2026-10-21
 
 
 def test_readme_s7_teardown_deletes_the_federated_credential() -> None:
@@ -163,3 +169,16 @@ def test_spikelib_never_forwards_authorization_on_redirect(
 
 def test_probe_server_drops_idle_connections(probe_server: object) -> None:
     assert 0 < probe_server.Handler.timeout <= 60  # type: ignore[attr-defined]
+
+
+def test_s7_reads_the_token_file_only_into_the_cli_environment() -> None:
+    for line in _text("s7_oidc.yml").splitlines():
+        if "nebius.token" in line and "cat" in line:
+            assert 'NEBIUS_IAM_TOKEN="$(cat "$RUNNER_TEMP/nebius.token")"' in line, line
+
+
+def test_s7_whoami_fails_on_a_failed_cli_call_not_on_jq() -> None:
+    text = _text("s7_oidc.yml")
+    step = text[text.index("- name: Use the token with the Nebius CLI") :]
+    step = step[: step.index("- name: Verdict")]
+    assert "set -euo pipefail" in step

@@ -143,30 +143,34 @@ Uses a **throwaway service account with no roles** (`whoami` needs none), never 
 a federated credential outlives the branch, so anyone who re-creates `spike/oidc` later would
 get that account's token until the credential is deleted.
 ```bash
-# WSL, parent-id = p2p-control
-nebius iam service-account create --name sa-spike-oidc            # note its id -> SPIKE_SA_ID
+# Linux shell, parent-id = p2p-control
+SPIKE_SA_ID=$(nebius iam service-account create --name sa-spike-oidc --format jsonpath='{.metadata.id}')
 nebius iam federated-credentials create --parent-id "$NEBIUS_CONTROL_PROJECT_ID" \
   --name gh-spike-oidc --subject-id "$SPIKE_SA_ID" \
   --oidc-provider-issuer-url https://token.actions.githubusercontent.com \
-  --federated-subject-id "repo:atozzi-dev/paper2proof:ref:refs/heads/spike/oidc"   # note its id
+  --federated-subject-id "repo:atozzi-dev@261738626/paper2proof@1420235945:ref:refs/heads/spike/oidc"
+# GitHub's sub carries the numeric owner and repository IDs (S7, 2026-10-21).
 curl -fsSL https://artifacts.nebius.cloud/cli/install.sh | sha256sum      # -> installer sha256
 ```
-On GitHub set repository **variables** `NEBIUS_SPIKE_SA_ID` and `NEBIUS_CLI_INSTALLER_SHA256`, then:
+On GitHub set repository **variables** `NEBIUS_SPIKE_SA_ID`, `NEBIUS_CLI_INSTALLER_SHA256` and
+`NEBIUS_OIDC_AUDIENCE=sts.nebius.com` (the only audience Nebius accepts), then:
 ```bash
 git switch -c spike/oidc
 mkdir -p .github/workflows && cp spikes/s7_oidc.yml .github/workflows/spike-s7-oidc.yml
 git add .github/workflows/spike-s7-oidc.yml && git commit -m "ci: spike S7 OIDC probe"
 git push -u origin spike/oidc          # then read the run log on GitHub
 ```
+The probe exchanges the token with `.github/scripts/nebius_token.py`, the deploy job's own code.
 **PASS:** the last step prints `VERDICT: PASS` (token exchanged and `nebius iam whoami` works).
-**FAIL:** fallback = `sa-ci-deployer` access key in a GitHub Environment with required reviewers.
-The log shows which exchange endpoint, parameters and audience were accepted (allowlisted fields
-only); copy those lines.
+**FAIL:** the exchange step prints the non-secret claims it presented (`GitHub OIDC token
+claims: sub=... aud=...`); compare the sub with the federated credential. Fallback = `sa-ci-deployer` access key in a GitHub Environment with
+required reviewers.
 
 Teardown (always, PASS or FAIL):
 ```bash
-git switch main && git push origin --delete spike/oidc && git branch -D spike/oidc
-nebius iam federated-credentials delete --id <federated credential id>
+git switch develop && git push origin --delete spike/oidc && git branch -D spike/oidc
+FC_ID=$(nebius iam federated-credentials list --parent-id "$NEBIUS_CONTROL_PROJECT_ID" --format json   | jq -r '.items[]? | select(.metadata.name=="gh-spike-oidc") | .metadata.id')
+nebius iam federated-credentials delete --id "$FC_ID"
 nebius iam service-account delete --id "$SPIKE_SA_ID"
 ```
 The real credential for `sa-ci-deployer` (subject pinned to `refs/heads/main`) is created in A-03/H-04.
