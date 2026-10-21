@@ -1,7 +1,7 @@
 # Role -> model resolution. IDs are resolved at startup against GET /v1/models.
 # Use `match` (case-insensitive substring, must hit exactly one model) or `exact_id`.
 # Quote "on"/"off": unquoted, YAML 1.1 parsers turn them into booleans.
-# Update after spike S-2 (docs/spikes/RESULTS.md).
+# Checked by spike S-2 on 2026-10-21 (docs/spikes/RESULTS.md).
 provider:
   base_url: https://api.tokenfactory.nebius.com/v1/
   api_key_env: NEBIUS_API_KEY
@@ -15,7 +15,7 @@ roles:
   coder:   { match: "nemotron-3-super",    max_output: 6000, temperature: 0.2, reasoning: "off" }
   planner: { match: "nemotron-3-ultra",    max_output: 8000, temperature: 0.2, reasoning: "on", timeout_s: 300 }
   judge:   { match: "nemotron-3-ultra",    max_output: 3000, temperature: 0.0, reasoning: "on", timeout_s: 300 }
-  vision:  { match: "nano-omni",           max_output: 2000, temperature: 0.0, reasoning: "off" }
+  vision:  { match: "nemotron-3.5-super-vl", max_output: 2000, temperature: 0.0, reasoning: "off" }  # S-2: no Nano Omni
   utility: { match: "nemotron-3-nano-30b", max_output: 1500, temperature: 0.0, reasoning: "off" }
 
 fallbacks:
