@@ -16,7 +16,7 @@ from typing import Protocol
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import ErrorCode, RunStatus, StepName
-from app.execution.backend import CapacityError, JobBackend
+from app.execution.backend import CapacityError, JobBackend, QuotaExceeded
 from app.observability import metrics, tracing
 from app.orchestrator.budget import Budget, BudgetExceeded, BudgetLimits, KillSwitchActive
 from app.orchestrator.context import RunContext
@@ -185,6 +185,14 @@ class Orchestrator:
             return _Ending(RunStatus.FAILED, ErrorCode.KILL_SWITCH, message)
         except P2PError as err:
             return _Ending(RunStatus.FAILED, err.code, err.message)
+        except QuotaExceeded as err:  # never retried: an operator has to raise it
+            quotas = ", ".join(err.quotas)
+            log.error(
+                "cloud quota exceeded",
+                extra={"run_id": ctx.run_id, "quotas": quotas, "alert": True},
+            )
+            message = f"a cloud project quota is used up ({quotas}): an operator must raise it"
+            return _Ending(RunStatus.FAILED, ErrorCode.CAPACITY, message)
         except CapacityError:  # a job outside EXECUTING (which falls back on its own)
             message = "no capacity on the platform for this job right now: try again later"
             return _Ending(RunStatus.FAILED, ErrorCode.CAPACITY, message)

@@ -22,7 +22,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from app.domain.events import EventType
 from app.domain.models import RunStatus
-from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState
+from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState, QuotaExceeded
 from app.execution.naming import bucket_name
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
@@ -190,7 +190,7 @@ async def run_job(
         return 0.0 if start is None else max(0.0, (clock() - start).total_seconds())
 
     async def settle(refused: bool = False) -> None:
-        # A creation refused for lack of capacity left no job behind: nothing to pay.
+        # A creation refused (no capacity, or a quota) left no job behind: nothing to pay.
         await ctx.budget.commit(cost, 0.0 if refused else usd_per_hour * since(usd_since) / 3600)
         if minutes is not None:
             await ctx.budget.commit(minutes, 0.0 if refused else since(gpu_since) / 60)
@@ -279,7 +279,7 @@ async def run_job(
         if handle is not None and not state.is_terminal:  # nobody would watch it any more
             with contextlib.suppress(Exception):
                 await asyncio.shield(ctx.jobs.cancel(handle))
-        await settle(refused=handle is None and isinstance(err, CapacityError))
+        await settle(refused=handle is None and isinstance(err, CapacityError | QuotaExceeded))
         raise
     await settle()
     elapsed_s = since(gpu_since)

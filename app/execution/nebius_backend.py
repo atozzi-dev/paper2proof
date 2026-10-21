@@ -57,7 +57,7 @@ from nebius.api.nebius.storage.v1 import (
 from nebius.sdk import SDK
 from pydantic import SecretStr
 
-from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState
+from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState, QuotaExceeded
 from app.execution.naming import bucket_name
 from app.execution.s3 import S3Client, S3RunStorage, empty_bucket, make_s3_client
 
@@ -126,15 +126,74 @@ NOT_FOUND, ALREADY_EXISTS, FAILED_PRECONDITION, RESOURCE_EXHAUSTED = (
     "NOT_FOUND",
     "ALREADY_EXISTS",
     "FAILED_PRECONDITION",
-    # [S-4] how "no GPU capacity" / quota used up is reported. Every RESOURCE_EXHAUSTED on a
-    # job creation becomes CapacityError, API rate limiting included: S-4 must confirm the
-    # message or detail that tells a request quota apart from missing GPU capacity.
+    # A RESOURCE_EXHAUSTED job creation is CapacityError (retried, then the fallback GPU
+    # platform), unless it shows a quota other than GPUs that can never fit: QuotaExceeded
+    # (S5/S6 hit compute.instance.non-gpu.vcpu = 0, which no wait fixes). See _refusal().
     "RESOURCE_EXHAUSTED",
 )
+# A quota as a failed create operation's message names it (S6: "compute.instance.non-gpu.vcpu
+# (limit 0, requested 2)"); only the first KiB of the message is read.
+_QUOTA_IN_MESSAGE = re.compile(
+    r"(?<![.\w-])((?:compute|storage|vpc|ai|mk8s|registry)(?:\.[a-z0-9_-]{1,40}){1,6})"
+    r" ?\(limit (\d{1,12}), requested (\d{1,12})\)"
+)
+_QUOTA_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}")  # what may reach the public run error
+# quota families that are never GPUs: only these can be final (a GPU quota at 0 on one
+# platform may still leave the fallback platform)
+_NON_GPU_PARTS = frozenset({"non-gpu", "disk", "filesystem"})
+_NON_GPU_NAMES = frozenset({"compute.instance.count"})
+_MESSAGE_CHARS = 1024
+_MAX_QUOTAS = 5
+_TRANSIENT = frozenset({"too_many_requests", "not_enough_resources"})
 
 
 def _code(err: RequestError) -> str:
     return str(err.status.code.name)
+
+
+def _never_fits(name: str, limit: str) -> bool:
+    """A quota that can't hold any job until an operator raises it: a non-GPU family at limit
+    0. A nonzero limit may free up: whether "requested" includes what is in use is not known
+    [S-4], so it is never compared."""
+    if not _QUOTA_NAME.fullmatch(name):
+        return False
+    non_gpu = name in _NON_GPU_NAMES or not _NON_GPU_PARTS.isdisjoint(name.split("."))
+    return non_gpu and limit.isascii() and limit.isdigit() and int(limit) == 0
+
+
+def _final_quotas(status: object) -> list[str] | None:
+    """The non-GPU quotas at limit 0 this refusal names, or None when it may pass (a GPU
+    quota, a nonzero limit, "not enough resources", rate limiting, or nothing readable).
+    Structured QuotaFailure violations of a request error first; a failed create operation
+    carries no parsed service errors, so then its message."""
+    found: list[tuple[str, str, str]] = []
+    errors = list(getattr(status, "service_errors", None) or [])
+    for error in errors:
+        details = error.details
+        if details is None:
+            continue
+        if details.field in _TRANSIENT:
+            return None
+        if details.field == "quota_failure":
+            found += [
+                (str(v.quota), str(v.limit), str(v.requested)) for v in details.value.violations
+            ]
+    if not errors:
+        message = str(getattr(status, "message", None) or "")[:_MESSAGE_CHARS]
+        if "quota" in message.lower():
+            found = _QUOTA_IN_MESSAGE.findall(message)
+    final = [name for name, limit, _ in found if _never_fits(name, limit)]
+    return list(dict.fromkeys(final))[:_MAX_QUOTAS] or None
+
+
+def _refusal(spec: JobSpec, status: object) -> CapacityError | QuotaExceeded:
+    """What a RESOURCE_EXHAUSTED creation means: a quota other than GPUs that can never fit is
+    final (QuotaExceeded, an operator must raise it); anything else may pass (CapacityError:
+    retried, then the fallback platform)."""
+    quotas = _final_quotas(status)
+    if quotas:
+        return QuotaExceeded(spec.name, quotas)
+    return CapacityError(f"{spec.name}: no capacity on {spec.platform}")
 
 
 def _aware(value: datetime | None) -> datetime:
@@ -314,7 +373,7 @@ class NebiusJobBackend:
         except RequestError as err:
             if _code(err) == RESOURCE_EXHAUSTED:
                 await self._discard_refused(spec, "")
-                raise CapacityError(f"{spec.name}: no capacity on {spec.platform}") from None
+                raise _refusal(spec, err.status) from None
             if _code(err) != ALREADY_EXISTS:
                 raise
             existing = await self._job_by_name(spec.name)  # a concurrent submit won
@@ -332,7 +391,7 @@ class NebiusJobBackend:
                 status = op.status()
                 if status is not None and status.code.name == RESOURCE_EXHAUSTED:
                     await self._discard_refused(spec, op.resource_id)
-                    raise CapacityError(f"{spec.name}: no capacity on {spec.platform}")
+                    raise _refusal(spec, status)
                 raise JobBackendError(f"{spec.name}: job creation failed")
         job_id = op.resource_id
         if not job_id:
@@ -363,11 +422,12 @@ class NebiusJobBackend:
         return ids
 
     async def _discard_refused(self, spec: JobSpec, job_id: str) -> None:
-        """CapacityError promises that no job was created: the caller records nothing and tries
-        again under the same name, on the fallback platform too. A job object left by the refused
-        creation [S-4] would be outside the ledger and the reaper's watch, and every retry would
-        re-attach to it. So delete what is left and confirm it is gone; when that can't be
-        confirmed, fail with JobBackendError (the step fails, the reaper finds the job by name)."""
+        """CapacityError and QuotaExceeded promise that no job was created: the caller records
+        nothing and may try again under the same name, on the fallback platform too. A job
+        object left by the refused creation [S-4] would be outside the ledger and the reaper's
+        watch, and every retry would re-attach to it. So delete what is left and confirm it is
+        gone; when that can't be confirmed, fail with JobBackendError (the step fails, the
+        reaper finds the job by name)."""
         ids = {job_id} if job_id else set()
         try:
             found = await self._job_by_name(spec.name)
@@ -381,7 +441,7 @@ class NebiusJobBackend:
                 raise JobBackendError(f"{spec.name}: still there after deletion")
         except (RequestError, JobBackendError) as err:
             raise JobBackendError(
-                f"{spec.name}: refused for lack of capacity, and its job may remain"
+                f"{spec.name}: refused (capacity or quota), and its job may remain"
             ) from err
         if left:
             log.info("refused job deleted", extra={"job": spec.name, "nebius_ids": left})

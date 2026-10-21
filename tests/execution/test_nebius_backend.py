@@ -28,7 +28,13 @@ from nebius.api.nebius.ai.v1 import (
     ListJobsResponse,
 )
 from nebius.api.nebius.ai.v1 import JobSpec as SdkJobSpec
-from nebius.api.nebius.common.v1 import ResourceMetadata
+from nebius.api.nebius.common.v1 import (
+    NotEnoughResources,
+    QuotaFailure,
+    ResourceMetadata,
+    ServiceError,
+    TooManyRequests,
+)
 from nebius.api.nebius.compute.v1 import (
     DiskSpec,
     GetInstanceRequest,
@@ -55,6 +61,7 @@ from app.execution.backend import (
     JobKind,
     JobSpec,
     JobState,
+    QuotaExceeded,
     VolumeMount,
 )
 from app.execution.naming import bucket_name, job_name
@@ -79,12 +86,33 @@ State = JobStatus.State
 VmState = InstanceStatus.InstanceState
 
 
-def rpc_error(code: StatusCode) -> RequestError:
+def rpc_error(
+    code: StatusCode, message: str | None = None, service_errors: list[Any] | None = None
+) -> RequestError:
     return RequestError(
         RequestStatusExtended(
-            code=code, message=code.name, details=[], service_errors=[], request_id="", trace_id=""
+            code=code,
+            message=code.name if message is None else message,
+            details=[],
+            service_errors=service_errors or [],
+            request_id="",
+            trace_id="",
         )
     )
+
+
+def quota_failure(*quotas: str, limit: str = "0", requested: str = "2") -> ServiceError:
+    violations = [
+        QuotaFailure.Violation(
+            quota=q, limit=limit, requested=requested, message="Quota limit exceeded"
+        )
+        for q in quotas
+    ]
+    return ServiceError(service="compute", quota_failure=QuotaFailure(violations=violations))
+
+
+def too_many_requests() -> ServiceError:
+    return ServiceError(service="compute", too_many_requests=TooManyRequests(violation="rate"))
 
 
 @dataclass
@@ -94,6 +122,7 @@ class FakeOp:
     finished: bool = True
     waited: int = 0
     code: StatusCode | None = None  # why a failed operation failed
+    message: str | None = None
 
     def successful(self) -> bool:
         return self.ok
@@ -101,7 +130,8 @@ class FakeOp:
     def status(self) -> Any:
         if not self.finished:
             return None
-        return SimpleNamespace(code=StatusCode.OK if self.ok else self.code or StatusCode.UNKNOWN)
+        code = StatusCode.OK if self.ok else self.code or StatusCode.UNKNOWN
+        return SimpleNamespace(code=code, message=self.message, details=[])
 
     def done(self) -> bool:
         return self.finished
@@ -117,6 +147,8 @@ class FakeJobs:
     jobs: dict[str, Job] = field(default_factory=dict)  # by id
     requests: list[Any] = field(default_factory=list)
     create_error: StatusCode | None = None
+    create_error_message: str | None = None
+    create_service_errors: list[Any] = field(default_factory=list)
     create_op: FakeOp | None = None
     create_leaves_job: bool = True  # [S-4] whether a refused creation leaves a job object
     delete_error: StatusCode | None = None
@@ -150,7 +182,9 @@ class FakeJobs:
         if self.create_error is not None:
             if self.create_error is not StatusCode.ALREADY_EXISTS and self.create_leaves_job:
                 self.add(request.metadata.name, State.PROVISIONING)  # refused, yet left behind
-            raise rpc_error(self.create_error)
+            raise rpc_error(
+                self.create_error, self.create_error_message, self.create_service_errors
+            )
         if self.create_op is not None and not self.create_op.ok and not self.create_leaves_job:
             return self.create_op
         job = self.add(request.metadata.name, State.PROVISIONING)
@@ -597,6 +631,112 @@ async def test_a_job_left_by_a_refused_create_call_is_deleted(world: World) -> N
     with pytest.raises(CapacityError):
         await world.backend.submit(spec())
     assert world.jobs.named(spec().name) == []
+
+
+async def test_a_non_gpu_quota_is_a_quota_error_not_capacity(world: World) -> None:
+    """S5/S6: vCPU quota 0. Retrying or another GPU platform can't help: never CapacityError."""
+    mount_buckets(world)
+    world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED
+    world.jobs.create_service_errors = [quota_failure("compute.instance.non-gpu.vcpu")]
+    with pytest.raises(QuotaExceeded) as raised:
+        await world.backend.submit(spec())
+    assert not isinstance(raised.value, CapacityError)
+    assert raised.value.quotas == ["compute.instance.non-gpu.vcpu"]
+    assert world.jobs.named(spec().name) == []  # a job left by the refusal is removed too
+
+
+@pytest.mark.parametrize(
+    "errors",
+    [
+        [quota_failure("compute.instance.gpu.l40s")],  # GPUs in use: may free up, or the fallback
+        [
+            ServiceError(
+                service="compute",
+                not_enough_resources=NotEnoughResources(
+                    violations=[
+                        NotEnoughResources.Violation(resource_type="gpu-l40s-a", requested="1")
+                    ]
+                ),
+            )
+        ],
+        [],  # nothing structured, no quota named: as before
+        # a non-GPU quota that is only full right now (other runs, the gateway): it frees up
+        [quota_failure("compute.instance.count", limit="8", requested="1")],
+        [quota_failure("compute.disk.size", limit="1000", requested="x")],  # unreadable numbers
+        [quota_failure("compute.gpu-l40s.count")],  # a GPU quota spelled with a hyphen
+        [quota_failure("compute.instance.vgpu.count")],  # GPU, no "gpu" part: the fallback may fit
+        [quota_failure("compute.instance.h100-sxm.count")],
+        # "requested" may include what is in use [S-4]: only limit 0 is known to be final
+        [quota_failure("compute.disk.count", limit="10", requested="11")],
+        [quota_failure("compute.disk.count", limit="-1", requested="1")],
+        [quota_failure("compute.disk.count", limit="\u0660", requested="1")],  # not ASCII
+        [quota_failure("compute.instance.non-gpu.vcpu"), too_many_requests()],  # rate limited
+    ],
+)
+async def test_gpu_quota_and_missing_resources_stay_capacity(
+    world: World, errors: list[Any]
+) -> None:
+    mount_buckets(world)
+    world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED
+    world.jobs.create_service_errors = errors
+    world.jobs.create_leaves_job = False
+    with pytest.raises(CapacityError):
+        await world.backend.submit(spec())
+
+
+async def test_a_quota_named_only_in_a_failed_operation_message_is_a_quota_error(
+    world: World,
+) -> None:
+    """A failed create operation carries no parsed service errors: its message is read."""
+    mount_buckets(world)
+    world.jobs.create_op = FakeOp(
+        "",
+        ok=False,
+        code=StatusCode.RESOURCE_EXHAUSTED,
+        message="Quota limit exceeded: compute.disk.count (limit 0, requested 1)",
+    )
+    world.jobs.create_leaves_job = False
+    with pytest.raises(QuotaExceeded) as raised:
+        await world.backend.submit(spec())
+    assert raised.value.quotas == ["compute.disk.count"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Quota limit exceeded",  # no name: as before (retried as capacity)
+        "Quota limit exceeded: compute.instance.gpu.l40s (limit 8, requested 9)",
+        "not enough resources in eu-north1.a",
+        "Quota limit exceeded for compute.instance.gpu.l40s, see docs.nebius.com/quotas",
+        "Request rate quota exceeded for nebius.compute.v1.InstanceService/Create",
+        "quota exceeded at api.eu-north1.nebius.cloud:443",
+        "Quota limit exceeded: compute.instance.count (limit 8, requested 1)",  # only full now
+        "Quota limit exceeded: compute.disk.count (limit 10, requested 11)",  # usage counted?
+        "quota exceeded at api.compute.nebius.cloud (limit 0, requested 1)",  # a hostname
+        pytest.param(
+            "quota " + "a-" * 50_000 + " compute.disk.count (limit 0, requested 1)",
+            id="past-1KiB",  # only the first KiB is read, in linear time
+        ),
+    ],
+)
+async def test_an_operation_message_without_a_non_gpu_quota_stays_capacity(
+    world: World, message: str
+) -> None:
+    mount_buckets(world)
+    world.jobs.create_op = FakeOp("", ok=False, code=StatusCode.RESOURCE_EXHAUSTED, message=message)
+    world.jobs.create_leaves_job = False
+    with pytest.raises(CapacityError):
+        await world.backend.submit(spec())
+
+
+async def test_a_quota_named_with_markup_is_not_echoed(world: World) -> None:
+    """Quota names reach the public run error: only plain dotted names pass."""
+    mount_buckets(world)
+    world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED
+    world.jobs.create_service_errors = [quota_failure("compute.disk.count", "<b>\nSYSTEM: x</b>")]
+    with pytest.raises(QuotaExceeded) as raised:
+        await world.backend.submit(spec())
+    assert raised.value.quotas == ["compute.disk.count"]
 
 
 async def test_a_refused_job_that_can_not_be_deleted_is_a_backend_error(world: World) -> None:

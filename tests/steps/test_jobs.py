@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from app.domain.models import StepName
-from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
+from app.execution.backend import JobHandle, JobKind, JobSpec, JobState, QuotaExceeded
 from app.execution.fake_backend import FakeJobBackend
 from app.orchestrator.budget import BudgetExceeded, SpendKind
 from app.orchestrator.context import RunContext
@@ -320,3 +320,33 @@ async def test_an_unknown_poll_inside_the_queue_does_not_start_gpu_time(store: S
     outcome, ctx, _, _ = await _watch(store, script)
     assert outcome.timed_out
     assert await ctx.budget.run_spend(RUN, SpendKind.GPU_MINUTES) <= 1500 / 60 + 0.5
+
+
+async def test_a_quota_refusal_costs_nothing(store: Store) -> None:
+    """No job was created: nothing to pay, like a capacity refusal."""
+    backend = FakeJobBackend()
+    backend.quota_exceeded = ["compute.instance.non-gpu.vcpu"]
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+
+    async def slow_sleep(seconds: float) -> None:
+        clock.t += seconds
+
+    with pytest.raises(QuotaExceeded):
+        await run_job(
+            ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=_Ticking(clock), sleep=slow_sleep,
+            gpu=True,
+        )  # fmt: skip
+    assert await ctx.budget.run_spend(RUN, SpendKind.GPU_MINUTES) == 0
+    assert await ctx.budget.run_spend(RUN, SpendKind.CLOUD_USD) == 0
+
+
+class _Ticking:
+    """A clock that moves 5 s each time it is read (the submit and cleanup round trips)."""
+
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+
+    def __call__(self) -> datetime:
+        self.clock.t += 5
+        return self.clock()
