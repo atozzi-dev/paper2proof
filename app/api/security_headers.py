@@ -96,20 +96,36 @@ class BodySizeLimitMiddleware:
 class OriginCheckMiddleware:
     """A browser's unsafe request must come from our own origin. In prod the endpoint's proxy
     terminates TLS and uvicorn sees plain http, so the public scheme is https whatever the
-    request scope says; the host is Host, or X-Forwarded-Host when the proxy rewrites it (a
-    cross-site page cannot set that header on a simple request)."""
+    request scope says; the host is Host, or (in prod only) the first X-Forwarded-Host value when
+    the proxy rewrites it. Trusting that header is safe only because the API never allows CORS:
+    a cross-site page cannot set it without a preflight, which nothing answers. Enabling CORS
+    would reopen this. Without Origin, a browser's Sec-Fetch-Site still has to say same-origin;
+    tools and probes send neither header and pass."""
 
     def __init__(self, app: ASGIApp, *, public_https: bool = False) -> None:
         self.app = app
         self.public_https = public_https
+
+    def _hosts(self, headers: dict[bytes, bytes]) -> set[bytes]:
+        hosts = [headers.get(b"host", b"")]
+        if self.public_https:
+            hosts.append(headers.get(b"x-forwarded-host", b"").split(b",")[0].strip())
+        default_port = b":443" if self.public_https else b""
+        return {h.removesuffix(default_port) if default_port else h for h in hosts} - {b""}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["method"] in UNSAFE_METHODS:
             headers = dict(scope.get("headers", []))
             origin = headers.get(b"origin")
             scheme = b"https" if self.public_https else scope.get("scheme", "https").encode()
-            hosts = {headers.get(b"host", b""), headers.get(b"x-forwarded-host", b"")} - {b""}
-            if origin is not None and origin not in {scheme + b"://" + h for h in hosts}:
+            if origin is not None:
+                refused = origin not in {scheme + b"://" + h for h in self._hosts(headers)}
+            else:
+                refused = headers.get(b"sec-fetch-site", b"same-origin") not in (
+                    b"same-origin",
+                    b"none",
+                )
+            if refused:
                 await send_json(send, 403, {"error": "cross-origin request refused"})
                 return
         await self.app(scope, receive, send)

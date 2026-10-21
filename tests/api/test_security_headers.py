@@ -111,3 +111,61 @@ def test_prod_builds_the_api_with_the_https_origin_check(state: object) -> None:
     app = create_app(AppState(**{**state.__dict__, "settings": prod}))
     checks = [m for m in app.user_middleware if m.cls.__name__ == "OriginCheckMiddleware"]
     assert [m.kwargs for m in checks] == [{"public_https": True}]
+
+
+async def test_a_forwarded_host_counts_only_behind_the_proxy() -> None:
+    headers = {"X-Forwarded-Host": "p2p.public.example"}
+    assert await _origin_status(False, "http://p2p.public.example", **headers) == 403
+
+
+async def test_a_proxy_list_or_a_default_port_still_matches() -> None:
+    listed = {"X-Forwarded-Host": "p2p.public.example, internal.example"}
+    assert await _origin_status(True, "https://p2p.public.example", **listed) == 200
+    assert (
+        await _origin_status(True, "https://p2p.public.example", Host="p2p.public.example:443")
+        == 200
+    )
+
+
+async def test_a_null_origin_is_refused() -> None:
+    assert await _origin_status(True, "null") == 403
+
+
+async def test_without_origin_a_cross_site_fetch_is_refused_but_tools_pass() -> None:
+    from starlette.responses import PlainTextResponse
+
+    from app.api.security_headers import OriginCheckMiddleware
+
+    async def ok(scope: object, receive: object, send: object) -> None:
+        await PlainTextResponse("ok")(scope, receive, send)  # type: ignore[arg-type]
+
+    transport = httpx.ASGITransport(app=OriginCheckMiddleware(ok, public_https=True))
+    async with httpx.AsyncClient(transport=transport, base_url="http://h.example") as c:
+        cross = await c.post("/api/session", headers={"Sec-Fetch-Site": "cross-site"})
+        same = await c.post("/api/session", headers={"Sec-Fetch-Site": "same-origin"})
+        tool = await c.post("/api/session")  # admin CLI, probes: no Origin, no Sec-Fetch-*
+    assert (cross.status_code, same.status_code, tool.status_code) == (403, 200, 200)
+
+
+def test_outside_prod_the_api_keeps_the_request_scheme(state: object) -> None:
+    from app.api.main import AppState, create_app
+
+    assert isinstance(state, AppState)
+    app = create_app(state)
+    checks = [m for m in app.user_middleware if m.cls.__name__ == "OriginCheckMiddleware"]
+    assert [m.kwargs for m in checks] == [{"public_https": False}]
+
+
+async def test_no_cors_preflight_is_ever_allowed(client: httpx.AsyncClient) -> None:
+    """X-Forwarded-Host is safe to trust only while no cross-origin request may set headers."""
+    response = await client.options(
+        "/api/runs",
+        headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"},
+    )
+    assert "access-control-allow-origin" not in response.headers
+
+
+async def test_a_trailing_slash_is_not_redirected(client: httpx.AsyncClient) -> None:
+    """A slash redirect is built from the scope: behind the proxy that is an http:// link."""
+    response = await client.get("/api/runs/")
+    assert response.status_code != 307 and "location" not in response.headers

@@ -30,6 +30,7 @@ def create_app(state: AppState) -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url="/api/openapi.json",
+        redirect_slashes=False,  # a slash redirect is built from the scope: http behind the proxy
     )
     app.state.p2p = state
     # add_middleware puts each new middleware outside the previous ones: headers outermost,
