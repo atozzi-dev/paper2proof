@@ -25,9 +25,17 @@ terraform {
 }
 
 locals {
+  # GitHub signs the repository into the sub claim as <owner>@<owner id>/<name>@<repo id>
+  # (spike S-7, 2026-10-21); the name-only form is kept for when the IDs are not given.
+  github_repo_parts = split("/", var.github_repo)
+  github_repo_claim = (
+    var.github_owner_id == null || var.github_repo_id == null
+    ? var.github_repo
+    : "${local.github_repo_parts[0]}@${var.github_owner_id}/${local.github_repo_parts[1]}@${var.github_repo_id}"
+  )
   github_oidc_subject = coalesce(
     var.github_oidc_subject,
-    "repo:${var.github_repo}:environment:${var.github_environment}:ref:${var.github_ref}",
+    "repo:${local.github_repo_claim}:environment:${var.github_environment}:ref:${var.github_ref}",
   )
 }
 
@@ -147,6 +155,22 @@ resource "nebius_iam_v1_federated_credentials" "github" {
 
   oidc_provider = {
     issuer_url = var.github_oidc_issuer
+  }
+
+  lifecycle {
+    # An override (github_oidc_subject) may only add the numeric IDs: repository, environment
+    # and branch stay those of the variables, so no other repo, environment or branch deploys.
+    precondition {
+      condition = (
+        endswith(local.github_oidc_subject, ":environment:${var.github_environment}:ref:${var.github_ref}")
+        && replace(split(":", local.github_oidc_subject)[1], "/@[0-9]+/", "") == var.github_repo
+      )
+      error_message = "The OIDC subject must pin github_repo, github_environment and github_ref; an override may only add the numeric IDs."
+    }
+    precondition {
+      condition     = (var.github_owner_id == null) == (var.github_repo_id == null)
+      error_message = "Set both github_owner_id and github_repo_id, or neither."
+    }
   }
 }
 

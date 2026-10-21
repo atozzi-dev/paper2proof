@@ -49,7 +49,25 @@ variable "github_environment" {
 }
 
 variable "enable_github_oidc" {
-  description = "Create the GitHub OIDC federated credential (false if spike S-7 fails)."
+  description = "Create the GitHub OIDC federated credential (spike S-7 passed: GitHub token with audience sts.nebius.com)."
   type        = bool
   default     = true
+}
+
+variable "github_owner_id" {
+  description = "Numeric GitHub ID of the repository owner, signed into the OIDC sub claim (spike S-7)."
+  type        = string
+  default     = "261738626"
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub ID of the repository, signed into the OIDC sub claim (spike S-7)."
+  type        = string
+  default     = "1420235945"
+}
+
+variable "github_oidc_subject" {
+  description = "Exact OIDC sub claim, if the composed one does not match: the deploy log prints it (GitHub OIDC token claims: sub=...)."
+  type        = string
+  default     = null
 }

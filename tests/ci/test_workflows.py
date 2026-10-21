@@ -253,9 +253,7 @@ def test_deploy_pushes_and_deploys_by_digest() -> None:
 
 
 def test_the_fallback_key_reaches_only_key_mode() -> None:
-    env = _step("deploy.yml", "deploy", "Get a Nebius token (OIDC; S-7 pending, fallback key)")[
-        "env"
-    ]
+    env = _step("deploy.yml", "deploy", "Get a Nebius token (OIDC, or the fallback key)")["env"]
     assert env["NEBIUS_SA_CREDENTIALS"].startswith("${{ vars.NEBIUS_AUTH_MODE == 'key' &&")
     assert "NEBIUS_SA_CREDENTIALS_SET" in env
 

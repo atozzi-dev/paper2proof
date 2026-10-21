@@ -44,10 +44,9 @@ def test_github_jwt_is_requested_for_the_audience_with_the_runner_token() -> Non
         "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.example/x?api-version=2.0",
         "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "runner-request-token",
     }
-    assert tok.request_github_jwt(env, "https://github.com/atozzi-dev", opener) == JWT
+    assert tok.request_github_jwt(env, "sts.nebius.com", opener) == JWT
     assert seen["url"] == (
-        "https://token.actions.example/x?api-version=2.0"
-        "&audience=https%3A%2F%2Fgithub.com%2Fatozzi-dev"
+        "https://token.actions.example/x?api-version=2.0&audience=sts.nebius.com"
     )
     assert seen["auth"] == "Bearer runner-request-token"
     assert seen["timeout"] > 0
@@ -87,7 +86,7 @@ def _run(
 OIDC_ENV = {
     "NEBIUS_AUTH_MODE": "oidc",
     "NEBIUS_CI_SA_ID": "serviceaccount-e00ci",
-    "NEBIUS_OIDC_AUDIENCE": "https://github.com/atozzi-dev",
+    "NEBIUS_OIDC_AUDIENCE": "sts.nebius.com",
 }
 
 
@@ -96,12 +95,13 @@ def test_oidc_mode_masks_first_writes_a_private_token_file_and_removes_the_jwt(
 ) -> None:
     code, out, calls = _run(tmp_path, OIDC_ENV, capsys)
     assert code == 0
-    assert calls[0] == ("jwt", "https://github.com/atozzi-dev")
+    assert calls[0] == ("jwt", "sts.nebius.com")
     assert calls[1][:3] == ("federated", JWT, "serviceaccount-e00ci")
     lines = out.splitlines()
-    assert lines[0] == f"::add-mask::{JWT}"
-    assert lines[1] == f"::add-mask::{ACCESS}"
-    assert JWT not in "\n".join(lines[1:]) and ACCESS not in "\n".join(lines[2:])
+    assert lines[0] == f"::add-mask::{JWT}"  # masked before anything else is printed
+    assert f"::add-mask::{ACCESS}" in lines
+    after_mask = lines.index(f"::add-mask::{ACCESS}") + 1
+    assert JWT not in "\n".join(lines[1:]) and ACCESS not in "\n".join(lines[after_mask:])
     token_file = tmp_path / "nebius.token"
     assert token_file.read_text(encoding="utf-8") == ACCESS
     if sys.platform != "win32":
@@ -213,3 +213,19 @@ def test_a_write_error_is_reported_without_a_traceback(
     assert code == 1
     assert "::error::cannot write a credential file: PermissionError" in out
     assert JWT not in out.split("\n", 1)[1]
+
+
+def test_oidc_mode_prints_the_subject_and_audience_it_presents(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On "Incorrect subject id" the operator needs the sub GitHub signed; the SDK error itself
+    is never printed (it may echo request fields)."""
+    code, out, _ = _run(tmp_path, OIDC_ENV, capsys)
+    assert code == 0
+    assert "GitHub OIDC token claims: sub=repo aud=None ref=None environment=None" in out
+    assert out.index("::add-mask::") < out.index("GitHub OIDC token claims")
+
+
+def test_unreadable_claims_are_reported_without_the_token() -> None:
+    assert tok.describe_claims("not-a-jwt") == "unreadable"
+    assert tok.describe_claims("a.!!!.c") == "unreadable"

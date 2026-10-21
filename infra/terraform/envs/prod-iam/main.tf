@@ -49,6 +49,9 @@ module "project_iam" {
   enable_github_oidc     = var.enable_github_oidc
   github_repo            = var.github_repo
   github_environment     = var.github_environment
+  github_owner_id        = var.github_owner_id
+  github_repo_id         = var.github_repo_id
+  github_oidc_subject    = var.github_oidc_subject
 }
 
 # In the human-only root: CI is only `viewer` on p2p-signing, and changing the key is a human act.

@@ -7,7 +7,11 @@ signing_project_id = "project-..." # p2p-signing
 
 github_repo        = "atozzi-dev/paper2proof"
 github_environment = "prod"
-enable_github_oidc = true # false if spike S-7 fails
+enable_github_oidc = true # spike S-7 passed (CI requests the GitHub token with audience sts.nebius.com)
+# GitHub signs repo:<owner>@<owner id>/<name>@<repo id> into the sub claim; the defaults are this
+# repository's IDs. If the first deploy is refused, the deploy log shows "GitHub OIDC token claims:
+# sub=..." (the subject GitHub signed): set it exactly (only the numeric IDs may differ):
+# github_oidc_subject = "repo:atozzi-dev@261738626/paper2proof@1420235945:environment:prod:ref:refs/heads/main"
 
 # Keep in sync with envs/prod if the bucket names were overridden there (spike S-11).
 # state_bucket_name   = "p2p-state"

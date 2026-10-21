@@ -5,13 +5,13 @@ the `prod` environment variable NEBIUS_AUTH_MODE:
 
   oidc  GitHub OIDC token (audience NEBIUS_OIDC_AUDIENCE) exchanged for a token of the service
         account NEBIUS_CI_SA_ID through its federated credential (infra project_iam module).
-  key   fallback if spike S-7 fails: the service account credentials file held in the `prod`
+  key   fallback (S-7 passed, so unused): the service account credentials file held in the `prod`
         environment secret NEBIUS_SA_CREDENTIALS (required reviewers guard the environment).
 
-ASSUMPTION (S-7 pending): the exchange follows the Nebius SDK's FederatedCredentialsBearer
-(subject = service account id, actor = the GitHub JWT), which is also what a CLI profile with
-`federated-subject-credentials-file-path` does. If S-7 shows another request shape, change only
-`exchange()` below.
+Spike S-7 (2026-10-21) passed with this script: the exchange follows the Nebius SDK's
+FederatedCredentialsBearer (subject = service account id, actor = the GitHub JWT) over the gRPC
+token service. The GitHub token must be requested with audience `sts.nebius.com` (set
+NEBIUS_OIDC_AUDIENCE); any other value fails with "JWT audience is missing or unsupported".
 
 Every credential is masked (`::add-mask::`) before anything else is printed, nothing secret is
 ever printed, and only the access token file (mode 0600) is left behind. Later steps read it into
@@ -22,6 +22,8 @@ NEBIUS_IAM_TOKEN for the command that needs it; the workflow deletes it at the e
 
 import argparse
 import asyncio
+import base64
+import binascii
 import contextlib
 import json
 import os
@@ -101,6 +103,19 @@ async def _sdk_token(kind: ExchangeKind, path: Path, sa_id: str | None) -> str:
         await sdk.close()
 
 
+def describe_claims(jwt: str) -> str:
+    """The sub, aud, ref and environment claims of a GitHub JWT, which are not secret: when the
+    exchange is refused, the operator copies the sub into github_oidc_subject. Nothing else of the
+    token is shown."""
+    try:
+        payload = jwt.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        fields = ("sub", "aud", "ref", "environment")
+        return " ".join(f"{name}={claims.get(name)}" for name in fields)
+    except (IndexError, ValueError, binascii.Error, AttributeError):
+        return "unreadable"
+
+
 def exchange(kind: ExchangeKind, path: Path, sa_id: str | None) -> str:
     """Nebius access token for the federated JWT or the credentials file at `path`."""
     try:
@@ -160,6 +175,7 @@ def main(
         if mode == "oidc":
             jwt = fetch_jwt(env, audience)
             mask(jwt)
+            print(f"GitHub OIDC token claims: {describe_claims(jwt)}")
             write_private(input_file, jwt)
         else:
             write_private(input_file, credentials)

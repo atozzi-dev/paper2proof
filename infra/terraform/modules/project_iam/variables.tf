@@ -60,7 +60,7 @@ variable "secrets_id" {
 }
 
 variable "enable_github_oidc" {
-  description = "Create the GitHub OIDC federated credential for sa-ci-deployer. Set false if spike S-7 fails (fallback: key in a GitHub environment)."
+  description = "Create the GitHub OIDC federated credential for sa-ci-deployer. Spike S-7 passed; set false only to fall back to a key in a GitHub environment)."
   type        = bool
   default     = true
 }
@@ -97,14 +97,36 @@ variable "github_ref" {
   }
 }
 
-variable "github_oidc_subject" {
-  description = "Override of the expected OIDC sub claim. Null means repo:<github_repo>:environment:<github_environment>:ref:<github_ref>."
+variable "github_owner_id" {
+  description = "Numeric GitHub ID of the repository owner. GitHub signs it into the sub claim (repo:<owner>@<owner id>/<name>@<repo id>:..., spike S-7). Null keeps the name-only form."
   type        = string
   default     = null
 
   validation {
-    condition     = var.github_oidc_subject == null || can(regex("^repo:[A-Za-z0-9-]+/[A-Za-z0-9._-]+:environment:[A-Za-z0-9_-]+:ref:refs/heads/[A-Za-z0-9._/-]+$", var.github_oidc_subject))
-    error_message = "github_oidc_subject must pin repository, environment and branch: repo:<owner>/<name>:environment:<env>:ref:refs/heads/<branch>."
+    condition     = var.github_owner_id == null || can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must be the numeric GitHub user or organisation ID."
+  }
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub ID of the repository, signed into the sub claim with github_owner_id."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.github_repo_id == null || can(regex("^[0-9]+$", var.github_repo_id))
+    error_message = "github_repo_id must be the numeric GitHub repository ID."
+  }
+}
+
+variable "github_oidc_subject" {
+  description = "Override of the expected OIDC sub claim. Null means repo:<owner>[@<owner id>]/<name>[@<repo id>]:environment:<github_environment>:ref:<github_ref>."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.github_oidc_subject == null || can(regex("^repo:[A-Za-z0-9-]+(@[0-9]+)?/[A-Za-z0-9._-]+(@[0-9]+)?:environment:[A-Za-z0-9_-]+:ref:refs/heads/[A-Za-z0-9._/-]+$", var.github_oidc_subject))
+    error_message = "github_oidc_subject must pin repository, environment and branch: repo:<owner>[@<id>]/<name>[@<id>]:environment:<env>:ref:refs/heads/<branch>."
   }
 }
 
