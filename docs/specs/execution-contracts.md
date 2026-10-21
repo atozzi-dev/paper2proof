@@ -203,13 +203,46 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 | Platform / preset | `cpu-d3` / `4vcpu-16gb` | `cpu-d3` / `4vcpu-16gb` | `gpu-l40s-a` / `1gpu-8vcpu-32gb` (fallback `gpu-l40s-d` / `1gpu-16vcpu-96gb`) | `cpu-d3` / `4vcpu-16gb` |
 | Disk | 50Gi | 50Gi | 100Gi | 30Gi |
 | Timeout (platform) | 1h (minimum allowed) | 1h | 1h | 1h |
-| Our watchdog | 20 min (provisioner deadline 18 min) | what is left of the provision job's 20 min (same deadline) | `budget_seconds + 300` | `timeout_s + 180` s (setup margin, check with S-12) |
+| Our watchdog | 20 min from submission (provisioner deadline 18 min) | what is left of the provision job's 20 min (same deadline) | `budget_seconds + 300` from the end of the queue | `timeout_s + 300` s from the end of the queue (S12: 218 s from create to start) |
+| Queue cap | none (the watchdog covers it) | none | 20 min (`QUEUE_CAP_S`) | 10 min |
 | Subnet | `provision` | `provision` | `exec` | `exec` |
 | Volumes | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:rw` | `p2p-run-…:/mnt/run:rw` only | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:ro` | same as exec |
 | Preemptible | no | no | yes in dev/eval, **no** for demo recordings (`P2P_GPU_PREEMPTIBLE`) | no |
 | Restart policy | `never` | `never` | `never` | `never` |
 
 Retries are decided by the orchestrator, never by the platform.
+
+**Queue and watchdog** (`app/orchestrator/steps/jobs.py::run_job`). The platform accepts a job
+and may keep it in `PROVISIONING` (our `PENDING`) for a long time with no error: S4 waited about
+16 minutes for an L40S. So the exec and smoke watchdogs count from the job's first state after
+the queue (`STARTING`, `RUNNING` or terminal). That time is taken conservatively as the last poll
+that still saw `PENDING`. When the job leaves the queue, the `jobs` row is marked `ACTIVE` and its
+deadline moves to that time plus `watchdog_s`. Until then the row's deadline is submission plus
+queue cap plus watchdog, so the reaper never cancels a job that is legitimately queued. A job
+still `PENDING` at its queue cap is cancelled:
+- an exec job ends its attempt like a refused creation (`NO_GPU_CAPACITY` warning, `exit_reason:
+  "capacity"`, `INCONCLUSIVE/CAPACITY`). Its deterministic name is taken by then, so no other
+  placement is tried;
+- a smoke job makes the job smoke executor unavailable.
+
+After that cancel, `run_job` polls until the job is terminal, for up to 5 minutes. The job may
+have started between the last poll and the cancel. If it never stops, the outcome says so
+(`stopped: false`) and the `jobs` row is left unsettled, so the reaper cancels and charges it.
+An on-demand retry cancelled at its queue cap means attempt 1 is never read, stopped or not:
+it may have run, and written to the bucket, between the last poll and the cancel. The attempt
+ends with no results (`INCONCLUSIVE/BUDGET`).
+
+Jobs that bake a deadline into themselves (provision, fetch) pass it as `started`, and their
+watchdog counts from there as before.
+- **GPU minutes** count from the end-of-queue time, or from the first `UNKNOWN` after the queue,
+  since it may be running.
+- **Cloud USD** counts from submission. Nobody has checked yet whether Billing charges
+  PROVISIONING time, so the budget errs high, and the USD reservation covers the queue cap plus
+  the watchdog.
+- **Resuming after a restart**: the step charges both from submission. Unless the row is
+  `ACTIVE`, the watchdog also counts from submission, because the job may have left the queue
+  during the gap; the row is then marked `ACTIVE` with that deadline. Queue cap plus the longest exec watchdog (20 + 35 min) stays
+under the platform's 1 h timeout, which may count the queue.
 
 **No GPU capacity** (architecture §15). `submit()` raises `CapacityError` when the platform refuses
 to create the job for lack of capacity (gRPC `RESOURCE_EXHAUSTED` on create, or a create operation
@@ -287,7 +320,8 @@ Base URL: `https://api.tokenfactory.nebius.com/sandboxes`, headers `Authorizatio
 ## 11. Reaper (every 5 min)
 
 - Cancel `p2p-*` jobs running longer than `watchdog_s + 600`. The deadline is the `jobs` row's
-  (first submission + `watchdog_s`); a job with no row (submitted before a crash, never recorded)
+  (first submission + queue cap + `watchdog_s`, moved to end of queue + `watchdog_s` once the
+  row is `ACTIVE`, see §8); a job with no row (submitted before a crash, never recorded)
   gets the fallback watchdog of 45 min (architecture §7). A job whose run is terminal or unknown
   has nobody watching it and is cancelled at once (it still mounts the run bucket read-write).
 - Delete `p2p-run-*` buckets older than 24 h whose run is terminal and whose bundle exists
