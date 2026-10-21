@@ -9,7 +9,8 @@ the fixes after the spikes stay here. Assumptions not yet verified are marked:
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -162,13 +163,23 @@ def job_state(job: Job) -> JobState:
 
 
 _MODES = {"ro": SdkJobSpec.VolumeMount.Mode.READ_ONLY, "rw": SdkJobSpec.VolumeMount.Mode.READ_WRITE}
+# A job mounts a bucket by its ID: the CLI and the API read a name such as "p2p-run-..." as a
+# source of type "p2p" and refuse it (spikes S-5 and S-11, 2026-10-21).
+BUCKET_ID = re.compile(r"^storagebucket-[a-z0-9-]+$")
 
 
-def to_sdk_job_spec(spec: JobSpec) -> SdkJobSpec:
+def to_sdk_job_spec(spec: JobSpec, bucket_ids: Mapping[str, str]) -> SdkJobSpec:
     """Every JobSpec field, and nothing that widens the job: no command or args override (the
     image ENTRYPOINT is the runner), no public IP, ports, SSH keys or registry/S3 credentials,
-    no platform restarts (retries are the orchestrator's)."""
+    no platform restarts (retries are the orchestrator's). `bucket_ids` maps each volume's
+    bucket name to its ID, looked up in the job's project (`NebiusJobBackend.submit`)."""
     spec = JobSpec.model_validate(spec.model_dump())  # never trust a model_construct'ed spec
+    sources = []
+    for volume in spec.volumes:
+        bucket_id = bucket_ids.get(volume.source, "")
+        if not BUCKET_ID.fullmatch(bucket_id):
+            raise ValueError(f"no bucket ID for the mount of {volume.source}")
+        sources.append(bucket_id)
     sdk = SdkJobSpec(
         image=spec.image_digest_ref,  # pulled with the job identity, no registry login [S-5]
         platform=spec.platform,
@@ -179,11 +190,9 @@ def to_sdk_job_spec(spec: JobSpec) -> SdkJobSpec:
         subnet_id=spec.subnet_id,
         public_ip=False,
         volumes=[
-            # Mounted by bucket name with the job's own identity [S-11].
-            SdkJobSpec.VolumeMount(
-                source=v.source, container_path=v.mount_path, mode=_MODES[v.mode]
-            )
-            for v in spec.volumes
+            # Mounted by bucket ID with the job's own identity, never with a key [S-5].
+            SdkJobSpec.VolumeMount(source=source, container_path=v.mount_path, mode=_MODES[v.mode])
+            for source, v in zip(sources, spec.volumes, strict=True)
         ],
         injected_files=[
             SdkJobSpec.FileInjection(container_path=path, content=content)
@@ -298,7 +307,7 @@ class NebiusJobBackend:
             return JobHandle(name=spec.name, nebius_id=existing.metadata.id)
         request = CreateJobRequest(
             metadata=ResourceMetadata(parent_id=self._project, name=spec.name),
-            spec=to_sdk_job_spec(spec),
+            spec=to_sdk_job_spec(spec, await self._bucket_ids(spec)),
         )
         try:
             op = await self._jobs.create(request)
@@ -333,6 +342,25 @@ class NebiusJobBackend:
             job_id = found.metadata.id
         log.info("job submitted", extra={"job": spec.name, "nebius_id": job_id})
         return JobHandle(name=spec.name, nebius_id=job_id)
+
+    async def _bucket_ids(self, spec: JobSpec) -> dict[str, str]:
+        """The ID of each mounted bucket, looked up by name in the job's project only: a bucket
+        of the same name elsewhere is never mounted. A missing bucket fails before any job is
+        created."""
+        ids: dict[str, str] = {}
+        for volume in spec.volumes:
+            bucket = await self._bucket_by_name(volume.source)
+            if bucket is None:
+                raise JobBackendError(
+                    f"{spec.name}: bucket {volume.source} not found in the project"
+                )
+            if (bucket.metadata.parent_id, bucket.metadata.name) != (self._project, volume.source):
+                raise JobBackendError(
+                    f"{spec.name}: the lookup of {volume.source} returned another bucket"
+                )
+            self._usable(bucket)  # a bucket being deleted is never mounted
+            ids[volume.source] = bucket.metadata.id
+        return ids
 
     async def _discard_refused(self, spec: JobSpec, job_id: str) -> None:
         """CapacityError promises that no job was created: the caller records nothing and tries

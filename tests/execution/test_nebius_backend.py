@@ -318,6 +318,16 @@ def world_s3(monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
         yield make_world(make_s3_client(ENDPOINT, "eu-north1", "key-id", SecretStr("key-secret")))
 
 
+# Jobs mount buckets by ID (spike S-5/S-11): the backend resolves each name first.
+IDS = {bucket_name(RUN): "storagebucket-run1", "p2p-cache": "storagebucket-cache1"}
+
+
+def mount_buckets(world: World) -> None:
+    """The run bucket and the cache exist, as they do when EXECUTING submits a job."""
+    world.buckets.add(bucket_name(RUN))
+    world.buckets.add("p2p-cache")
+
+
 def spec(**overrides: object) -> JobSpec:
     data: dict[str, object] = {
         "name": job_name(JobKind.EXEC, RUN, 1),
@@ -344,15 +354,15 @@ def spec(**overrides: object) -> JobSpec:
 
 
 def test_sdk_spec_honours_every_field() -> None:
-    sdk = to_sdk_job_spec(spec())
+    sdk = to_sdk_job_spec(spec(), IDS)
     assert sdk.image == DIGEST
     assert (sdk.platform, sdk.preset) == ("gpu-l40s-a", "1gpu-8vcpu-32gb")
     assert sdk.disk.size_bytes == 100 * 1024**3
     assert sdk.disk.type == DiskSpec.DiskType.NETWORK_SSD
     assert sdk.subnet_id == "vpcsubnet-exec"
     assert [(v.source, v.container_path, v.mode) for v in sdk.volumes] == [
-        (bucket_name(RUN), "/mnt/run", SdkJobSpec.VolumeMount.Mode.READ_WRITE),
-        ("p2p-cache", "/mnt/cache", SdkJobSpec.VolumeMount.Mode.READ_ONLY),
+        ("storagebucket-run1", "/mnt/run", SdkJobSpec.VolumeMount.Mode.READ_WRITE),
+        ("storagebucket-cache1", "/mnt/cache", SdkJobSpec.VolumeMount.Mode.READ_ONLY),
     ]
     assert [(f.container_path, f.content) for f in sdk.injected_files] == [
         ("/etc/p2p/manifest.json", b'{"schema": "p2p.exec/v1"}')
@@ -368,7 +378,7 @@ def test_sdk_spec_honours_every_field() -> None:
 
 
 def test_sdk_spec_never_overrides_the_entrypoint_nor_opens_the_job() -> None:
-    sdk = to_sdk_job_spec(spec())
+    sdk = to_sdk_job_spec(spec(), IDS)
     assert sdk.container_command == ""
     assert sdk.args == ""
     assert sdk.working_dir == ""
@@ -381,7 +391,7 @@ def test_sdk_spec_never_overrides_the_entrypoint_nor_opens_the_job() -> None:
 
 
 def test_on_demand_spec_has_no_spot_pricing() -> None:
-    sdk = to_sdk_job_spec(spec(preemptible=False))
+    sdk = to_sdk_job_spec(spec(preemptible=False), IDS)
     assert sdk.preemptible is False
     assert sdk.pricing_model.follows_spot_price is None
 
@@ -390,13 +400,14 @@ def test_sdk_spec_rejects_a_spec_built_without_validation() -> None:
     """model_construct skips the least-privilege validators: the adapter re-validates."""
     unsafe = JobSpec.model_construct(**{**dict(spec()), "env": {"NEBIUS_API_KEY": "x"}})
     with pytest.raises(ValueError, match=r"credentials|not allowed"):
-        to_sdk_job_spec(unsafe)
+        to_sdk_job_spec(unsafe, IDS)
 
 
 # --- submit / status / cancel / list ------------------------------------------------------------
 
 
 async def test_submit_creates_the_job_in_the_sandbox_project(world: World) -> None:
+    mount_buckets(world)
     handle = await world.backend.submit(spec())
     created = [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
     assert len(created) == 1
@@ -407,6 +418,7 @@ async def test_submit_creates_the_job_in_the_sandbox_project(world: World) -> No
 
 
 async def test_submit_is_get_by_name_first(world: World) -> None:
+    mount_buckets(world)
     existing = world.jobs.add(spec().name, State.RUNNING)
     handle = await world.backend.submit(spec())
     assert handle.nebius_id == existing.metadata.id
@@ -416,6 +428,7 @@ async def test_submit_is_get_by_name_first(world: World) -> None:
 
 
 async def test_submit_twice_creates_once(world: World) -> None:
+    mount_buckets(world)
     first = await world.backend.submit(spec())
     second = await world.backend.submit(spec())
     assert first == second
@@ -423,6 +436,7 @@ async def test_submit_twice_creates_once(world: World) -> None:
 
 
 async def test_submit_race_already_exists_returns_the_existing_job(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_error = StatusCode.ALREADY_EXISTS
     original_get = world.jobs.get_by_name
     calls = 0
@@ -440,9 +454,93 @@ async def test_submit_race_already_exists_returns_the_existing_job(world: World)
 
 
 async def test_submit_failed_operation_raises(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("aijob-x", ok=False)
     with pytest.raises(JobBackendError, match=spec().name):
         await world.backend.submit(spec())
+
+
+async def test_submit_mounts_each_bucket_by_its_id(world: World) -> None:
+    mount_buckets(world)
+    await world.backend.submit(spec())
+    [created] = [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+    assert [v.source for v in created.spec.volumes] == [
+        f"storagebucket-{bucket_name(RUN)}",
+        "storagebucket-p2p-cache",
+    ]
+    lookups = [r for r in world.buckets.requests if isinstance(r, GetBucketByNameRequest)]
+    assert {(r.parent_id, r.name) for r in lookups} == {
+        (PROJECT, bucket_name(RUN)),
+        (PROJECT, "p2p-cache"),
+    }
+
+
+async def test_submit_with_a_missing_bucket_creates_nothing(world: World) -> None:
+    world.buckets.add("p2p-cache")  # the run bucket was never created
+    with pytest.raises(JobBackendError, match=bucket_name(RUN)):
+        await world.backend.submit(spec())
+    assert not [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+
+
+async def test_a_bucket_of_another_project_is_never_mounted(world: World) -> None:
+    world.buckets.add("p2p-cache")
+    foreign = world.buckets.add(bucket_name(RUN))
+    foreign.metadata.parent_id = "project-elsewhere"
+    with pytest.raises(JobBackendError, match=bucket_name(RUN)):
+        await world.backend.submit(spec())
+    assert not [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+
+
+async def test_a_lookup_answer_for_another_bucket_is_refused(world: World) -> None:
+    mount_buckets(world)
+    world.buckets.buckets[bucket_name(RUN)].metadata.name = "p2p-run-someoneelse0000000000"
+    with pytest.raises(JobBackendError, match=bucket_name(RUN)):
+        await world.backend.submit(spec())
+    assert not [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+
+
+async def test_a_bucket_scheduled_for_deletion_is_not_mounted(world: World) -> None:
+    world.buckets.add("p2p-cache")
+    world.buckets.add(bucket_name(RUN), state=BucketStatus.State.SCHEDULED_FOR_DELETION)
+    with pytest.raises(JobBackendError, match="scheduled for deletion"):
+        await world.backend.submit(spec())
+    assert not [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+
+
+async def test_a_failed_bucket_lookup_is_not_a_capacity_error(world: World) -> None:
+    async def throttled(request: GetBucketByNameRequest) -> Bucket:
+        raise rpc_error(StatusCode.RESOURCE_EXHAUSTED)
+
+    world.buckets.get_by_name = throttled  # type: ignore[method-assign]
+    with pytest.raises(RequestError) as raised:
+        await world.backend.submit(spec())
+    assert not isinstance(raised.value, CapacityError)
+    assert not [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+
+
+async def test_an_existing_job_comes_back_before_any_bucket_lookup(world: World) -> None:
+    existing = world.jobs.add(spec().name, State.RUNNING)  # its run bucket may be gone by now
+    handle = await world.backend.submit(spec())
+    assert handle.nebius_id == existing.metadata.id
+    assert not [r for r in world.buckets.requests if isinstance(r, GetBucketByNameRequest)]
+
+
+async def test_an_id_that_is_not_a_bucket_id_creates_no_job(world: World) -> None:
+    mount_buckets(world)
+    world.buckets.buckets["p2p-cache"].metadata.id = "p2p-cache"
+    with pytest.raises(ValueError, match="p2p-cache"):
+        await world.backend.submit(spec())
+    assert not [r for r in world.jobs.requests if isinstance(r, CreateJobRequest)]
+
+
+def test_sdk_spec_refuses_a_volume_without_its_bucket_id() -> None:
+    with pytest.raises(ValueError, match="p2p-cache"):
+        to_sdk_job_spec(spec(), {bucket_name(RUN): "storagebucket-run1"})
+
+
+def test_sdk_spec_refuses_a_name_passed_as_an_id() -> None:
+    with pytest.raises(ValueError, match="ID"):
+        to_sdk_job_spec(spec(), {bucket_name(RUN): bucket_name(RUN), "p2p-cache": "p2p-cache"})
 
 
 def _deleted(world: World) -> list[str]:
@@ -450,6 +548,7 @@ def _deleted(world: World) -> list[str]:
 
 
 async def test_submit_without_capacity_raises_capacity_error(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED  # GPU quota, "not enough resources"
     world.jobs.create_leaves_job = False
     with pytest.raises(CapacityError, match=spec().platform):
@@ -458,6 +557,7 @@ async def test_submit_without_capacity_raises_capacity_error(world: World) -> No
 
 
 async def test_a_create_operation_failing_for_capacity_raises_capacity_error(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
     world.jobs.create_leaves_job = False
     with pytest.raises(CapacityError, match=spec().name):
@@ -468,6 +568,7 @@ async def test_a_create_operation_failing_for_capacity_raises_capacity_error(wor
 async def test_a_job_left_by_a_refused_create_operation_is_deleted_first(world: World) -> None:
     """[S-4] the failed operation may still name a job: it is removed before CapacityError, so
     the retry (or the fallback platform) creates its own job instead of re-attaching to it."""
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("aijob-1", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
     with pytest.raises(CapacityError, match=spec().name):
         await world.backend.submit(spec())
@@ -482,6 +583,7 @@ async def test_a_job_left_by_a_refused_create_operation_is_deleted_first(world: 
 
 
 async def test_a_job_found_by_name_after_a_refused_create_is_deleted(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
     with pytest.raises(CapacityError):
         await world.backend.submit(spec())
@@ -490,6 +592,7 @@ async def test_a_job_found_by_name_after_a_refused_create_is_deleted(world: Worl
 
 
 async def test_a_job_left_by_a_refused_create_call_is_deleted(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_error = StatusCode.RESOURCE_EXHAUSTED
     with pytest.raises(CapacityError):
         await world.backend.submit(spec())
@@ -498,6 +601,7 @@ async def test_a_job_left_by_a_refused_create_call_is_deleted(world: World) -> N
 
 async def test_a_refused_job_that_can_not_be_deleted_is_a_backend_error(world: World) -> None:
     """Not a capacity verdict: the job may still run, unrecorded, so the step fails instead."""
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("aijob-1", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
     world.jobs.delete_error = StatusCode.INTERNAL
     with pytest.raises(JobBackendError, match=spec().name) as raised:
@@ -506,6 +610,7 @@ async def test_a_refused_job_that_can_not_be_deleted_is_a_backend_error(world: W
 
 
 async def test_a_refused_job_still_there_after_deletion_is_a_backend_error(world: World) -> None:
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("aijob-1", ok=False, code=StatusCode.RESOURCE_EXHAUSTED)
     world.jobs.delete_keeps_job = True
     with pytest.raises(JobBackendError, match=spec().name):
@@ -514,6 +619,7 @@ async def test_a_refused_job_still_there_after_deletion_is_a_backend_error(world
 
 async def test_submit_does_not_wait_for_a_long_running_create(world: World) -> None:
     """[S-4] if the create operation lasts as long as the job, the handle still comes back."""
+    mount_buckets(world)
     world.jobs.create_op = FakeOp("aijob-1", finished=False)
     handle = await asyncio.wait_for(world.backend.submit(spec()), timeout=5)
     assert handle.nebius_id == "aijob-1"
@@ -588,25 +694,25 @@ async def test_list_jobs_stops_on_a_repeated_page_token(world: World) -> None:
 
 def test_credentials_in_an_sdk_spec_are_refused() -> None:
     """Defence in depth: whatever builds the SDK spec, a job never gets a key (invariant 4)."""
-    sdk = to_sdk_job_spec(spec())
+    sdk = to_sdk_job_spec(spec(), IDS)
     sdk.volumes[0].s3_config = SdkJobSpec.VolumeMount.S3Config(
         credentials=SdkJobSpec.VolumeMount.S3Config.S3Credentials(access_key_id="k")
     )
     with pytest.raises(ValueError, match="credentials"):
         check_no_credentials(sdk)
-    sdk = to_sdk_job_spec(spec())
+    sdk = to_sdk_job_spec(spec(), IDS)
     sdk.volumes[0].s3_config = SdkJobSpec.VolumeMount.S3Config(endpoint="https://x")
     with pytest.raises(ValueError, match="credentials"):  # any s3_config: allowlist
         check_no_credentials(sdk)
-    sdk = to_sdk_job_spec(spec())
+    sdk = to_sdk_job_spec(spec(), IDS)
     sdk.environment_variables[0].mysterybox_secret = SdkJobSpec.MysteryBoxSecretRef(secret_id="x")
     with pytest.raises(ValueError, match="credentials"):
         check_no_credentials(sdk)
-    sdk = to_sdk_job_spec(spec())
+    sdk = to_sdk_job_spec(spec(), IDS)
     sdk.registry_credentials = SdkJobSpec.RegistryCredentials(password="p")
     with pytest.raises(ValueError, match="credentials"):
         check_no_credentials(sdk)
-    check_no_credentials(to_sdk_job_spec(spec()))
+    check_no_credentials(to_sdk_job_spec(spec(), IDS))
 
 
 async def test_list_jobs_pages_and_filters_by_prefix(world: World) -> None:
