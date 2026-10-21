@@ -341,3 +341,19 @@ async def test_the_log_summary_is_plain_text(store: Store, tmp_path: Path) -> No
     result = await AnalyzingStep(artifacts, storage, Colours(LLM_FIXTURES)).run(ctx)
     assert result.output_ref is not None
     assert artifacts.get_json(result.output_ref)["log_summary"] == "[31mSeed 2 ran out of memory."
+
+
+async def test_fractions_against_a_points_claim_are_aligned_and_noted(
+    store: Store, tmp_path: Path
+) -> None:
+    """The claim says "by 1.7 points"; the script wrote accuracies as fractions."""
+    from app.verdict.scale import NOTE
+
+    raw = _results([0.950, 0.951, 0.949], [0.933, 0.934, 0.932], scale=FULL)
+    verdict, events = await _verdict(store, tmp_path, raw, full=True)
+    assert verdict is not None and verdict.kind is VerdictKind.REPRODUCED
+    ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
+    assert NOTE in ready.explanation_md
+    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    assert record["measured"]["per_seed"] == [0.950, 0.951, 0.949]
+    assert record["measurements"]["per_seed"] == pytest.approx([95.0, 95.1, 94.9])

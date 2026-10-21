@@ -34,6 +34,7 @@ from app.verdict.engine import decide
 from app.verdict.explanation import NOT_REPRODUCED_LABEL, contradicts, template_explanation
 from app.verdict.limitations import limitations
 from app.verdict.results import Analysis
+from app.verdict.scale import align_to_claim
 from app.verdict.summary import verdict_summary
 
 log = logging.getLogger(__name__)
@@ -140,16 +141,16 @@ class VerdictStep:
         claim = claims.get(manifest.claim_ref)
         if claim is None or analysis.measurements is None:
             raise P2PError(ErrorCode.INTERNAL_ERROR, "no claim or measurements to decide on")
-        verdict = adjust_reason(
-            decide(claim, analysis.measurements, self._config), analysis.exit_reason
-        )
+        # deterministic percent/fraction alignment, noted in the Limitations (verdict/scale.py)
+        measurements, scale_note = align_to_claim(claim, analysis.measurements)
+        verdict = adjust_reason(decide(claim, measurements, self._config), analysis.exit_reason)
         limits = limitations(
             scale=manifest.scale,
             planned_seeds=manifest.seeds,
             used_seeds=analysis.used_seeds,
             gpu=analysis.gpu,
             exit_reason=analysis.exit_reason,
-            deviations=plan.notes,
+            deviations=[*plan.notes, *([scale_note] if scale_note else [])],
         )
         text = await self._explain(ctx, verdict, json.dumps(claim.model_dump(mode="json")), limits)
         if text is None or contradicts(text, verdict.kind):
@@ -159,7 +160,7 @@ class VerdictStep:
             ctx.run_id,
             claim.id,
             verdict,
-            analysis.measurements.scale,
+            measurements.scale,
             self._config_sha,
             explanation,
         )
@@ -172,7 +173,8 @@ class VerdictStep:
                 "claim": claim.model_dump(mode="json"),
                 "attempt": manifest.attempt,
                 "verdict": verdict.model_dump(mode="json"),
-                "measurements": analysis.measurements.model_dump(mode="json"),
+                "measurements": measurements.model_dump(mode="json"),
+                "measured": analysis.measurements.model_dump(mode="json"),  # as the script wrote
                 "config": self._config.model_dump(mode="json"),
                 "config_sha256": self._config_sha,
                 "limitations": limits,

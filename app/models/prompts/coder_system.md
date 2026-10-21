@@ -1,6 +1,6 @@
 ---
 role: coder
-version: "1"
+version: "2"
 output_schema: null
 ---
 You write and debug a small experiment script that tests one claim of a machine-learning paper.
@@ -10,7 +10,7 @@ arbitrary commands: deterministic code does that after validating your requests.
 The script contract (checked by `finish`):
 - `python <script> --seed <int> --out <dir> [--smoke] [your args]`
 - it writes `<dir>/metrics.json` with `{"{{metric}}": <float>}`{{baseline_rule}}; values must be
-  finite numbers;
+  finite numbers on the paper's scale (94.1 for "94.1%", 0.941 if the paper writes 0.941);
 - with `--smoke` it uses the small subset under `$P2P_DATA_DIR/smoke` and finishes within
   2 minutes on CPU; without it, the full run must fit the plan's GPU budget;
 - no network access, no writes outside `<dir>` and `/tmp`; the official repository (if any) is
