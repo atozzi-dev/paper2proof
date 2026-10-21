@@ -258,6 +258,34 @@ reports `INCONCLUSIVE/CAPACITY` (an on-demand retry after a preemption that find
 the first attempt's outcome instead). A run cancelled during the 2-minute waits stops there.
 `CapacityError` from any other job (provision, fetch, smoke) fails the run with `CAPACITY`.
 
+**Quota used up** (S5/S6: `compute.instance.non-gpu.vcpu` was 0). Not every `RESOURCE_EXHAUSTED`
+is capacity. `submit()` raises `QuotaExceeded` instead of `CapacityError` only when the refusal
+names a non-GPU quota whose limit is 0. Non-GPU means a name with a `non-gpu`, `disk` or
+`filesystem` part, or `compute.instance.count`. Such a quota can't hold any job until an operator
+raises it. `requested` is never compared: whether it includes what is already in use is not
+known [S-4]. In that case:
+- no job is left behind, as with `CapacityError`;
+- nothing retries it: waiting or another GPU platform never helps;
+- the run fails with `CAPACITY` and a message naming the quota ("an operator must raise it");
+- the log entry is an alert;
+- the refused creation costs nothing.
+
+Where the quota is read from:
+- a request error: its structured `QuotaFailure` violations (`quota`, `limit`, `requested`);
+- a failed create operation, which carries no parsed service errors: the first KiB of its
+  message, only in the form `<service>.<name> (limit N, requested M)`, with `<service>` one of
+  compute, storage, vpc, ai, mk8s or registry.
+
+Only names matching `[a-z0-9][a-z0-9._-]{0,99}` reach the message, at most 5 of them. Everything
+else stays `CapacityError`, as above:
+- any other quota name, GPUs included (a GPU quota at 0 on one platform may leave the
+  fallback platform);
+- a nonzero limit: the quota may be only full right now (other runs, the gateway or the
+  endpoint use it);
+- a limit that is not plain ASCII digits;
+- `not_enough_resources` or `too_many_requests` in the error;
+- a message that names no quota in that form.
+
 ## 9. Interfaces
 
 ```python
