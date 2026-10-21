@@ -122,36 +122,42 @@ instance still runs with the old secret version.
 
 ### 2. New values for the endpoint (Nebius secret `p2p-secrets`)
 
-The list is `SECRET_VARS` in `deploy/endpoint.sh`. `deploy/secrets.sh` (prepared for H-04) is
-the only way values reach `p2p-secrets`. Nothing is redeployed yet, and nothing old is deleted
-yet (except the two S3 keys, see below).
+The list is `SECRET_VARS` in `deploy/endpoint.sh`. `deploy/secrets.sh` is the only way values
+reach `p2p-secrets`. Without options it loads every key (H-04, refused if the secret already has
+a version; `--replace-all` overrides that). `deploy/secrets.sh --only KEY[,KEY...]` writes a new
+primary version that replaces only those keys and keeps the others. It reads the S3 secrets from
+their SecretStash references and generates new authorized keys itself (expiring
+`P2P_KEY_EXPIRES_AT`, by default 2027-01-31: set a later date with at least 30 days of margin if
+the demo stays up). Run it from a terminal (a generated `ADMIN_TOKEN` is shown on the terminal
+only), never through `tee`. Nothing is redeployed yet, and nothing old is deleted yet (except
+the two S3 keys, see below).
 
-- [ ] `NEBIUS_API_KEY` (Token Factory): create a new API key in the Token Factory console and
-      load it.
-- [ ] `TAVILY_API_KEY`: create a new key in the Tavily dashboard and load it.
-- [ ] `SESSION_KEY`: `openssl rand -hex 32`, load it. Every session cookie becomes invalid at
-      the redeploy (users log in again).
-- [ ] `ADMIN_TOKEN`: `openssl rand -hex 32` (different from `SESSION_KEY`), load it. Keep the old
-      one until step 3 is done.
+- [ ] `NEBIUS_API_KEY` (Token Factory) and `TAVILY_API_KEY`: create a new key in the Token
+      Factory console and in the Tavily dashboard, then
+      `deploy/secrets.sh --only NEBIUS_API_KEY,TAVILY_API_KEY` (it asks for both, input hidden).
+- [ ] `SESSION_KEY` and `ADMIN_TOKEN`: `deploy/secrets.sh --only SESSION_KEY,ADMIN_TOKEN`. The
+      session key is generated; paste a new admin token from the password manager (or press
+      Enter to have one generated and shown once). Every session cookie becomes invalid at the
+      redeploy (users log in again). Keep the old admin token until step 3 is done.
 - [ ] `RUNTIME_S3_KEY_ID`, `RUNTIME_S3_SECRET` (S3 access key of sa-api-runtime: Litestream,
       artifacts, bundles): in `infra/terraform/envs/prod-iam`,
       `terraform plan -replace=module.project_iam.nebius_iam_v2_access_key.api_runtime -out=iam.tfplan`,
-      review, `terraform apply iam.tfplan`. Read the new key ID from
-      `terraform output -json api_runtime_s3_key` and the secret from the SecretStash secret it
-      references (MYSTERY_BOX delivery), and load both. The replace deletes the old key at once:
-      the running instance can no longer replicate, which is why it is drained.
+      review, `terraform apply iam.tfplan`, then `deploy/secrets.sh --only RUNTIME_S3_SECRET`
+      (it reads the new key ID from `terraform output -json s3_access_keys` and the secret from
+      the SecretStash secret it references). The replace deletes the old key at once: the
+      running instance can no longer replicate, which is why it is drained.
 - [ ] `JOB_LAUNCHER_S3_KEY_ID`, `JOB_LAUNCHER_S3_SECRET` (S3 access key of sa-job-launcher):
       the same with `nebius_iam_v2_access_key.job_launcher` and
-      `terraform output -json job_launcher_s3_key`.
-- [ ] `JOB_LAUNCHER_AUTH_KEY` (authorized key of sa-job-launcher: jobs, buckets, gateway):
-      generate a new key pair with the CLI (`nebius iam auth-public-key generate
-      --service-account-id <sa-job-launcher> ...`, check the flags with `--help`) and load the
-      credentials JSON. Note the old key's ID (`nebius iam auth-public-key list`).
-- [ ] `RUNTIME_AUTH_KEY` (authorized key of sa-api-runtime: KMS bundle signing): the same for
-      sa-api-runtime.
+      `deploy/secrets.sh --only JOB_LAUNCHER_S3_SECRET`.
+- [ ] `RUNTIME_AUTH_KEY` and `JOB_LAUNCHER_AUTH_KEY` (authorized keys of sa-api-runtime for KMS
+      signing, and of sa-job-launcher for jobs, buckets and the gateway):
+      `deploy/secrets.sh --only RUNTIME_AUTH_KEY,JOB_LAUNCHER_AUTH_KEY` generates both and
+      prints their key IDs (`kid`). Note the old keys' IDs first
+      (`nebius iam auth-public-key list --parent-id <project>`).
 - [ ] `OBSERVABILITY_STATIC_KEY` (only with Nebius Tracing): issue a new static key
       (`nebius iam static-key issue --name p2p-observability-<date>
-      --account-service-account-id <sa> --service observability`, copy `token`) and load it.
+      --account-service-account-id <sa> --service observability`, copy `token`), then
+      `deploy/secrets.sh --only OBSERVABILITY_STATIC_KEY`.
 
 The **KMS signing key** (`p2p-bundle-signing`) is not rotated: published bundles verify against
 `docs/bundle-public-key.pem`. Rotate it only if it may be compromised, and then publish the new
@@ -173,6 +179,9 @@ public key and say which bundles the old one signed.
 - [ ] The old Token Factory API key (console) and the old Tavily key (dashboard).
 - [ ] The old authorized public keys of sa-job-launcher and sa-api-runtime
       (`nebius iam auth-public-key delete --id <old>`).
+- [ ] The earlier versions of `p2p-secrets`: they still hold the old values (check the
+      `nebius mysterybox secret-version` verbs with `--help`), and the SecretStash secrets of the
+      replaced S3 keys if they outlived them.
 - [ ] The old observability static key, and Grafana's read-only static key: issue a new one
       for Grafana's data source, then revoke the old one.
 

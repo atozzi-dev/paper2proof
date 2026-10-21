@@ -182,7 +182,7 @@ or in the named spike rather than silently weakening isolation.
 | 4 | The allocation accepts a bare IP (`10.1.2.10`) without showing drift on the next plan | H-04 (`plan -detailed-exitcode`) | Write the form the API returns (e.g. `/32`) |
 | 5 | Bucket names `p2p-state`, `p2p-bundles`, `p2p-cache` are free (names are unique per region) | S-11 | Override `*_bucket_name` in both tfvars files |
 | 6 | Federated credentials: `parent_id` = the SA's project; exact match on `sub` with the custom subject template | S-7 | `enable_github_oidc = false`, deploy key in the `prod` GitHub environment |
-| 7 | Access keys with `MYSTERY_BOX` delivery work for service accounts | H-04 | Create the keys with the CLI in `deploy/secrets.sh` and remove them from Terraform |
+| 7 | Access keys with `MYSTERY_BOX` delivery work for service accounts | H-04 | Create the keys with the CLI and remove them from Terraform (`deploy/secrets.sh` would then need to read the secret from the CLI instead of the SecretStash reference) |
 | 8 | A SecretStash secret can be created without a version | H-04 | Create it with the CLI and `terraform import` it |
 | 9 | Expiration `date` format `2027-01-31T00:00:00Z` is accepted | H-04 | Adjust `bundles_expire_on` |
 | 10 | Bucket permits, the secret permit and `editor` on `p2p-signing` are all the runtime needs | A-26, S-6 | Grant the missing role on the specific resource, never project-wide on `p2p-control` |
@@ -260,7 +260,12 @@ terraform init -lockfile=readonly
 terraform plan -out=iam.tfplan                        # review every destroy/replace and permit target
 terraform apply iam.tfplan && rm iam.tfplan
 
-# 6. deploy/secrets.sh (H-04 step 3) loads the secret values into p2p-secrets, then:
+# 6. Secret values (H-04 step 3): AWS_* still exported, both envs initialized, CLI logged in as
+#    a tenant admin. It asks for the Token Factory and Tavily keys (hidden), generates
+#    SESSION_KEY and two authorized keys (sa-api-runtime, sa-job-launcher; they expire
+#    2027-01-31), reads the S3 secrets, and writes one new version of p2p-secrets. Keep the
+#    ADMIN_TOKEN for `gh secret set P2P_ADMIN_TOKEN --env prod`. Never pipe it through tee.
+../../../../deploy/secrets.sh
 terraform plan -detailed-exitcode                     # in prod-iam and in prod: exit 0 = no changes
 
 # 7. Non-secret outputs for .env and the GitHub repository variables.
