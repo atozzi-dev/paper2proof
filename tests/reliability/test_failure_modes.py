@@ -28,7 +28,7 @@ from app.api.main import AppState, create_app
 from app.discovery.hf_papers import HF_API
 from app.discovery.tavily import TAVILY_API, TavilyClient
 from app.domain.discovery import Discovery
-from app.domain.events import JobStatusPayload, WarningPayload
+from app.domain.events import ErrorPayload, EventType, JobStatusPayload, WarningPayload
 from app.domain.models import (
     ErrorCode,
     ReasonCode,
@@ -38,7 +38,14 @@ from app.domain.models import (
     Verdict,
     VerdictKind,
 )
-from app.execution.backend import CapacityError, JobKind, JobSpec, JobState, VolumeMount
+from app.execution.backend import (
+    CapacityError,
+    JobKind,
+    JobSpec,
+    JobState,
+    QuotaExceeded,
+    VolumeMount,
+)
 from app.execution.fake_backend import FakeJobBackend
 from app.execution.naming import bucket_name, job_name
 from app.execution.run_storage import FakeRunStorage
@@ -542,6 +549,40 @@ async def test_no_capacity_for_a_cpu_job_fails_the_run_with_capacity(store: Stor
     assert await task is RunStatus.FAILED
     run = await store.get_run(RUN)
     assert run is not None and run.error_code is ErrorCode.CAPACITY
+
+
+async def test_a_used_up_project_quota_fails_the_run_at_once_and_names_it(
+    store: Store,
+) -> None:
+    """S5/S6: compute.instance.non-gpu.vcpu was 0. Waiting never helps: an operator must raise
+    the quota, so the run says which one instead of "no capacity, try again later"."""
+    await ctx_at(store, StepName.PROVISIONING, previous=[(StepName.PLANNING, "p")])
+    backend = FakeJobBackend()
+    backend.quota_exceeded = ["compute.instance.non-gpu.vcpu"]
+    [task] = await _orchestrator(
+        store, backend, {StepName.PROVISIONING: _ProvisionLike()}
+    ).resume_all()
+    assert await task is RunStatus.FAILED
+    run = await store.get_run(RUN)
+    assert run is not None and run.error_code is ErrorCode.CAPACITY
+    [error] = [e.payload for e in await store.events_after(RUN, 0) if e.type is EventType.ERROR]
+    assert isinstance(error, ErrorPayload)
+    assert "compute.instance.non-gpu.vcpu" in error.message and "quota" in error.message
+    assert "try again later" not in error.message
+    assert backend.created == 0
+
+
+async def test_a_quota_refusal_of_the_gpu_job_is_never_retried(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await executing_setup(store, tmp_path)
+    clock = FakeClock()
+    backend = CapacityBackend({1: [JobState.SUCCEEDED]}, {})
+    backend.quota_exceeded = ["compute.disk.count"]
+    with pytest.raises(QuotaExceeded):
+        await _step(artifacts, storage, clock).run(_with(ctx, backend))
+    assert backend.submit_calls == 1 and clock.t < CAPACITY_WAIT_S  # no 2-minute retries
+    assert await _warnings(store, "NO_GPU_CAPACITY") == []
 
 
 async def test_the_fake_backend_raises_capacity_errors_before_creating() -> None:

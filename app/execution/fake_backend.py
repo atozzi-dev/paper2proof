@@ -3,7 +3,13 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState
+from app.execution.backend import (
+    CapacityError,
+    JobHandle,
+    JobSpec,
+    JobState,
+    QuotaExceeded,
+)
 from app.execution.naming import bucket_name
 
 
@@ -24,6 +30,7 @@ class FakeJobBackend:
         self.gateway_running = False
         # platform -> how many more new jobs it refuses for lack of capacity
         self.no_capacity: dict[str, int] = {}
+        self.quota_exceeded: list[str] = []  # non-GPU quotas used up: every new job is refused
 
     async def ensure_run_bucket(self, run_id: str) -> str:
         name = bucket_name(run_id)
@@ -40,6 +47,8 @@ class FakeJobBackend:
         existing = self.jobs.get(spec.name)
         if existing is not None:
             return existing[0]
+        if self.quota_exceeded:
+            raise QuotaExceeded(spec.name, list(self.quota_exceeded))
         if self.no_capacity.get(spec.platform, 0) > 0:
             self.no_capacity[spec.platform] -= 1
             raise CapacityError(f"no capacity on {spec.platform} for {spec.preset}")

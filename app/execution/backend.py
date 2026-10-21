@@ -153,6 +153,16 @@ class CapacityError(Exception):
     quota used up, "not enough resources"). The job was not created (execution-contracts §8)."""
 
 
+class QuotaExceeded(Exception):
+    """submit(): a project quota other than GPUs (vCPU, disks, instances...) is used up. Not a
+    capacity verdict: waiting or another GPU platform never helps, an operator must raise it.
+    The job was not created. `quotas` are the platform's quota names."""
+
+    def __init__(self, job: str, quotas: list[str]) -> None:
+        self.quotas = quotas
+        super().__init__(f"{job}: quota exceeded: {', '.join(quotas)}")
+
+
 class JobBackend(Protocol):
     async def ensure_run_bucket(self, run_id: str) -> str: ...
     async def delete_run_bucket(self, run_id: str) -> None: ...
