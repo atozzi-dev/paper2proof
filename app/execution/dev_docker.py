@@ -166,7 +166,8 @@ class DevDockerBackend:
             "--user=10001:10001", "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--read-only", "--tmpfs=/tmp:rw,size=1g", "--pids-limit=4096",
             "--memory=8g", "--memory-swap=8g", "--cpus=2",
-            "--log-opt=max-size=10m", "--log-opt=max-file=2",
+            # the log caps need json-file: a daemon defaulting to journald refuses max-file
+            "--log-driver=json-file", "--log-opt=max-size=10m", "--log-opt=max-file=2",
         ]  # fmt: skip
         mounts = [(job / "work", "/work", "rw"), (job / "home", "/home/p2p", "rw")]
         if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):  # they download (PyPI, repo, HF)
