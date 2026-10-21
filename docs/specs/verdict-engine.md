@@ -119,6 +119,19 @@ Use `scipy.stats.t.ppf`. If `s == 0`, then `half = 0` (deterministic runs are al
 
 `mean`, `std`, `ci_low` and `ci_high` are reported back in the **original direction** (un-negate before returning).
 
+## Scale alignment before `decide()` (`app/verdict/scale.py`)
+
+Papers often state accuracy-like metrics in percent ("94.1%", "by 1.7 points") while scripts
+write fractions (0.941). VERDICT calls `align_to_claim(claim, measurements)` before `decide()`.
+It multiplies every measured value (both arms of a RELATIVE claim) by 100 only when:
+- the claim's text says percent (`%`, "percent", "points", "pp");
+- the claim's number (`reported_value`, or `claimed_delta` for RELATIVE) is in (1, 100];
+- every measured value is in [0, 1].
+
+Anything else is left unchanged. The conversion is deterministic (invariant 2 holds) and is
+written into the verdict's Limitations. `verdict.json` keeps both `measurements` (aligned) and
+`measured` (as the script wrote them). The Coder is also told to write the paper's scale.
+
 ## Required tests (`tests/verdict/test_engine.py`)
 
 Table-driven examples, all with `cfg` defaults unless stated:
