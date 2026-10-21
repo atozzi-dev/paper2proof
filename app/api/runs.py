@@ -27,7 +27,7 @@ from app.domain.ids import new_run_id
 from app.domain.models import Claim, ErrorCode, RunStatus, StepName, Verdict
 
 router = APIRouter(dependencies=[Depends(api_rate_limit)])
-ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")  # invariant 11: arXiv IDs only
+ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$", re.ASCII)  # invariant 11; \d is ASCII only
 DRAIN_RETRY_AFTER_S = 120
 LAST_EVENT_ID = re.compile(r"[0-9]{1,18}")
 
