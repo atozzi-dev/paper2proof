@@ -55,6 +55,30 @@ def estimate_tokens(text: str) -> int:
     return math.ceil(len(text) / 4)
 
 
+# What one image costs as input, whatever its encoded size: Nemotron VL reads a page as up to
+# 12 tiles of 256 tokens plus a thumbnail (~3.3k); rounded up. Base64 is not text.
+IMAGE_TOKENS = 4096
+
+
+def estimate_message_tokens(messages: list[dict[str, object]]) -> int:
+    """estimate_tokens over the messages, with each image part counted as IMAGE_TOKENS."""
+    images = 0
+    plain: list[dict[str, object]] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            parts: list[object] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    images += 1
+                    parts.append({"type": "image_url"})
+                else:
+                    parts.append(part)
+            message = {**message, "content": parts}
+        plain.append(message)
+    return estimate_tokens(str(plain)) + images * IMAGE_TOKENS
+
+
 # --- Nebius AI Cloud prices (USD per hour), `cloud:` section of config/pricing.yaml ----------
 
 

@@ -246,3 +246,108 @@ async def test_tool_call_turns_are_sent_in_openai_format(client: TokenFactoryCli
         }
     ]
     assert sent[-1] == {"role": "tool", "tool_call_id": "call_1", "content": "print(1)"}
+
+
+@respx.mock
+async def test_exhausted_429s_cost_nothing(store: Store, client: TokenFactoryClient) -> None:
+    """A 429 is refused before any work: retries that all hit the rate limit are free."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(
+        return_value=httpx.Response(429, json={"error": "rate"})
+    )
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) == 0
+    assert await client.budget.run_spend(RUN, SpendKind.INFERENCE_USD) == 0
+
+
+@respx.mock
+async def test_connection_errors_cost_nothing(store: Store, client: TokenFactoryClient) -> None:
+    """Never sent: nothing to bill."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) == 0
+
+
+@respx.mock
+async def test_only_attempts_the_provider_processed_are_charged(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    await _run(store)
+    other = "r_01jb7z00000000000000000009"
+    await store.create_run(other, "2106.09685", created_by=None, claim_hint=None, budget={})
+    rate = httpx.Response(429, json={"error": "rate"})
+    down = httpx.Response(503, json={})
+    route = respx.post(f"{BASE}chat/completions").mock(side_effect=[rate, down, rate, down])
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    route.side_effect = [down, down, down, down]
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=other)
+    mixed = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    all_503 = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
+    assert mixed > 0 and mixed * 2 == all_503  # 2 of the 4 attempts reached the model
+
+
+@respx.mock
+async def test_an_image_is_reserved_as_a_fixed_token_count(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """A 2 MB page PNG is not 700k tokens of text: it fits the run's inference cap."""
+    from app.models.pricing import IMAGE_TOKENS
+
+    await _run(store)
+    body = completion("{}").json()
+    body.pop("usage")  # charged what was reserved
+    route = respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(200, json=body))
+    url = "data:image/png;base64," + "A" * 2_000_000
+    content: list[dict[str, object]] = [
+        {"type": "text", "text": "Read the table."},
+        {"type": "image_url", "image_url": {"url": url}},
+    ]
+    await client.complete(Role.VISION, [Message(role="user", content=content)], run_id=RUN)
+    assert route.call_count == 1
+    reserved = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    assert IMAGE_TOKENS <= reserved < IMAGE_TOKENS + 200
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.RemoteProtocolError("server disconnected"), httpx.ReadError("connection reset")],
+)
+@respx.mock
+async def test_a_connection_lost_after_sending_is_charged_like_a_timeout(
+    store: Store, client: TokenFactoryClient, error: Exception
+) -> None:
+    """The request went out: the provider may have generated it all."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(side_effect=error)
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) > 0
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
+
+
+@respx.mock
+async def test_a_gateway_timeout_is_charged_like_a_timeout(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(504, json={}))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
+
+
+def test_every_image_part_counts_and_other_parts_stay_text() -> None:
+    from app.models.pricing import IMAGE_TOKENS, estimate_message_tokens, estimate_tokens
+
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 10**6}}
+    other = {"type": "input_image", "data": "B" * 4000}  # not stripped: counted as text
+    three = estimate_message_tokens([{"role": "user", "content": [image, image, image]}])
+    assert 3 * IMAGE_TOKENS <= three < 3 * IMAGE_TOKENS + 100
+    assert estimate_message_tokens([{"role": "user", "content": [other]}]) >= estimate_tokens(
+        "B" * 4000
+    )

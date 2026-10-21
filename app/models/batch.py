@@ -44,7 +44,7 @@ from app.models.client import (
     _prompt_version,
     chat_request,
 )
-from app.models.pricing import Pricing, estimate_tokens
+from app.models.pricing import Pricing, estimate_message_tokens, estimate_tokens
 from app.orchestrator.budget import Budget, Reservation, SpendKind
 
 BATCH_ENDPOINT: Literal["/v1/chat/completions"] = "/v1/chat/completions"
@@ -72,6 +72,14 @@ def parse_custom_id(value: str) -> tuple[str, Role]:
 
 
 # --- builder ---------------------------------------------------------------------------------
+
+
+def _messages(body: dict[str, object]) -> list[dict[str, object]]:
+    """The request body's messages, for the token estimate (images at a fixed count)."""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return []
+    return [m for m in messages if isinstance(m, dict)]
 
 
 class BatchRequest(BaseModel):
@@ -370,7 +378,7 @@ class BatchRunner:
                 model_id=self.resolved[request.role].model_id,
                 role=request.role,
                 prompt=request.prompt,
-                tokens_in=estimate_tokens(str(body.get("messages")))
+                tokens_in=estimate_message_tokens(_messages(body))
                 + estimate_tokens(str(body.get("tools", []))),
                 tokens_out=int(str(body["max_tokens"])),
             )

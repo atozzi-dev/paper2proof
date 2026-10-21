@@ -227,7 +227,8 @@ async def test_a_429_storm_on_the_fallback_too_keeps_the_verdict(
         ReasonCode.REDUCED_SCALE_CONTRADICTS,
     )
     assert explanation.startswith("Inconclusive (reduced scale contradicts)")  # the template
-    assert await store.ledger_total(SpendKind.INFERENCE_USD.value, run_id=RUN) > 0  # charged
+    # 429s are refused before any work: the storm costs nothing (P1-11)
+    assert await store.ledger_total(SpendKind.INFERENCE_USD.value, run_id=RUN) == 0
 
 
 # --- 2. Sandboxes down -> CPU smoke jobs ---------------------------------------------------------
