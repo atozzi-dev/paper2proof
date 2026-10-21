@@ -39,7 +39,8 @@ from app.orchestrator.context import RunContext
 from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 
 SMOKE_PLATFORM, SMOKE_PRESET = "cpu-d3", "4vcpu-16gb"
-SMOKE_SETUP_S = 180  # job start, image pull and extraction before the script runs (S-12)
+SMOKE_SETUP_S = 300  # image pull, start and extraction before the script runs (S12: 218 s)
+SMOKE_QUEUE_CAP_S = 600  # waiting for CPU capacity: the Coder loop waits on every smoke run
 MAX_RESULT_BYTES = 256 * 1024
 
 
@@ -158,9 +159,14 @@ class JobSmokeExecutor:
             poll_s=self._poll_s,
             clock=self._clock,
             sleep=self._sleep,
+            queue_cap_s=SMOKE_QUEUE_CAP_S,
         )
         if outcome.run_cancelled:
             raise SmokeUnavailable("the run was cancelled")
+        if outcome.queue_timed_out:
+            raise SmokeUnavailable(
+                f"the smoke job waited {SMOKE_QUEUE_CAP_S // 60} minutes in the queue for a CPU"
+            )
         if outcome.timed_out:
             raise SmokeUnavailable(
                 f"the smoke job did not finish within {timeout_s + SMOKE_SETUP_S} s"

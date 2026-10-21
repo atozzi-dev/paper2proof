@@ -8,6 +8,8 @@ otherwise VERDICT reports what there is (INCONCLUSIVE/BUDGET when no seed finish
 A job the platform refuses for lack of GPU capacity is tried again on gpu-l40s-a after 2
 minutes, up to 3 times, then once on gpu-l40s-d; with no capacity on either the attempt ends
 without a job (INCONCLUSIVE/CAPACITY), see execution-contracts §8.
+A job the platform accepts but keeps queued past QUEUE_CAP_S (S4: no error, just waiting) is
+cancelled and the attempt ends the same way: its deterministic name is taken by then.
 `live.log` is read from the bucket while the job runs and shown as `job.log` events: it is
 written next to untrusted code, so it is only ever displayed, truncated.
 """
@@ -43,7 +45,7 @@ from app.orchestrator.cost_estimate import (
 )
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of, selected_claim
-from app.orchestrator.steps.jobs import JobOutcome, run_job, stop_jobs, utcnow
+from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
 from app.verdict.results import MAX_RESULTS_BYTES
 
@@ -148,7 +150,7 @@ class _Placed:
     spec: JobSpec
 
 
-_Unplaced = Literal["no_capacity", "cancelled"]
+_Unplaced = Literal["no_capacity", "queue_timeout", "cancelled"]
 
 
 class ExecutingStep:
@@ -401,6 +403,14 @@ class ExecutingStep:
             except CapacityError:
                 log.info("no GPU capacity", extra={"run_id": ctx.run_id, "platform": where[0]})
                 continue
+            if outcome.queue_timed_out:  # accepted, then never placed: its name is taken now
+                minutes = QUEUE_CAP_S // 60
+                await self._no_capacity(
+                    ctx,
+                    f"no GPU on {where[0]} after {minutes} minutes in the queue: "
+                    "the GPU job did not run",
+                )
+                return "queue_timeout"  # it existed: it may have run before the cancel
             return _Placed(outcome, spec)
         tried = " or ".join(dict.fromkeys(p for p, _ in places))
         await self._no_capacity(ctx, f"no GPU capacity on {tried}: the GPU job did not run")
@@ -447,12 +457,15 @@ class ExecutingStep:
                 return await self._no_retry(ctx, *previous)
             if placed == "cancelled":
                 return StepResult(next=RunStatus.CANCELLED)
-            if placed == "no_capacity":
+            if not isinstance(placed, _Placed):  # no capacity, or still queued at the cap
                 if previous is None:
                     return await self._done(
                         ctx, manifest, None, where=None, has_results=False, exit_reason="capacity"
                     )
                 await self._warn(ctx, "the on-demand retry was not started (no GPU capacity)")
+                if placed == "queue_timeout":  # it may have written: never read attempt 1
+                    kept, state, _ = previous
+                    return await self._no_retry(ctx, kept, state, None)
                 return await self._no_retry(ctx, *previous)
             outcome, spec = placed.outcome, placed.spec
             await tail()

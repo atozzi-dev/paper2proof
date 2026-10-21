@@ -19,7 +19,7 @@ from app.domain.models import (
     Verdict,
     VerdictKind,
 )
-from app.storage.store import Store
+from app.storage.store import JOB_ACTIVE, TERMINAL_STEP_STATUSES, Store
 from tests.conftest import alembic_config as _alembic
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -156,6 +156,21 @@ async def test_get_job_returns_the_first_submission(store: Store) -> None:
         "SUBMITTED",
         at,
     )
+
+
+async def test_a_job_leaving_the_queue_is_marked_active_once(store: Store) -> None:
+    """The deadline then counts from activation; a settled job is never reopened."""
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    at = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    await store.record_job(RUN, "exec", "p2p-exec-x-1", "job-1", "p2p-run-x", at=at)
+    first = at + timedelta(minutes=40)
+    assert await store.mark_job_active("p2p-exec-x-1", deadline=first)
+    assert not await store.mark_job_active("p2p-exec-x-1", deadline=first + timedelta(hours=1))
+    job = await store.get_job("p2p-exec-x-1")
+    assert job is not None and (job.status, job.deadline) == (JOB_ACTIVE, first)
+    await store.update_job("p2p-exec-x-1", "SUCCEEDED")
+    assert not await store.mark_job_active("p2p-exec-x-1", deadline=first)
+    assert JOB_ACTIVE not in TERMINAL_STEP_STATUSES  # the reaper still settles an active job
 
 
 async def test_claims_and_verdicts_round_trip(store: Store) -> None:
