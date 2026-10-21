@@ -67,3 +67,47 @@ async def test_unhandled_errors_are_500_with_headers_and_no_trace(state: object)
     assert "secret detail" not in response.text
     for name, value in HEADERS.items():
         assert response.headers.get(name) == value
+
+
+async def _origin_status(public_https: bool, origin: str, **extra: str) -> int:
+    """POST through OriginCheckMiddleware as the endpoint's proxy delivers it: plain http."""
+    from starlette.responses import PlainTextResponse
+
+    from app.api.security_headers import OriginCheckMiddleware
+
+    async def ok(scope: object, receive: object, send: object) -> None:
+        await PlainTextResponse("ok")(scope, receive, send)  # type: ignore[arg-type]
+
+    app = OriginCheckMiddleware(ok, public_https=public_https)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://p2p.endpoints.example") as c:
+        response = await c.post("/api/session", headers={"Origin": origin, **extra})
+    return response.status_code
+
+
+async def test_behind_the_tls_proxy_the_browser_origin_is_https() -> None:
+    """uvicorn sees http (the proxy terminates TLS); the browser sends Origin: https://<host>."""
+    assert await _origin_status(True, "https://p2p.endpoints.example") == 200
+    assert await _origin_status(True, "https://evil.example") == 403
+    assert await _origin_status(True, "http://p2p.endpoints.example") == 403  # prod is https only
+
+
+async def test_a_forwarded_host_from_the_proxy_is_accepted() -> None:
+    headers = {"X-Forwarded-Host": "p2p.public.example"}
+    assert await _origin_status(True, "https://p2p.public.example", **headers) == 200
+    assert await _origin_status(True, "https://evil.example", **headers) == 403
+
+
+async def test_outside_prod_the_scheme_of_the_request_counts() -> None:
+    assert await _origin_status(False, "http://p2p.endpoints.example") == 200
+    assert await _origin_status(False, "https://p2p.endpoints.example") == 403
+
+
+def test_prod_builds_the_api_with_the_https_origin_check(state: object) -> None:
+    from app.api.main import AppState, create_app
+
+    assert isinstance(state, AppState)
+    prod = state.settings.model_copy(update={"p2p_env": "prod"})
+    app = create_app(AppState(**{**state.__dict__, "settings": prod}))
+    checks = [m for m in app.user_middleware if m.cls.__name__ == "OriginCheckMiddleware"]
+    assert [m.kwargs for m in checks] == [{"public_https": True}]

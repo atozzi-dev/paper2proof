@@ -230,3 +230,16 @@ async def test_concurrent_invite_use_never_exceeds_the_quota(store: Store) -> No
     now = datetime.now(UTC)
     results = await asyncio.gather(*(store.consume_invite(digest, now) for _ in range(10)))
     assert sum(results) == 3
+
+
+ARABIC_INDIC = "".join(chr(0x0660 + int(c)) if c.isdigit() else c for c in "2410.01234")
+FULLWIDTH = "".join(chr(0xFF10 + int(c)) if c.isdigit() else c for c in "2410.01234")
+
+
+@pytest.mark.parametrize("arxiv_id", [ARABIC_INDIC, FULLWIDTH])
+async def test_non_ascii_digits_are_not_an_arxiv_id(
+    client: httpx.AsyncClient, arxiv_id: str
+) -> None:
+    await login(client)
+    response = await client.post("/api/runs", json={"arxiv_id": arxiv_id})
+    assert response.status_code in (400, 422)

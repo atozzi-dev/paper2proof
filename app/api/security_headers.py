@@ -94,16 +94,22 @@ class BodySizeLimitMiddleware:
 
 
 class OriginCheckMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
+    """A browser's unsafe request must come from our own origin. In prod the endpoint's proxy
+    terminates TLS and uvicorn sees plain http, so the public scheme is https whatever the
+    request scope says; the host is Host, or X-Forwarded-Host when the proxy rewrites it (a
+    cross-site page cannot set that header on a simple request)."""
+
+    def __init__(self, app: ASGIApp, *, public_https: bool = False) -> None:
         self.app = app
+        self.public_https = public_https
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["method"] in UNSAFE_METHODS:
             headers = dict(scope.get("headers", []))
             origin = headers.get(b"origin")
-            host = headers.get(b"host", b"")
-            expected = scope.get("scheme", "https").encode() + b"://" + host
-            if origin is not None and origin != expected:
+            scheme = b"https" if self.public_https else scope.get("scheme", "https").encode()
+            hosts = {headers.get(b"host", b""), headers.get(b"x-forwarded-host", b"")} - {b""}
+            if origin is not None and origin not in {scheme + b"://" + h for h in hosts}:
                 await send_json(send, 403, {"error": "cross-origin request refused"})
                 return
         await self.app(scope, receive, send)

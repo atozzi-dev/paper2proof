@@ -9,7 +9,7 @@ import httpx
 from defusedxml import ElementTree
 from pydantic import BaseModel
 
-ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$", re.ASCII)  # without it \d is any digit
 USER_AGENT = "paper2proof/0.1 (+https://github.com/atozzi-dev/paper2proof)"
 EXPORT_API = "https://export.arxiv.org/api/query"
 EPRINT = "https://arxiv.org/e-print/"

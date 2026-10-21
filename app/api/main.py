@@ -34,7 +34,9 @@ def create_app(state: AppState) -> FastAPI:
     app.state.p2p = state
     # add_middleware puts each new middleware outside the previous ones: headers outermost,
     # so 403/413/500 responses produced by the inner guards carry them too.
-    app.add_middleware(OriginCheckMiddleware)
+    # behind the endpoint's TLS proxy uvicorn sees http: the browser's origin is https
+    prod = state is not None and state.settings.p2p_env == "prod"
+    app.add_middleware(OriginCheckMiddleware, public_https=prod)
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
 

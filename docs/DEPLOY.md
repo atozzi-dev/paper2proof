@@ -128,7 +128,11 @@ stdout.
    routing trip a startup probe?
 8. The proxy's peer address and forwarding headers, and whether it strips a client-supplied
    `X-Forwarded-For`. Then set `P2P_FORWARDED_ALLOW_IPS` to the proxy CIDR (never `*`), so the
-   per-IP limits work.
+   per-IP limits work. **Gate before the URL goes on Devpost:** without it every client shares the
+   proxy's address, so a few judges exhaust the login, API and SSE limits together.
+   8b. Log in from a real browser and start a run. The origin check expects `https://<Host>`
+   (or `X-Forwarded-Host`) in prod; `/readyz` and the admin CLI send no Origin header, so only a
+   browser proves it.
 9. Does the URL change after a recreate or a stop/start?
 10. Are endpoint names unique, and does `list` paginate? (The script refuses a listing with a
     next page.)

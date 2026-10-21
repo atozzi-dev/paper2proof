@@ -85,3 +85,12 @@ async def test_ids_are_validated_again(bad: str) -> None:
     client = ArxivClient()
     with pytest.raises(ValueError):
         await client.source(bad)
+
+
+def test_the_arxiv_id_pattern_takes_ascii_digits_only() -> None:
+    from app.ingestion.arxiv import ARXIV_ID
+
+    assert ARXIV_ID.fullmatch("2410.01234")
+    assert not ARXIV_ID.fullmatch(
+        "".join(chr(0x0660 + int(c)) if c.isdigit() else c for c in "2410.01234")
+    )
