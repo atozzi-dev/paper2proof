@@ -269,3 +269,17 @@ def test_opt_p2p_is_created_traversable_before_files_land_in_it(dockerfile: Path
     # root-owned: no -o/-g (owned by p2p, untrusted code could replace the entrypoint)
     created = re.search(r"install -d -m 0755 /opt/p2p(?=\s|$)", final)
     assert created is not None and created.start() < copy.start()
+
+
+def test_the_api_image_ships_the_canary_papers_but_not_their_code() -> None:
+    """INGESTING serves 0000.000NN IDs from eval/canaries (A-25, eval set A, H-09 demo): the api
+    image needs each paper.tex and truth.yaml, never the reference experiment.py."""
+    api = (IMAGES / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY eval/canaries ./eval/canaries" in api
+    ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert "!eval/canaries/*/paper.tex" in ignore
+    assert "!eval/canaries/*/truth.yaml" in ignore
+    assert {line for line in ignore if line.startswith("!eval")} == {
+        "!eval/canaries/*/paper.tex",
+        "!eval/canaries/*/truth.yaml",
+    }

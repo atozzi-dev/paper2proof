@@ -6,8 +6,8 @@ verdict accuracy >= 80% and 0 false accusations (a true claim reported NOT_REPRO
 
     P2P_EVAL_INVITE=... uv run python -m eval.run_set_a --api-url URL --confirm-spend
 
-Costs money: every canary is a real run (Token Factory, jobs). The deployment must serve the
-canary e-prints (0000.000NN IDs): see CanaryPaperSource (P2P_ENV=dev only).
+Costs money: every canary is a real run (Token Factory, jobs). Every deployment serves the
+canary e-prints under their 0000.000NN IDs (app/ingestion/canaries.py, allowlisted bytes only).
 """
 
 import argparse
