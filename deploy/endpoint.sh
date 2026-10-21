@@ -34,7 +34,13 @@ ENV_KEYS=" S3_ENDPOINT S3_REGION P2P_STATE_BUCKET P2P_CONTROL_BUCKET NEBIUS_SAND
   P2P_PROVISIONER_IMAGE P2P_RUNNER_IMAGE P2P_RUNNER_CPU_IMAGE P2P_SUBNET_PROVISION
   P2P_SUBNET_EXEC P2P_GPU_PREEMPTIBLE P2P_BUNDLE_KEY_ID P2P_FORWARDED_ALLOW_IPS
   GATEWAY_INSTANCE_ID P2P_TRACES_ENDPOINT P2P_METRICS_ENDPOINT OBSERVABILITY_PROJECT_ID "
+ENV_KEYS="${ENV_KEYS//[$'\t\r\n']/ }" # the " $key " match needs a space after each key
 # nothing else: no P2P_ENV, DB_URL, SMOKE_EXECUTOR, P2P_DB_BOOTSTRAP or build commit overrides
+# Without these the app (app/main.py) or images/api/start.sh refuses to start, after the old
+# instance is gone: they are checked here instead.
+REQUIRED_KEYS=(S3_ENDPOINT P2P_STATE_BUCKET P2P_CONTROL_BUCKET NEBIUS_SANDBOX_PROJECT_ID
+  P2P_PROVISIONER_IMAGE P2P_RUNNER_IMAGE P2P_RUNNER_CPU_IMAGE P2P_SUBNET_PROVISION
+  P2P_SUBNET_EXEC P2P_GPU_PREEMPTIBLE P2P_BUNDLE_KEY_ID)
 
 die() { echo "endpoint.sh: $*" >&2; exit 1; }
 run() {
@@ -57,6 +63,9 @@ subnet="${SUBNET_CONTROL_ID:-}"
 commit="${P2P_EXPECT_COMMIT:-}"
 [[ "$commit" =~ ^[0-9a-f]{7,40}$ ]] \
   || die "P2P_EXPECT_COMMIT is required (the git commit the image was built from)"
+[[ "$NAME" =~ ^[a-z0-9-]+$ ]] || die "P2P_ENDPOINT_NAME must be lowercase letters, digits and -"
+[[ "$SECRET" =~ ^[a-z0-9-]+$ ]] || die "P2P_SECRET_NAME must be lowercase letters, digits and -"
+command -v "$PY" > /dev/null || die "$PY is needed (set PY to a Python 3 interpreter)"
 
 env_pairs=()
 number=0
@@ -70,19 +79,47 @@ while IFS= read -r line || [ -n "$line" ]; do
     || die "$env_file line $number: $key is not a deploy setting (see deploy/prod.env.example)"
   [[ " ${seen_keys:-} " != *" $key "* ]] || die "$env_file line $number: $key is set twice"
   seen_keys="${seen_keys:-} $key"
+  [ -z "${BASH_REMATCH[2]}" ] || filled_keys="${filled_keys:-} $key"
   env_pairs+=("$line")
 done <"$env_file"
-# Observability (A-28): a bad value would stop the app at startup, so it is refused here. The
-# static key is mapped only when traces go to Nebius Tracing: without tracing the secret need
-# not hold it (and a rollback to an older release never asks for it).
-traces="" metrics_url="" obs_project=""
+missing=()
+for key in "${REQUIRED_KEYS[@]}"; do
+  [[ " ${filled_keys:-} " == *" $key "* ]] || missing+=("$key")
+done
+[ "${#missing[@]}" = 0 ] \
+  || die "$env_file is missing (or has empty) ${missing[*]} (see deploy/prod.env.example)"
+# A bad value would stop the app at startup, after the old instance is gone, so it is refused
+# here. Observability (A-28): the static key is mapped only when traces go to Nebius Tracing:
+# without tracing the secret need not hold it (and a rollback to an older release never asks
+# for it).
+traces="" metrics_url="" obs_project="" gpu="" proxies=""
 for pair in "${env_pairs[@]}"; do
   case "$pair" in
     P2P_TRACES_ENDPOINT=*) traces="${pair#*=}" ;;
     P2P_METRICS_ENDPOINT=*) metrics_url="${pair#*=}" ;;
     OBSERVABILITY_PROJECT_ID=*) obs_project="${pair#*=}" ;;
+    P2P_GPU_PREEMPTIBLE=*) gpu="${pair#*=}" ;;
+    P2P_FORWARDED_ALLOW_IPS=*) proxies="${pair#*=}" ;;
+    P2P_PROVISIONER_IMAGE=* | P2P_RUNNER_IMAGE=* | P2P_RUNNER_CPU_IMAGE=*)
+      [[ "${pair#*=}" =~ $digest_ref ]] || die "${pair%%=*} must be a digest reference, never a tag"
+      ;;
   esac
 done
+[[ "$gpu" =~ ^(true|false)$ ]] || die "P2P_GPU_PREEMPTIBLE must be true or false"
+# Same rule as images/api/start.sh: parsed as uvicorn parses it (strict), at most /8 or /32.
+proxies_ok() {
+  [[ "$1" != *[!0-9a-fA-F.:/\;]* ]] || return 1
+  "$PY" -I -c '
+import ipaddress, sys
+for part in sys.argv[1].split(";"):
+    net = ipaddress.ip_network(part)
+    if net.prefixlen < (8 if net.version == 4 else 32):
+        sys.exit(1)
+' "$1" 2> /dev/null
+}
+if [ -n "$proxies" ] && ! proxies_ok "$proxies"; then
+  die "P2P_FORWARDED_ALLOW_IPS must list the proxy's IPs or CIDRs (at most /8 or /32 wide)"
+fi
 otlp_url='^https://[a-z0-9.-]+(:[0-9]{1,5})?$'
 [[ -z "$traces" || "$traces" =~ $otlp_url ]] \
   || die "P2P_TRACES_ENDPOINT must be https://host[:port] (no path, no credentials)"

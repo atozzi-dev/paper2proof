@@ -4,11 +4,14 @@ readiness of the new build, un-drain when a replace fails, one-shot bootstrap.""
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.deploy._settings import ENV_LINES, REQUIRED
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "deploy" / "endpoint.sh"
@@ -52,7 +55,7 @@ def _run(
     *args: str,
     existing: bool = False,
     url: str | None = "p2p-api.endpoints.example",
-    env_lines: str = "S3_REGION=eu-north1\nP2P_STATE_BUCKET=p2p-state\n",
+    env_lines: str = ENV_LINES,
     **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = tmp_path / "bin"
@@ -124,13 +127,112 @@ def test_a_new_endpoint_is_created_by_digest_with_secrets_by_name(tmp_path: Path
     [create] = _nebius(calls, "create")
     assert "--parent-id project-control" in create and f"--image {IMAGE}" in create
     assert "--container-port 8080" in create and "--disk-size 30Gi" in create
-    assert "--env P2P_ENV=prod,S3_REGION=eu-north1,P2P_STATE_BUCKET=p2p-state" in create
+    pairs = ",".join(f"{key}={value}" for key, value in REQUIRED.items())
+    assert f"--env P2P_ENV=prod,{pairs} " in create
     assert "P2P_DB_BOOTSTRAP" not in create
     assert "NEBIUS_API_KEY=p2p-secrets" in create and "ADMIN_TOKEN=p2p-secrets" in create
     assert "JOB_LAUNCHER_AUTH_KEY=p2p-secrets" in create
     assert "RUNTIME_AUTH_KEY=p2p-secrets" in create
     assert all("--parent-id project-control" in c for c in _nebius(calls, "list"))
     assert "ready at https://p2p-api.endpoints.example" in done.stdout
+
+
+def test_the_allowed_settings_are_exactly_the_documented_ones() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    block = re.search(r'^ENV_KEYS="([^"]*)"', script, re.MULTILINE)
+    assert block is not None
+    example = (ROOT / "deploy" / "prod.env.example").read_text(encoding="utf-8")
+    documented = set(re.findall(r"^(?:# )?([A-Z][A-Z0-9_]*)=", example, re.MULTILINE))
+    assert set(block.group(1).split()) == documented
+
+
+def test_every_documented_setting_is_accepted(tmp_path: Path) -> None:
+    example = (ROOT / "deploy" / "prod.env.example").read_text(encoding="utf-8")
+    settings = [  # the example's job images are placeholders, not digests
+        f"{key}={REQUIRED[key]}" if key.endswith("_IMAGE") else line
+        for line in example.splitlines()
+        if line and not line.startswith("#")
+        for key in [line.split("=", 1)[0]]
+    ]
+    settings += [  # the optional ones the example leaves commented out, with valid values
+        "P2P_FORWARDED_ALLOW_IPS=10.0.0.0/8",
+        "P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443",
+        "OBSERVABILITY_PROJECT_ID=project-abc123",
+        "P2P_METRICS_ENDPOINT=https://collector.example:4317",
+    ]
+    done, calls = _run(tmp_path, IMAGE, env_lines="\n".join(settings) + "\n")
+    assert done.returncode == 0, done.stderr
+    [create] = _nebius(calls, "create")
+    assert f"--env P2P_ENV=prod,{','.join(settings)} " in create
+
+
+@pytest.mark.parametrize("missing", sorted(REQUIRED))
+def test_a_missing_required_setting_stops_before_anything_runs(
+    tmp_path: Path, missing: str
+) -> None:
+    lines = "".join(f"{k}={v}\n" for k, v in REQUIRED.items() if k != missing)
+    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    assert done.returncode != 0 and missing in done.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("empty", sorted(REQUIRED))
+def test_an_empty_required_setting_counts_as_missing(tmp_path: Path, empty: str) -> None:
+    lines = "".join(f"{k}={'' if k == empty else v}\n" for k, v in REQUIRED.items())
+    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    assert done.returncode != 0 and empty in done.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "key", ["P2P_PROVISIONER_IMAGE", "P2P_RUNNER_IMAGE", "P2P_RUNNER_CPU_IMAGE"]
+)
+def test_a_job_image_must_be_a_digest(tmp_path: Path, key: str) -> None:
+    tag = f"{key}=cr.eu-north1.nebius.cloud/reg/p2p-job:latest"
+    lines = "".join(tag + "\n" if k == key else f"{k}={v}\n" for k, v in REQUIRED.items())
+    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    assert done.returncode != 0 and key in done.stderr
+    assert calls == []
+
+
+def test_a_missing_python_is_named_as_such(tmp_path: Path) -> None:
+    lines = ENV_LINES + "P2P_FORWARDED_ALLOW_IPS=10.0.0.0/8\n"  # checked with Python
+    done, calls = _run(tmp_path, IMAGE, env_lines=lines, PY="no-such-python-p2p")
+    assert done.returncode != 0 and "no-such-python-p2p" in done.stderr
+    assert "P2P_FORWARDED_ALLOW_IPS" not in done.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["*", "0.0.0.0/0", "0.0.0.0/00", "::/0", "0.0.0.0/1;128.0.0.0/1", "10.0.0.0/7",
+     "proxy.example", "10.0.0.0/8;", "999.0.0.1", "10.0.0.1/8"],
+)  # fmt: skip
+def test_a_wide_or_odd_proxy_list_stops_before_anything_runs(tmp_path: Path, value: str) -> None:
+    lines = ENV_LINES + f"P2P_FORWARDED_ALLOW_IPS={value}\n"
+    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    assert done.returncode != 0 and "P2P_FORWARDED_ALLOW_IPS" in done.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", ["yes", "True", ""])
+def test_the_gpu_mode_is_true_or_false(tmp_path: Path, value: str) -> None:
+    lines = ENV_LINES.replace("P2P_GPU_PREEMPTIBLE=true", f"P2P_GPU_PREEMPTIBLE={value}")
+    done, calls = _run(tmp_path, IMAGE, env_lines=lines)
+    assert done.returncode != 0 and "P2P_GPU_PREEMPTIBLE" in done.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [("P2P_SECRET_NAME", "p2p-secrets,EXTRA=other"), ("P2P_ENDPOINT_NAME", "p2p api")],
+)
+def test_odd_endpoint_or_secret_names_are_refused(
+    tmp_path: Path, variable: str, value: str
+) -> None:
+    done, calls = _run(tmp_path, IMAGE, **{variable: value})
+    assert done.returncode != 0 and variable in done.stderr
+    assert calls == []
 
 
 def test_bootstrap_is_only_for_the_first_create(tmp_path: Path) -> None:
@@ -226,7 +328,8 @@ def test_a_plain_http_endpoint_is_refused(tmp_path: Path) -> None:
     "line",
     ["P2P_ENV=dev", "DB_URL=x", "SMOKE_EXECUTOR=local", "P2P_REPLICATION=litestream",
      "P2P_DB_BOOTSTRAP=1", "P2P_BUILD_COMMIT=abc", "SESSION_KEY=x", "lowercase=x", "A=1,B=2",
-     "sk-raw-secret-pasted-alone"],
+     "sk-raw-secret-pasted-alone", "NEBIUS_SANDBOX_PROJECT=x", "SANDBOX_PROJECT_ID=x",
+     "NEBIUS_API_KEY=x", "OBSERVABILITY_STATIC_KEY=x"],
 )  # fmt: skip
 def test_the_env_file_holds_only_deploy_settings(tmp_path: Path, line: str) -> None:
     done, calls = _run(tmp_path, IMAGE, env_lines=f"{line}\n")
@@ -249,7 +352,7 @@ def test_observability_settings_are_deploy_keys_and_its_key_a_secret(tmp_path: P
         "P2P_METRICS_ENDPOINT=https://otel-collector.example:4317\n"
         "OBSERVABILITY_PROJECT_ID=project-e00control\n"
     )
-    done, calls = _run(tmp_path, IMAGE, env_lines=lines)
+    done, calls = _run(tmp_path, IMAGE, env_lines=ENV_LINES + lines)
     assert done.returncode == 0, done.stderr
     [create] = _nebius(calls, "create")
     assert "P2P_TRACES_ENDPOINT=https://write.tracing.eu-north1.nebius.cloud:443" in create
@@ -287,7 +390,9 @@ def test_without_tracing_the_observability_key_is_not_required(tmp_path: Path) -
 def test_bad_observability_settings_stop_before_anything_runs(
     tmp_path: Path, lines: str, problem: str
 ) -> None:
-    done, calls = _run(tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=lines)
+    done, calls = _run(
+        tmp_path, IMAGE, existing=True, ADMIN_TOKEN="t" * 40, env_lines=ENV_LINES + lines
+    )
     assert done.returncode != 0 and problem in done.stderr
     assert calls == []
 

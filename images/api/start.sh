@@ -15,6 +15,26 @@ case "$S3_ENDPOINT" in
   https://*) ;;
   *) echo "S3_ENDPOINT must be an https:// URL" >&2; exit 1 ;;
 esac
+
+# Behind the managed endpoint's proxy: trust forwarded client addresses only from the proxy's
+# addresses (measured in H-05), never from everywhere. Several CIDRs are separated by ";"
+# (commas separate the endpoint's environment variables). Each one is parsed as uvicorn will
+# parse it (ipaddress, strict), so "/00", host bits or two halves of the Internet are refused.
+proxy=""
+if [ -n "${P2P_FORWARDED_ALLOW_IPS:-}" ]; then
+  bad_proxy="P2P_FORWARDED_ALLOW_IPS must list the proxy's IPs or CIDRs (at most /8 or /32 wide)"
+  case "$P2P_FORWARDED_ALLOW_IPS" in
+    *[!0-9a-fA-F.:/\;]*) echo "$bad_proxy" >&2; exit 1 ;;
+  esac
+  python -I -c '
+import ipaddress, sys
+for part in sys.argv[1].split(";"):
+    net = ipaddress.ip_network(part)
+    if net.prefixlen < (8 if net.version == 4 else 32):
+        sys.exit(1)
+' "$P2P_FORWARDED_ALLOW_IPS" 2> /dev/null || { echo "$bad_proxy" >&2; exit 1; }
+  proxy=" --proxy-headers --forwarded-allow-ips=$(printf '%s' "$P2P_FORWARDED_ALLOW_IPS" | tr ';' ',')"
+fi
 config="${P2P_LITESTREAM_CONFIG:-/opt/p2p/litestream.yml}"
 db=/var/lib/p2p/p2p.db
 
@@ -30,18 +50,6 @@ else
   litestream restore -config "$config" -if-db-not-exists "$db"
 fi
 alembic upgrade head
-
-# Behind the managed endpoint's proxy: trust forwarded client addresses only from the proxy's
-# addresses (measured in H-05), never from everywhere. Several CIDRs are separated by ";"
-# (commas separate the endpoint's environment variables).
-proxy=""
-if [ -n "${P2P_FORWARDED_ALLOW_IPS:-}" ]; then
-  case "$P2P_FORWARDED_ALLOW_IPS" in
-    *[!0-9a-fA-F.:/\;]*|*/0|*/0\;*)
-      echo "P2P_FORWARDED_ALLOW_IPS must list the proxy's IPs or CIDRs (no /0)" >&2; exit 1 ;;
-  esac
-  proxy=" --proxy-headers --forwarded-allow-ips=$(printf '%s' "$P2P_FORWARDED_ALLOW_IPS" | tr ';' ',')"
-fi
 
 export P2P_REPLICATION=litestream  # with the parent process check, what /readyz reports
 # A bounded graceful shutdown: open SSE streams must not hold litestream's final sync past the

@@ -26,8 +26,11 @@ Required environment:
   `JOB_LAUNCHER_S3_SECRET`; `OBSERVABILITY_STATIC_KEY` only with Nebius Tracing (see
   "Observability"). The app writes the two authorized keys owner-only to
   `/var/lib/p2p/keys` on the ephemeral container disk, because the Nebius SDK reads a file.
-- **Settings**, from `deploy/prod.env`, whose template is `deploy/prod.env.example`. Only those
-  keys are accepted.
+- **Settings**, from `deploy/prod.env`, whose template is `deploy/prod.env.example`. Only its
+  keys (including the commented-out optional ones) are accepted. `deploy/endpoint.sh` refuses a
+  file without the required ones (the uncommented lines except `S3_REGION` and
+  `GATEWAY_INSTANCE_ID`), or with a bad `P2P_GPU_PREEMPTIBLE` or `P2P_FORWARDED_ALLOW_IPS`,
+  before it changes anything.
 
 `/readyz` returns 200 only when the database answers, the models are routed, and the process
 really runs under litestream. It also reports the `commit` baked into the image at build time

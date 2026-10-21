@@ -114,9 +114,25 @@ def test_forwarded_addresses_are_trusted_only_from_listed_proxies(tmp_path: Path
 
 @pytest.mark.parametrize(
     "value",
-    ["*", "10.0.0.0/8 --reload", "$(id)", "0.0.0.0/0", "::/0", "10.0.0.0/8;0.0.0.0/0", "a,b"],
+    [
+        "*",
+        "10.0.0.0/8 --reload",
+        "$(id)",
+        "0.0.0.0/0",
+        "::/0",
+        "10.0.0.0/8;0.0.0.0/0",
+        "a,b",
+        "0.0.0.0/00",  # still /0 for ipaddress, and so for uvicorn
+        "::/00",
+        "0.0.0.0/1;128.0.0.0/1",  # everyone, in two halves
+        "10.0.0.0/7",
+        "2001::/31",
+        "10.0.0.0/8;",
+        "999.0.0.1",
+        "10.0.0.1/8",  # host bits set: uvicorn would quietly never match it
+    ],
 )
 def test_a_wildcard_or_odd_proxy_list_is_refused(tmp_path: Path, value: str) -> None:
     done, calls = _run(tmp_path, P2P_FORWARDED_ALLOW_IPS=value)
     assert done.returncode != 0
-    assert not [c for c in calls if c.startswith("litestream replicate")]
+    assert calls == []  # refused before the database is restored or migrated
