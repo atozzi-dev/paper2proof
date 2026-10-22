@@ -61,6 +61,8 @@ SEARCH_LIMIT = 5
 TURNS_PER_RUN = 5  # model turns allowed per smoke run in the budget
 TOOL_RESULT_CHARS = 8_000
 ERROR_CHARS = 32_000  # ~8k tokens (architecture §6.4)
+KEEP_FULL_MESSAGES = 8  # the latest tool turns the Coder sees in full
+_TRIM_ABOVE = 500  # older results and arguments longer than this become a short note
 CONTEXT_FILE_CHARS = 8_000
 MAX_REPO_SNAPSHOT_BYTES = 4 * 1024 * 1024
 SMOKE_ARGS = ["--seed", "0", "--out", "out", "--smoke"]
@@ -115,6 +117,40 @@ class _State:
             "searches": self.searches,
             "last_smoke": self.last_smoke,
         }
+
+
+def compact_history(messages: list[Message]) -> list[Message]:
+    """The Coder history with older tool results and long tool-call arguments replaced by a
+    short note: every turn resends the whole history, and 40 turns of 8k-character results and
+    100 KB writes would reach the run's token cap. The instructions, the task and the latest
+    KEEP_FULL_MESSAGES messages stay as they are; every tool call keeps a result (the API needs
+    the pairs), and arguments stay valid JSON. Idempotent."""
+    cut = len(messages) - KEEP_FULL_MESSAGES
+    out: list[Message] = []
+    for i, message in enumerate(messages):
+        if i < 2 or i >= cut:
+            out.append(message)
+        elif message.role == "tool" and len(str(message.content or "")) > _TRIM_ABOVE:
+            note = (
+                f"[earlier result trimmed: {len(str(message.content))} characters; "
+                "read the file or run the smoke test again if you need it]"
+            )
+            out.append(message.model_copy(update={"content": note}))
+        elif message.tool_calls:
+            calls = []
+            for call in message.tool_calls:
+                function = call.get("function")
+                if isinstance(function, dict):
+                    arguments = str(function.get("arguments", ""))
+                    if len(arguments) > _TRIM_ABOVE:
+                        omitted = {"trimmed": f"{len(arguments)} characters of arguments omitted"}
+                        function = {**function, "arguments": json.dumps(omitted)}
+                        call = {**call, "function": function}
+                calls.append(call)
+            out.append(message.model_copy(update={"tool_calls": calls}))
+        else:
+            out.append(message)
+    return out
 
 
 class SmokeTestingStep:
@@ -300,6 +336,7 @@ class SmokeTestingStep:
             await self._put(state_key, state.dump(ws))
 
         for _ in range(max_runs * TURNS_PER_RUN):
+            messages = compact_history(messages)
             completion = await self._models.complete(
                 Role.CODER,
                 messages,

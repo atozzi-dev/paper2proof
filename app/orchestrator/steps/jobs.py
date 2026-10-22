@@ -95,6 +95,7 @@ async def stop_jobs(
     sleep: Callable[[float], Awaitable[None]],
     keep: Callable[[str], bool] = lambda name: False,
     wait_s: float = STOP_WAIT_S,
+    clock: Callable[[], datetime] = utcnow,
 ) -> bool:
     """Cancel the jobs named `prefix*` that are still running (except those `keep` names) and
     wait until they have stopped: a job left behind by a restart still mounts the run bucket
@@ -106,15 +107,14 @@ async def stop_jobs(
     ]
     for handle in running:
         await ctx.jobs.cancel(handle)
-    waited = 0.0
+    until = clock() + timedelta(seconds=wait_s)  # wall time: one status call can take minutes
     while True:
         running = [h for h in running if not (await _status(ctx, h, sleep)).is_terminal]
         if not running:
             return True
-        if waited >= wait_s:
+        if clock() >= until:
             return False
         await sleep(poll_s)
-        waited += poll_s
 
 
 async def _await_stop(
@@ -207,7 +207,16 @@ async def run_job(
         # the watchdog) plus a poll and the stop wait. Anything watched is billed in full.
         used = since(gpu_since)
         hidden = existing is None and (start_hidden or (anchor is None and was_blind))
-        return min(used, spec.watchdog_s + poll_s + STOP_WAIT_S) if hidden else used
+        cap = spec.watchdog_s + poll_s + STOP_WAIT_S
+        if not hidden or used <= cap:
+            return used
+        log.warning(  # visible for reconciliation if the runner did not stop itself
+            "GPU time capped at %.0f s of %.0f s since submission (start hidden by an outage)",
+            cap,
+            used,
+            extra={"job": spec.name},
+        )
+        return cap
 
     async def settle(refused: bool = False) -> None:
         # A creation refused (no capacity, or a quota) left no job behind: nothing to pay.

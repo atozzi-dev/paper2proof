@@ -348,3 +348,47 @@ async def test_a_report_missing_a_digest_fails_closed(
     with pytest.raises(P2PError) as err:
         await step.run(ctx)
     assert err.value.code is ErrorCode.PROVISION_FAILED
+
+
+def _history(turns: int) -> list[Any]:
+    from app.models.client import Message, ToolCall
+
+    messages = [
+        Message(role="system", content="S" * 5000),
+        Message(role="user", content="U" * 5000),
+    ]
+    for i in range(turns):
+        args = '{"path": "workspace/train.py", "content": "' + "x" * 20_000 + '"}'
+        messages.append(
+            Message.tool_request(None, [ToolCall(id=f"c{i}", name="write_file", arguments=args)])
+        )
+        messages.append(Message(role="tool", tool_call_id=f"c{i}", content="R" * 8000))
+    return messages
+
+
+def test_older_tool_turns_are_trimmed_and_the_recent_ones_kept() -> None:
+    """40 Coder turns resending every result would reach the 1.5M token cap (P2)."""
+    import json
+
+    from app.orchestrator.steps.smoke_testing import KEEP_FULL_MESSAGES, compact_history
+
+    messages = _history(30)
+    compacted = compact_history(messages)
+    assert len(compacted) == len(messages)  # every tool call keeps its result
+    assert compacted[:2] == messages[:2]  # instructions and task untouched
+    assert compacted[-KEEP_FULL_MESSAGES:] == messages[-KEEP_FULL_MESSAGES:]
+    old_call, old_result = compacted[2], compacted[3]
+    assert old_result.tool_call_id == "c0" and len(str(old_result.content)) < 300
+    arguments = old_call.tool_calls[0]["function"]["arguments"]
+    assert len(arguments) < 300 and json.loads(arguments)  # still valid JSON
+    assert sum(len(str(m.model_dump())) for m in compacted) < 0.25 * sum(
+        len(str(m.model_dump())) for m in messages
+    )
+    assert compact_history(compacted) == compacted  # idempotent
+
+
+def test_a_short_history_is_left_alone() -> None:
+    from app.orchestrator.steps.smoke_testing import compact_history
+
+    messages = _history(2)
+    assert compact_history(messages) == messages

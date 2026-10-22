@@ -351,3 +351,23 @@ def test_every_image_part_counts_and_other_parts_stay_text() -> None:
     assert estimate_message_tokens([{"role": "user", "content": [other]}]) >= estimate_tokens(
         "B" * 4000
     )
+
+
+@respx.mock
+async def test_attempts_before_a_final_client_error_are_still_charged(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """503, 503, then a 400: the two processed attempts are billed, the 400 is not."""
+    await _run(store)
+    other = "r_01jb7z00000000000000000009"
+    await store.create_run(other, "2106.09685", created_by=None, claim_hint=None, budget={})
+    down, bad = httpx.Response(503, json={}), httpx.Response(400, json={})
+    route = respx.post(f"{BASE}chat/completions").mock(side_effect=[down, down, bad])
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    route.side_effect = [down, down, down, down]
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=other)
+    two = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    four = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
+    assert two > 0 and two * 2 == four
