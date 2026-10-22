@@ -105,6 +105,11 @@ export function AboutPage() {
           network access are done by deterministic code after validation.
         </p>
       </section>
+
+      <p className="muted small">
+        Typefaces: Inter, Space Grotesk and JetBrains Mono, served from this site under the{' '}
+        <a href="/fonts/LICENSES.txt">SIL Open Font License 1.1</a>.
+      </p>
     </>
   )
 }

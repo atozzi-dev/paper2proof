@@ -18,6 +18,7 @@ def dist(tmp_path: Path) -> Path:
     (root / "assets").mkdir(parents=True)
     (root / "index.html").write_text("<!doctype html><title>Paper2Proof</title>")
     (root / "assets" / "index-abc123.js").write_text("console.log(1)")
+    (root / "assets" / "inter-latin-wght-normal-abc123.woff2").write_bytes(b"wOF2")
     (tmp_path / "secret.txt").write_text("outside the UI")
     return root
 
@@ -41,6 +42,14 @@ async def test_hashed_assets_are_cached_for_good(web: httpx.AsyncClient) -> None
     asset = await web.get("/assets/index-abc123.js")
     assert asset.status_code == 200
     assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+async def test_fonts_are_served_as_fonts_whatever_the_os_mime_table(
+    web: httpx.AsyncClient,
+) -> None:
+    font = await web.get("/assets/inter-latin-wght-normal-abc123.woff2")
+    assert font.status_code == 200
+    assert font.headers["content-type"] == "font/woff2"  # nosniff: never text/plain
 
 
 async def test_api_routes_still_win(web: httpx.AsyncClient) -> None:

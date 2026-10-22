@@ -139,6 +139,15 @@ describe('About', () => {
     expect(roles).not.toHaveTextContent('Nano Omni')
     expect(within(roles).getByRole('row', { name: /Coder/ })).not.toHaveTextContent('Sandboxes')
   })
+
+  it('credits the bundled typefaces and links their licenses', async () => {
+    mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: {} }) : undefined))
+    window.location.hash = '#/about'
+    render(<App />)
+    const link = await screen.findByRole('link', { name: 'SIL Open Font License 1.1' })
+    expect(link).toHaveAttribute('href', '/fonts/LICENSES.txt')
+    expect(link.closest('p')).toHaveTextContent('Inter, Space Grotesk and JetBrains Mono')
+  })
 })
 
 describe('Run page', () => {

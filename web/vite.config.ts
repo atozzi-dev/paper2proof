@@ -15,6 +15,10 @@ export default defineConfig({
   preview: {
     headers: { 'Content-Security-Policy': CSP },
   },
+  build: {
+    // Fonts stay files: the CSP has no data: for fonts, so an inlined small subset would be blocked.
+    assetsInlineLimit: (file) => (file.endsWith('.woff2') ? false : undefined),
+  },
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}'],
