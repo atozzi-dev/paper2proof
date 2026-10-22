@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
@@ -388,3 +389,138 @@ async def test_attempts_before_a_final_client_error_are_still_charged(
     two = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
     four = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
     assert two > 0 and two * 2 == four
+
+
+async def _fill_run_tokens_out(store: Store, leave: int) -> None:
+    """Spend the run's tokens_out cap (config/budgets.yaml: 150k) down to `leave` tokens."""
+    from datetime import UTC, datetime
+
+    await store.add_ledger_entry(RUN, datetime.now(UTC).date(), "tokens_out", 150_000 - leave)
+
+
+@respx.mock
+async def test_a_retry_is_reserved_before_it_is_sent(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """Invariant 7 holds for retries too: room for one Utility attempt (1500 out), a 503, and
+    the retry is refused by the budget instead of going out unreserved."""
+    await _run(store)
+    await _fill_run_tokens_out(store, leave=1500)
+    route = respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion()]
+    )
+    with pytest.raises(BudgetExceeded):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert route.call_count == 1
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) > 0  # the 503 was processed
+    assert client.budget._inflight == {}  # every kind released, not only tokens_out
+
+
+@respx.mock
+async def test_a_retried_call_is_charged_its_usage_once(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion(tokens=(10, 5))]
+    )
+    await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+
+
+@respx.mock
+async def test_a_cancel_during_the_settle_still_commits_every_reservation(
+    store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second cancel must not leave reservations in flight (false BudgetExceeded later)."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=completion(tokens=(10, 5)))
+    entered, gate, written = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    real, writes = store.add_ledger_entry, []
+
+    async def slow(*args: Any, **kwargs: Any) -> None:
+        entered.set()
+        await gate.wait()
+        await real(*args, **kwargs)
+        writes.append(args)
+        if len(writes) == 3:  # tokens in, tokens out, dollars
+            written.set()
+
+    monkeypatch.setattr(store, "add_ledger_entry", slow)
+    task = asyncio.create_task(client.complete(Role.UTILITY, USER, run_id=RUN))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.set()
+    await asyncio.wait_for(written.wait(), timeout=5)
+    assert client.budget._inflight == {}
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+    assert await client.budget.run_spend(RUN, SpendKind.INFERENCE_USD) > 0
+
+
+@respx.mock
+async def test_a_failed_ledger_write_still_releases_the_other_reservations(
+    store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=completion(tokens=(10, 5)))
+    real, calls = store.add_ledger_entry, []
+
+    async def first_fails(*args: Any, **kwargs: Any) -> None:
+        calls.append(args)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_ledger_entry", first_fails)
+    with pytest.raises(OSError, match="disk full"):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert len(calls) == 3  # tokens in, tokens out, dollars: every reservation committed
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+
+
+@respx.mock
+async def test_a_failed_ledger_write_moves_the_actual_to_the_next_reservation(
+    store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retried call holds two tokens_out reservations: when the first commit fails, the
+    second one books the actual instead of 0."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion(tokens=(10, 5))]
+    )
+    real, failed = store.add_ledger_entry, []
+
+    async def tokens_out_fails_once(*args: Any, **kwargs: Any) -> None:
+        if args[2] == "tokens_out" and not failed:
+            failed.append(args)
+            raise OSError("disk full")
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_ledger_entry", tokens_out_fails_once)
+    with pytest.raises(OSError, match="disk full"):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+    assert client.budget._inflight == {}
+
+
+@respx.mock
+async def test_a_retry_refused_on_dollars_releases_its_token_reservations(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """The retry's tokens are reserved, its dollars are refused: nothing stays in flight."""
+    from datetime import UTC, datetime
+
+    await _run(store)
+    estimate = client.pricing.estimate(client.resolved[Role.UTILITY].model_id, 1, 1500)
+    await store.add_ledger_entry(  # room for one attempt's dollars, not two
+        RUN, datetime.now(UTC).date(), "inference_usd", 1.00 - 1.5 * estimate
+    )
+    route = respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion()]
+    )
+    with pytest.raises(BudgetExceeded):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert route.call_count == 1
+    assert client.budget._inflight == {}
