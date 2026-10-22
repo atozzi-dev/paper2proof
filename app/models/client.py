@@ -6,6 +6,7 @@ and an SSE `model.call` event. Model IDs come only from the router (invariant 5)
 """
 
 import asyncio
+import logging
 import math
 import random
 import re
@@ -36,8 +37,16 @@ from app.domain.events import EventType
 from app.domain.models import ErrorCode
 from app.models.pricing import Pricing, estimate_message_tokens, estimate_tokens
 from app.observability import metrics, tracing
-from app.orchestrator.budget import Budget, Reservation, SpendKind
+from app.orchestrator.budget import (
+    Budget,
+    BudgetExceeded,
+    KillSwitchActive,
+    Reservation,
+    SpendKind,
+)
 from app.storage.store import Store
+
+log = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "models.yaml"
@@ -325,6 +334,16 @@ class _Failed(Exception):
         self.timeouts = timeouts
 
 
+class _Unfunded(Exception):
+    """The budget refused the next retry: it is never sent. `attempts`/`timeouts` count those
+    already made, as in _Exhausted; the cause is the BudgetExceeded (or KillSwitchActive)."""
+
+    def __init__(self, attempts: int, timeouts: int) -> None:
+        super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
+        self.attempts = attempts
+        self.timeouts = timeouts
+
+
 class _Exhausted(Exception):
     """Retries on the role's model are used up (429/5xx/timeouts). `attempts` counts those the
     model processed (5xx), `timeouts` those that may have been generated in full."""
@@ -458,13 +477,33 @@ class TokenFactoryClient:
     async def _settle(
         self, reservations: list[Reservation], tokens_in: int, tokens_out: int, cost: float
     ) -> None:
+        """Commit the actual spend once per kind (a retried call holds one reservation per
+        attempt: the others are released at 0). Shielded: a second cancel never leaves a
+        reservation in flight, which would fail later calls with a false BudgetExceeded."""
         actual = {
             SpendKind.TOKENS_IN: float(tokens_in),
             SpendKind.TOKENS_OUT: float(tokens_out),
             SpendKind.INFERENCE_USD: cost,
         }
+        failure = await asyncio.shield(self._commit_all(reservations, actual))
+        if failure is not None:
+            raise failure
+
+    async def _commit_all(
+        self, reservations: list[Reservation], actual: dict[SpendKind, float]
+    ) -> Exception | None:
+        """Commit every reservation, past a failing one; return the first failure."""
+        charged: set[SpendKind] = set()
+        failure: Exception | None = None
         for reservation in reservations:
-            await self.budget.commit(reservation, actual[reservation.kind])
+            amount = 0.0 if reservation.kind in charged else actual[reservation.kind]
+            charged.add(reservation.kind)
+            try:
+                await self.budget.commit(reservation, amount)
+            except Exception as exc:
+                log.error("ledger commit failed", extra={"run_id": reservation.run_id})
+                failure = failure or exc
+        return failure
 
     async def _complete_role(
         self,
@@ -490,8 +529,19 @@ class TokenFactoryClient:
         full = (est_in, out_cap, self.pricing.estimate(model_id, est_in, out_cap))
         started = time.monotonic()
         tally = _Tally()
+
+        async def reserve_retry() -> None:  # invariant 7: a retry is a model call too
+            reservations.extend(await self._reserve(run_id, model_id, est_in, out_cap))
+
         try:
-            raw = await self._call_with_retries(request, tally)
+            raw = await self._call_with_retries(request, tally, reserve_retry)
+        except _Unfunded as unfunded:
+            # The refused retry was never sent: only the attempts already made are charged.
+            tin = (unfunded.attempts + unfunded.timeouts) * est_in
+            tout = unfunded.timeouts * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
+            assert unfunded.__cause__ is not None  # noqa: S101 (always raised `from refused`)
+            raise unfunded.__cause__ from None
         except _Exhausted as exhausted:
             # Every attempt the model processed may be billed for its input (a 429 or a
             # connection error never reached it); a timed-out one possibly in full.
@@ -567,7 +617,7 @@ class TokenFactoryClient:
         )
 
     async def _call_with_retries(
-        self, req: "ChatRequest", tally: _Tally
+        self, req: "ChatRequest", tally: _Tally, reserve_retry: Callable[[], Awaitable[None]]
     ) -> LegacyAPIResponse[ChatCompletion]:
         retrying = AsyncRetrying(
             stop=stop_after_attempt(self.config.provider.max_retries),
@@ -579,6 +629,11 @@ class TokenFactoryClient:
         create = self._openai.chat.completions.with_raw_response.create
         try:
             async for attempt in retrying:
+                if attempt.retry_state.attempt_number > 1:
+                    try:
+                        await reserve_retry()  # outside `attempt`: never retried itself
+                    except (BudgetExceeded, KillSwitchActive) as refused:
+                        raise _Unfunded(tally.attempts, tally.timeouts) from refused
                 with attempt:
                     try:
                         return await create(
@@ -615,6 +670,8 @@ class TokenFactoryClient:
                         elif err.status_code >= 500:
                             tally.attempts += 1  # 5xx: the input may have been processed
                         raise  # a 4xx is refused before any work
+        except _Unfunded:
+            raise
         except Exception as err:
             if _retryable(err):
                 raise _Exhausted(tally.attempts, tally.timeouts) from err
