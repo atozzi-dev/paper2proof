@@ -69,15 +69,35 @@ def _now(delta: timedelta = timedelta()) -> str:
     return (datetime.now(UTC) + delta).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
 
 
+class Acl:
+    """Records setfacl calls; answers with `result` (or raises it)."""
+
+    def __init__(self, result: tuple[int, str, str] | BaseException = (0, "", "")) -> None:
+        self.calls: list[list[str]] = []
+        self.result = result
+
+    async def __call__(self, argv: Sequence[str], timeout_s: float) -> tuple[int, str, str]:
+        self.calls.append(list(argv))
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
 def _backend(
-    tmp_path: Path, docker: Docker, *, env: str = "dev", paper: str = CANARY
+    tmp_path: Path,
+    docker: Docker,
+    *,
+    env: str = "dev",
+    paper: str = CANARY,
+    host_uid: int | None = None,
+    acl: Acl | None = None,
 ) -> DevDockerBackend:
     async def paper_sha256(run_id: str) -> str | None:
         return paper if run_id == RUN else None
 
     return DevDockerBackend(
         env=env, canaries=frozenset({CANARY}), paper_sha256=paper_sha256, root=tmp_path,
-        docker=docker,
+        docker=docker, host_uid=host_uid, acl=acl or Acl(),
     )  # fmt: skip
 
 
@@ -447,3 +467,76 @@ async def test_the_cache_mounts_only_at_its_path_even_unvalidated(tmp_path: Path
     )
     with pytest.raises(ValueError, match="cache"):
         await backend.submit(moved)
+
+
+def _all_dirs(paths: list[str]) -> bool:
+    return all(Path(p).is_dir() for p in paths)
+
+
+def _owner(path: Path) -> int:
+    return path.stat().st_uid
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+async def test_on_a_linux_host_job_dirs_are_shared_with_uid_10001_once(tmp_path: Path) -> None:
+    """Bind mounts keep uids: what the job (10001) and the control plane create must stay
+    writable by both, so the three parents get access and default ACLs for both users."""
+    acl, me = Acl(), _owner(tmp_path)
+    backend = _backend(tmp_path, Docker(), host_uid=me, acl=acl)
+    await backend.ensure_run_bucket(RUN)
+    await backend.submit(_spec())
+    parents = [str((tmp_path / d).resolve()) for d in ("buckets", "cache", "jobs")]
+    entries, defaults = f"u:10001:rwX,u:{me}:rwX", f"d:u:10001:rwX,d:u:{me}:rwX"
+    assert acl.calls == [["setfacl", "-m", entries, "-m", defaults, *parents]]
+    assert _all_dirs(parents)
+
+
+@POSIX
+async def test_the_shared_root_is_closed_to_every_other_host_account(tmp_path: Path) -> None:
+    """uid 10001 may be a real account here: only this root's parents are shared with it, and
+    the root itself is ours alone (dockerd mounts as root; containers never walk it)."""
+    await _backend(tmp_path, Docker(), host_uid=_owner(tmp_path)).ensure_run_bucket(RUN)
+    assert _mode(tmp_path) == 0o700
+
+
+async def test_a_root_owned_by_someone_else_is_refused(tmp_path: Path) -> None:
+    acl = Acl()
+    backend = _backend(tmp_path, Docker(), host_uid=_owner(tmp_path) + 1, acl=acl)
+    with pytest.raises(RuntimeError, match="not owned by"):
+        await backend.ensure_run_bucket(RUN)
+    assert acl.calls == []
+
+
+async def test_a_submit_alone_shares_the_dirs_before_mounting(tmp_path: Path) -> None:
+    acl = Acl()
+    docker = Docker()
+    await _backend(tmp_path, docker, host_uid=_owner(tmp_path), acl=acl).submit(_spec())
+    assert len(acl.calls) == 1 and _run_argv(docker)
+
+
+async def test_docker_desktop_needs_no_acl(tmp_path: Path) -> None:
+    acl = Acl()
+    backend = _backend(tmp_path, Docker(), host_uid=None, acl=acl)
+    await backend.ensure_run_bucket(RUN)
+    await backend.submit(_spec())
+    assert acl.calls == []
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (FileNotFoundError("setfacl"), "install the acl package"),
+        ((1, "", "setfacl: Operation not supported"), "Operation not supported"),
+    ],
+)
+async def test_a_failed_acl_stops_before_any_job(
+    tmp_path: Path, result: tuple[int, str, str] | BaseException, message: str
+) -> None:
+    docker = Docker()
+    backend = _backend(tmp_path, docker, host_uid=_owner(tmp_path), acl=Acl(result))
+    with pytest.raises(RuntimeError, match=message):
+        await backend.submit(_spec())
+    assert not [c for c in docker.calls if c[1] == "run"]

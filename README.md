@@ -199,8 +199,10 @@ run are refused. Jobs run as uid 10001 with no capabilities, a read-only root, c
 and logs, a kill at their watchdog, and no network. The exception is the provisioner, which
 runs our code on docker's default network: unlike the cloud gateway, its egress is not
 allowlisted. Each run's bucket is a directory under `var/jobs/buckets/`. Executing
-uses the CPU runner, since there is no GPU locally. On a Linux docker host the bucket and cache
-directories must be writable by uid 10001; Docker Desktop's bind mounts already are.
+uses the CPU runner, since there is no GPU locally. On a Linux docker host the jobs' uid 10001
+is a host uid too, so the backend shares `var/jobs/{buckets,cache,jobs}` with it through ACLs
+(`setfacl`, from the `acl` package) and makes `var/jobs` private to you. Rootless docker and
+userns-remap are not supported. Docker Desktop needs none of this.
 
 ### Deploying
 

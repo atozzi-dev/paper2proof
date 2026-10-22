@@ -20,6 +20,7 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,7 @@ _STATES = {
 }
 DOCKER_TIMEOUT_S = 120.0
 LABEL = "p2p-dev"
+JOB_UID = 10001  # the images' non-root user
 
 
 def local_image(ref: str) -> str:
@@ -49,6 +51,14 @@ def local_image(ref: str) -> str:
     if match is None:
         raise ValueError("job images are referenced by digest")
     return match.group(1)
+
+
+def _host_uid() -> int | None:
+    """Our uid when bind mounts keep uids as they are (a Linux docker host); None under Docker
+    Desktop, whose bind mounts are writable by any container user."""
+    if sys.platform == "linux":
+        return os.getuid()
+    return None
 
 
 def _when(value: object) -> datetime | None:
@@ -67,6 +77,8 @@ class DevDockerBackend:
         paper_sha256: PaperHash,
         root: Path,
         docker: DockerRunner = docker_cli,
+        host_uid: int | None = _host_uid(),
+        acl: DockerRunner = docker_cli,
     ) -> None:
         if env != "dev":
             raise LocalTrustedRefused("the local docker job backend runs only with P2P_ENV=dev")
@@ -77,6 +89,40 @@ class DevDockerBackend:
             raise ValueError(f"{self._root}: docker --mount cannot take this path")
         self._root_label = hashlib.sha256(str(self._root).encode()).hexdigest()[:16]
         self._docker = docker
+        self._host_uid = host_uid
+        self._acl = acl
+        self._shared = False
+
+    async def _share_job_dirs(self) -> None:
+        """Every directory a job gets bind-mounted lives under these three parents. On a Linux
+        host the job's uid 10001 is uid 10001 here, so they get access and default ACLs for both
+        users: what either side creates stays writable by the other (we delete job files)."""
+        if self._shared or self._host_uid is None:
+            return
+        parents = [self._root / d for d in ("buckets", "cache", "jobs")]
+        for parent in parents:
+            parent.mkdir(parents=True, exist_ok=True)
+        # uid 10001 may be a real account on this host: the root is ours alone, so nobody else
+        # reaches the shared parents (dockerd mounts as root; containers never walk the root).
+        # Never chmod the parents themselves: that would reset the ACL mask.
+        owner = self._root.stat().st_uid
+        if owner != self._host_uid:
+            raise RuntimeError(f"{self._root} is not owned by uid {self._host_uid} (uid {owner})")
+        self._root.chmod(0o700)
+        users = (JOB_UID, self._host_uid)
+        entries = ",".join(f"u:{uid}:rwX" for uid in users)
+        defaults = ",".join(f"d:u:{uid}:rwX" for uid in users)
+        argv = ["setfacl", "-m", entries, "-m", defaults, *map(str, parents)]
+        try:
+            code, _, err = await self._acl(argv, DOCKER_TIMEOUT_S)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "setfacl not found: install the acl package (apt install acl), or make "
+                f"{self._root}/{{buckets,cache,jobs}} writable by uid {JOB_UID}"
+            ) from None
+        if code != 0:
+            raise RuntimeError(f"setfacl failed on {self._root}: {err.strip()[-300:]}")
+        self._shared = True
 
     def _bucket(self, name: str) -> Path:
         return self._root / "buckets" / name
@@ -86,6 +132,7 @@ class DevDockerBackend:
 
     async def ensure_run_bucket(self, run_id: str) -> str:
         name = bucket_name(run_id)
+        await self._share_job_dirs()
         self._bucket(name).mkdir(parents=True, exist_ok=True)
         return name
 
@@ -156,6 +203,7 @@ class DevDockerBackend:
             if not self._ours(existing) or existing.get("Image") != image:
                 raise RuntimeError(f"{spec.name} exists but was not created by this backend")
             return JobHandle(name=spec.name, nebius_id=str(existing.get("Id", "")))
+        await self._share_job_dirs()
         job = self._root / "jobs" / spec.name
         shutil.rmtree(job, ignore_errors=True)
         (job / "work").mkdir(parents=True)
