@@ -538,3 +538,7 @@ td {
   font-size: 0.85em;
   overflow-wrap: anywhere; /* long model IDs wrap instead of widening the table */
 }
+
+.step-skipped .step-dot {
+  opacity: 0.35; /* not run: a needless approval, or a step a finished run never reached */
+}
