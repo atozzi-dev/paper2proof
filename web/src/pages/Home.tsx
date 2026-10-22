@@ -45,6 +45,19 @@ export function HomePage() {
           Give it an arXiv ML paper. It extracts the quantitative claims, re-runs the experiment in an isolated GPU
           sandbox, and returns a deterministic verdict with a signed, re-runnable Proof Bundle.
         </p>
+        <ol className="steps-list" aria-label="How it works">
+          <li>Enter an arXiv ID: Nemotron models read the paper and pick the claims a run can test.</li>
+          <li>The experiment is planned, coded, smoke-tested and run on Nebius GPUs, isolated and without internet.</li>
+          <li>A fixed statistical rule, not a model, decides the verdict; every run ships its limitations.</li>
+        </ol>
+        {examples.length > 0 && (
+          <p>
+            <a className="button" href={href.run(examples[0].id, true)}>
+              Watch a finished run in 30 seconds
+            </a>{' '}
+            <span className="muted">a recorded run, replayed at 10× speed: nothing is executed</span>
+          </p>
+        )}
       </section>
 
       <form className="card start-form" onSubmit={submit} noValidate aria-describedby={error ? ids.error : undefined}>

@@ -78,9 +78,9 @@ describe('costReceipt', () => {
       { inference_usd: 0.5, cloud_usd: 1.25, total_usd: 1.75 },
     )
     expect(receipt.rows).toEqual([
-      { role: 'reader', calls: 2, tokensIn: 1500, tokensOut: 300, usd: 0.3, unpriced: 0 },
-      { role: 'planner', calls: 1, tokensIn: 3000, tokensOut: 900, usd: 0.2, unpriced: 0 },
-      { role: 'judge', calls: 1, tokensIn: 800, tokensOut: 300, usd: 0, unpriced: 1 },
+      { role: 'reader', models: ['reader-model'], calls: 2, tokensIn: 1500, tokensOut: 300, usd: 0.3, unpriced: 0 },
+      { role: 'planner', models: ['planner-model'], calls: 1, tokensIn: 3000, tokensOut: 900, usd: 0.2, unpriced: 0 },
+      { role: 'judge', models: ['judge-model'], calls: 1, tokensIn: 800, tokensOut: 300, usd: 0, unpriced: 1 },
     ])
     expect(receipt.tokensIn).toBe(5300)
     expect(receipt.tokensOut).toBe(1500)

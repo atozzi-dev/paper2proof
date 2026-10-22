@@ -2,6 +2,8 @@ import type { CostUpdate, ModelCall } from '../types/api'
 
 export interface RoleCost {
   role: string
+  /** The model IDs that served the role in this run, in first-seen order. */
+  models: string[]
   calls: number
   tokensIn: number
   tokensOut: number
@@ -33,9 +35,13 @@ export function costReceipt(calls: readonly ModelCall[], update: CostUpdate | nu
   for (const call of calls) {
     let entry = byRole.get(call.role)
     if (!entry) {
-      entry = { row: { role: call.role, calls: 0, tokensIn: 0, tokensOut: 0, usd: 0, unpriced: 0 }, micro: 0 }
+      entry = {
+        row: { role: call.role, models: [], calls: 0, tokensIn: 0, tokensOut: 0, usd: 0, unpriced: 0 },
+        micro: 0,
+      }
       byRole.set(call.role, entry)
     }
+    if (!entry.row.models.includes(call.model_id)) entry.row.models.push(call.model_id)
     entry.row.calls += 1
     entry.row.tokensIn += call.tokens_in
     entry.row.tokensOut += call.tokens_out

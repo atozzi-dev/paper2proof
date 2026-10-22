@@ -6,6 +6,9 @@ Built for the Nebius × NVIDIA Global AI Hackathon (*Coding and Agentic Engineer
 
 > Work in progress. Demo link, judge instructions, architecture and evaluation results will be added before submission.
 
+What a verdict means, where a run can be wrong and what is not supported:
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
 ## For paper authors
 
 If one of your papers was run through Paper2Proof, here is what that means and what you can do.
