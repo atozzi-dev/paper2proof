@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -330,13 +332,28 @@ async def test_a_connection_lost_after_sending_is_charged_like_a_timeout(
     assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
 
 
+@pytest.mark.parametrize("status", [504, 524, 408])
 @respx.mock
 async def test_a_gateway_timeout_is_charged_like_a_timeout(
-    store: Store, client: TokenFactoryClient
+    store: Store, client: TokenFactoryClient, status: int
 ) -> None:
+    """408 too: the server gave up waiting, possibly after the generation started."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(status, json={}))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
+
+
+@respx.mock
+async def test_a_cancel_after_a_timeout_still_charges_the_timed_out_attempt(
+    store: Store, client: TokenFactoryClient, sleeps: Sleeps
+) -> None:
+    """Cancelled in the backoff after a 504: that attempt may have been generated in full."""
     await _run(store)
     respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(504, json={}))
-    with pytest.raises(P2PError):
+    sleeps.interrupt = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
         await client.complete(Role.UTILITY, USER, run_id=RUN)
     assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
 
