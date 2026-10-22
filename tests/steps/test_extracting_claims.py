@@ -1,15 +1,17 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from app.domain.errors import P2PError
-from app.domain.events import ClaimExtractedPayload
+from app.domain.events import ClaimExtractedPayload, WarningPayload
 from app.domain.models import ClaimType, ErrorCode, StepName
 from app.domain.paper import IngestedPaper, PageImage, Section
 from app.ingestion.archive import extract_source
 from app.ingestion.latex import parse_latex
 from app.models.client import Role
 from app.models.fake import FakeModelClient
+from app.orchestrator.budget import BudgetExceeded
 from app.orchestrator.steps.extracting_claims import ExtractingClaimsStep, normalize_metric
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
@@ -102,6 +104,70 @@ async def test_vision_numbers_fill_table_claims_for_pdf_papers(
     assert claim.reported_value == 94.1  # reader left it None; Vision row "Ours"
     assert claim.metric == "top1_accuracy"
     assert selected
+
+
+class _FirstVisionFails(FakeModelClient):
+    """The Vision role fails on the first page (model down, malformed answer)."""
+
+    def __init__(self, *args: Any, error: BaseException, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.error = error
+        self.vision_calls = 0
+
+    async def structured(self, role: Role, *args: Any, **kwargs: Any) -> Any:
+        if role is Role.VISION:
+            self.vision_calls += 1
+            if self.vision_calls == 1:
+                raise self.error
+        return await super().structured(role, *args, **kwargs)
+
+
+def _two_page_pdf(artifacts: LocalArtifactStore) -> IngestedPaper:
+    for page in (1, 2):
+        artifacts.put_bytes(f"runs/{RUN}/pages/{page}.png", b"\x89PNG fake")
+    return IngestedPaper(
+        arxiv_id="0000.00001",
+        sha256="0" * 64,
+        title="T",
+        sections=[Section(title="Page 2", text="Table 2: Ours 94.1")],
+        tables=[],
+        page_images=[PageImage(page=p, key=f"runs/{RUN}/pages/{p}.png") for p in (1, 2)],
+        source_kind="pdf",
+    )
+
+
+@pytest.mark.parametrize("code", [ErrorCode.MODEL_UNAVAILABLE, ErrorCode.SCHEMA_ERROR])
+async def test_a_page_vision_can_not_read_is_skipped_with_a_warning(
+    store: Store, tmp_path: Path, code: ErrorCode
+) -> None:
+    """One unreadable page must not fail the run: the other pages still fill the claims."""
+    artifacts = LocalArtifactStore(tmp_path)
+    paper = _two_page_pdf(artifacts)
+    artifacts.put_json(INGESTED, paper.model_dump(mode="json"))
+    fake = _FirstVisionFails(LLM_FIXTURES, case="pdf", error=P2PError(code, "vision down"))
+    ctx = await ctx_at(store, StepName.EXTRACTING_CLAIMS, previous=[(StepName.INGESTING, INGESTED)])
+    result = await ExtractingClaimsStep(fake, artifacts).run(ctx)
+    assert result.next is StepName.DISCOVERING
+    ((claim, _),) = await store.get_claims(RUN)
+    assert claim.reported_value == 94.1  # read from page 2
+    warnings = [
+        e.payload for e in await store.events_after(RUN, 0) if isinstance(e.payload, WarningPayload)
+    ]
+    assert [w.code for w in warnings] == ["VISION_PAGE_SKIPPED"]
+    assert "page 1" in warnings[0].message
+
+
+async def test_a_spent_budget_during_vision_still_stops_the_run(
+    store: Store, tmp_path: Path
+) -> None:
+    """Only a model failure is skipped: budget and kill switch still end the run."""
+    artifacts = LocalArtifactStore(tmp_path)
+    paper = _two_page_pdf(artifacts)
+    artifacts.put_json(INGESTED, paper.model_dump(mode="json"))
+    fake = _FirstVisionFails(LLM_FIXTURES, case="pdf", error=BudgetExceeded("llm_usd"))
+    ctx = await ctx_at(store, StepName.EXTRACTING_CLAIMS, previous=[(StepName.INGESTING, INGESTED)])
+    with pytest.raises(BudgetExceeded):
+        await ExtractingClaimsStep(fake, artifacts).run(ctx)
 
 
 async def test_paper_text_is_wrapped_as_untrusted(store: Store, tmp_path: Path) -> None:
