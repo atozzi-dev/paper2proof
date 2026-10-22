@@ -7,7 +7,9 @@ import { GalleryList } from '../src/components/GalleryList'
 import { JobsList } from '../src/components/JobsList'
 import { LogPanel } from '../src/components/LogPanel'
 import { SafeMarkdown } from '../src/components/SafeMarkdown'
+import { StatusTimeline } from '../src/components/StatusTimeline'
 import { VerdictCard } from '../src/components/VerdictCard'
+import type { StepEntry } from '../src/run/state'
 import type { Verdict } from '../src/types/api'
 import { claimAbs, claimRel, notReproduced, plan, reproduced, runConditions } from './fixtures'
 
@@ -329,5 +331,35 @@ describe('JobsList', () => {
   it('says when no job has started', () => {
     render(<JobsList jobs={{}} />)
     expect(screen.getByText('No cloud job yet.')).toBeInTheDocument()
+  })
+})
+
+describe('StatusTimeline', () => {
+  const done = (step: StepEntry['step']): StepEntry => ({ step, attempt: 1, state: 'ok', duration_ms: 1000 })
+  const finished = [
+    'INGESTING', 'EXTRACTING_CLAIMS', 'DISCOVERING', 'PLANNING', 'PROVISIONING',
+    'SMOKE_TESTING', 'EXECUTING', 'ANALYZING', 'VERDICT',
+  ].map((s) => done(s as StepEntry['step']))
+
+  const row = (name: RegExp) => within(screen.getByRole('list')).getByText(name).closest('li') as HTMLElement
+
+  it('never shows an approval that was not needed as pending', () => {
+    render(<StatusTimeline steps={finished} status="COMPLETED" mode="closed" replay={false} />)
+    expect(row(/Awaiting approval/)).toHaveTextContent('not needed (under the cost threshold)')
+    expect(row(/Awaiting approval/)).not.toHaveTextContent('pending')
+  })
+
+  it('says not needed as soon as the run moved past the approval', () => {
+    const steps = [...finished.slice(0, 4), { step: 'PROVISIONING' as const, attempt: 1, state: 'running' as const }]
+    render(<StatusTimeline steps={steps} status="RUNNING" mode="live" replay={false} />)
+    expect(row(/Awaiting approval/)).toHaveTextContent('not needed')
+    expect(row(/Verdict/)).toHaveTextContent('pending') // still to come
+  })
+
+  it('marks the steps a finished run never reached as skipped', () => {
+    const failed: StepEntry[] = [done('INGESTING'), { step: 'EXTRACTING_CLAIMS', attempt: 1, state: 'failed', error_code: 'NO_CLAIMS' }]
+    render(<StatusTimeline steps={failed} status="FAILED" mode="closed" replay={false} />)
+    expect(row(/Verdict/)).toHaveTextContent('skipped')
+    expect(row(/Extracting claims/)).toHaveTextContent('failed')
   })
 })
