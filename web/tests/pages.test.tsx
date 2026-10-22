@@ -86,6 +86,52 @@ describe('Home', () => {
   })
 })
 
+describe('Home onboarding', () => {
+  const card = {
+    id: RUN_ID,
+    arxiv_id: '0000.00001',
+    created_at: '2026-10-16T12:00:00Z',
+    status: 'COMPLETED' as const,
+    verdict_summary: '1 REPRODUCED',
+  }
+
+  it('says in three steps what a run does', async () => {
+    mockFetch((url) => (url === '/api/gallery' ? json([]) : undefined))
+    window.location.hash = '#/'
+    render(<App />)
+    const steps = screen.getByRole('list', { name: 'How it works' })
+    expect(within(steps).getAllByRole('listitem')).toHaveLength(3)
+  })
+
+  it('offers a finished run as a 30-second replay before the form', async () => {
+    mockFetch((url) => (url === '/api/gallery' ? json([card]) : undefined))
+    window.location.hash = '#/'
+    render(<App />)
+    const watch = await screen.findByRole('link', { name: /Watch a finished run/ })
+    expect(watch).toHaveAttribute('href', `#/runs/${RUN_ID}?replay=1`)
+  })
+
+  it('shows no replay link when nothing is in the gallery yet', async () => {
+    const fetchMock = mockFetch((url) => (url === '/api/gallery' ? json([]) : undefined))
+    window.location.hash = '#/'
+    render(<App />)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(screen.queryByRole('link', { name: /Watch a finished run/ })).toBeNull()
+  })
+})
+
+describe('About', () => {
+  it('names the models the roles really use', async () => {
+    mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: {} }) : undefined))
+    window.location.hash = '#/about'
+    render(<App />)
+    const roles = await screen.findByRole('table', { name: 'Model roles' })
+    expect(within(roles).getByRole('row', { name: /Vision/ })).toHaveTextContent('Nemotron 3.5 Super VL')
+    expect(roles).not.toHaveTextContent('Nano Omni')
+    expect(within(roles).getByRole('row', { name: /Coder/ })).not.toHaveTextContent('Sandboxes')
+  })
+})
+
 describe('Run page', () => {
   it('streams a run to its verdicts with the mandated copy', async () => {
     mockFetch((url) => {

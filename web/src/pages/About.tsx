@@ -7,9 +7,9 @@ const KINDS: VerdictKind[] = ['REPRODUCED', 'REPRODUCED_AT_REDUCED_SCALE', 'NOT_
 
 const ROLES: { role: string; family: string; job: string }[] = [
   { role: 'Reader', family: 'Nemotron Super', job: 'Reads the paper and extracts the quantitative claims with their source (table, section).' },
-  { role: 'Vision', family: 'Nemotron Nano Omni', job: 'Reads tables and figures the text extraction cannot.' },
+  { role: 'Vision', family: 'Nemotron 3.5 Super VL', job: 'Reads tables and figures the text extraction cannot (PDF papers).' },
   { role: 'Planner', family: 'Nemotron Ultra', job: 'Turns the claims into an experiment plan: scale, seeds, packages, datasets, GPU minutes.' },
-  { role: 'Coder', family: 'Nemotron Super', job: 'Writes and fixes the experiment code, tested in Token Factory Sandboxes with no network.' },
+  { role: 'Coder', family: 'Nemotron Super', job: 'Writes and fixes the experiment code, smoke-tested in an isolated CPU job with no network.' },
   { role: 'Judge', family: 'Nemotron Ultra', job: 'Explains the verdict in plain words. It cannot change the verdict.' },
   { role: 'Utility', family: 'Nemotron Nano', job: 'Small classification and summarization tasks.' },
 ]
@@ -66,7 +66,7 @@ export function AboutPage() {
           <li>The paper is fetched from arXiv by ID and its claims are extracted.</li>
           <li>The planner proposes an experiment and its cost; expensive plans wait for your approval.</li>
           <li>Packages and data are fetched by a CPU job behind an allowlisting egress gateway.</li>
-          <li>The generated code is smoke-tested in a Token Factory Sandbox with no network.</li>
+          <li>The generated code is smoke-tested in an isolated CPU job with no network.</li>
           <li>The experiment runs as a GPU job with no internet access, over several seeds.</li>
           <li>A pure function compares the measurements with the claim and returns the verdict.</li>
           <li>Everything is packed into a signed Proof Bundle that anyone can re-run.</li>
@@ -100,7 +100,8 @@ export function AboutPage() {
           </tbody>
         </table>
         <p className="muted">
-          Model output never decides a verdict and is never run as a privileged command: package installs, jobs and
+          Each run page names the exact model behind every role in its cost receipt. Model output never decides a
+          verdict and is never run as a privileged command: package installs, jobs and
           network access are done by deterministic code after validation.
         </p>
       </section>
@@ -128,7 +129,7 @@ function ArchitectureDiagram() {
       <svg
         viewBox="0 0 640 250"
         role="img"
-        aria-label="Architecture: the browser talks to the API on a Nebius Serverless Endpoint, which runs the orchestrator and the verdict engine, calls Nemotron models on Token Factory, and launches three isolated stages in a separate project: provision on CPU with allowlisted egress, smoke test in Token Factory Sandboxes without network, and execute on GPU without internet. Results and the signed Proof Bundle go to Object Storage."
+        aria-label="Architecture: the browser talks to the API on a Nebius Serverless Endpoint, which runs the orchestrator and the verdict engine, calls Nemotron models on Token Factory, and launches three isolated stages in a separate project: provision on CPU with allowlisted egress, smoke test in an isolated CPU job without network, and execute on GPU without internet. Results and the signed Proof Bundle go to Object Storage."
       >
         <defs>
           <marker id="arch-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
@@ -145,7 +146,7 @@ function ArchitectureDiagram() {
           Sandbox project · no secrets · per-run bucket
         </text>
         {box(20, 122, 180, 'Provision', 'CPU job, allowlisted egress')}
-        {box(230, 122, 180, 'Smoke test', 'Sandboxes, no network')}
+        {box(230, 122, 180, 'Smoke test', 'CPU job, no network')}
         {box(440, 122, 180, 'Execute', 'GPU job, no internet')}
         {arrow(200, 148, 228, 148)}
         {arrow(410, 148, 438, 148)}

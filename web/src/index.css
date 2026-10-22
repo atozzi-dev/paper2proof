@@ -532,3 +532,9 @@ td {
 .arch-head {
   fill: var(--muted);
 }
+
+.model-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  overflow-wrap: anywhere; /* long model IDs wrap instead of widening the table */
+}

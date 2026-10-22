@@ -151,6 +151,25 @@ describe('CostReceiptView', () => {
   })
 })
 
+describe('CostReceiptView models', () => {
+  it('names the model behind each role, as the run used it', () => {
+    render(
+      <CostReceiptView
+        calls={[
+          { role: 'reader', model_id: 'nvidia/nemotron-3-super-120b-a12b', tokens_in: 1, tokens_out: 1, latency_ms: 1, cost_usd: 0.1 },
+          { role: 'coder', model_id: 'nvidia/nemotron-3-super-120b-a12b', tokens_in: 1, tokens_out: 1, latency_ms: 1, cost_usd: 0.1 },
+          { role: 'planner', model_id: 'nvidia/Nemotron-3-Ultra-550b-a55b', tokens_in: 1, tokens_out: 1, latency_ms: 1, cost_usd: 0.1 },
+        ]}
+        update={null}
+      />,
+    )
+    const table = screen.getByRole('table', { name: 'Cost receipt' })
+    expect(within(table).getByRole('columnheader', { name: 'Model' })).toBeInTheDocument()
+    expect(within(table).getByRole('row', { name: /planner/ })).toHaveTextContent('nvidia/Nemotron-3-Ultra-550b-a55b')
+    expect(within(table).getByRole('row', { name: /coder/ })).toHaveTextContent('nvidia/nemotron-3-super-120b-a12b')
+  })
+})
+
 describe('VerdictCard without the full context', () => {
   it('never claims "no deviations" before the plan is known', () => {
     render(<VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" plan={null} warnings={[]} jobs={{}} />)

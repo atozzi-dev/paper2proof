@@ -11,6 +11,7 @@ export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]
       <thead>
         <tr>
           <th scope="col">Role</th>
+          <th scope="col">Model</th>
           <th scope="col">Calls</th>
           <th scope="col">Tokens in</th>
           <th scope="col">Tokens out</th>
@@ -21,6 +22,7 @@ export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]
         {r.rows.map((row) => (
           <tr key={row.role}>
             <th scope="row">{row.role}</th>
+            <td className="model-id">{row.models.join(', ')}</td>
             <td>{row.calls}</td>
             <td>{n(row.tokensIn)}</td>
             <td>{n(row.tokensOut)}</td>
