@@ -17,7 +17,7 @@ export function ClaimsTable({ claims, tested }: { claims: readonly Claim[]; test
   if (claims.length === 0) return <p className="muted">No claims extracted yet.</p>
   return (
     <div className="table-wrap">
-      <table>
+      <table className="claims-table">
         <caption>Claims extracted from the paper</caption>
         <thead>
           <tr>

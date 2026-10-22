@@ -170,6 +170,10 @@ h4 {
   margin: 0;
 }
 
+h1:not(.hero-title) + .lead {
+  margin-bottom: 2rem; /* a page's intro, before its first section */
+}
+
 .skip-link {
   position: absolute;
   left: -999px;
@@ -1014,6 +1018,10 @@ button:disabled {
   overflow-x: auto;
 }
 
+.claims-table td:first-child {
+  min-width: 14rem; /* the claim text: scroll the table rather than one word per line */
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
@@ -1112,6 +1120,10 @@ th[scope='col'] {
 
 /* --- about ------------------------------------------------------------------------------------ */
 
+.arch {
+  overflow-x: auto;
+}
+
 .arch svg {
   width: 100%;
   max-width: 760px;
@@ -1155,11 +1167,61 @@ th[scope='col'] {
     padding: 0 1rem;
   }
 
+  /* brand and theme on one row, the nav below: two rows instead of three */
+  .site-header-inner {
+    gap: 0.5rem 1rem;
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+  }
+
+  .theme-switch {
+    order: 1;
+    margin-left: auto;
+  }
+
+  .theme-switch button {
+    padding: 0.3rem 0.55rem;
+  }
+
+  .site-header nav {
+    order: 2;
+    flex-basis: 100%;
+  }
+
+  .card {
+    padding: 1.1rem;
+  }
+
   .verdict {
     padding: 1.25rem;
   }
 
-  .verdict-figures {
+  .figure {
+    padding: 0.7rem 0.8rem;
+  }
+
+  .figure dd {
+    font-size: 1.05rem;
+  }
+
+  .figure.wide {
+    grid-column: 1 / -1; /* a range or a baseline name: one line, the whole width */
+  }
+
+  .facts {
     grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .facts dd {
+    margin-bottom: 0.5rem;
+  }
+
+  .arch {
+    margin-inline: 0;
+  }
+
+  .arch svg {
+    min-width: 600px; /* its labels stay readable: the figure scrolls instead */
   }
 }
