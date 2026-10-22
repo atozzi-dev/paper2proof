@@ -34,7 +34,7 @@ from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_aft
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import ErrorCode
-from app.models.pricing import Pricing, estimate_tokens
+from app.models.pricing import Pricing, estimate_message_tokens, estimate_tokens
 from app.observability import metrics, tracing
 from app.orchestrator.budget import Budget, Reservation, SpendKind
 from app.storage.store import Store
@@ -304,11 +304,15 @@ def _wait(state: RetryCallState) -> float:
     return backoff + random.uniform(0, 0.25)  # noqa: S311 (jitter, not crypto)
 
 
+_GATEWAY_TIMEOUTS = frozenset({504, 524})
+
+
 class _Exhausted(Exception):
-    """Retries on the role's model are used up (429/5xx/timeouts)."""
+    """Retries on the role's model are used up (429/5xx/timeouts). `attempts` counts those the
+    model processed (5xx), `timeouts` those that may have been generated in full."""
 
     def __init__(self, attempts: int = 1, timeouts: int = 0) -> None:
-        super().__init__(f"{attempts} attempts, {timeouts} timeouts")
+        super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
         self.attempts = attempts
         self.timeouts = timeouts
 
@@ -461,7 +465,7 @@ class TokenFactoryClient:
         model_id = self.resolved[role].model_id
         out_cap = max_output or spec.max_output
         request = self._request(role, messages, tools, tool_choice, out_cap, response_format)
-        est_in = estimate_tokens(str(request.messages)) + estimate_tokens(str(request.tools))
+        est_in = estimate_message_tokens(request.messages) + estimate_tokens(str(request.tools))
         reservations = await self._reserve(run_id, model_id, est_in, out_cap)
         # Abandoned or failed generations may still be billed by the provider: charge the input
         # estimate. Unusable 200s are charged the full reservation (invariant 7, conservative).
@@ -471,8 +475,9 @@ class TokenFactoryClient:
         try:
             raw = await self._call_with_retries(request)
         except _Exhausted as exhausted:
-            # Every attempt may be billed for its input; a timed-out one possibly in full.
-            tin = exhausted.attempts * est_in
+            # Every attempt the model processed may be billed for its input (a 429 or a
+            # connection error never reached it); a timed-out one possibly in full.
+            tin = (exhausted.attempts + exhausted.timeouts) * est_in
             tout = exhausted.timeouts * out_cap
             await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
@@ -543,7 +548,6 @@ class TokenFactoryClient:
         try:
             async for attempt in retrying:
                 with attempt:
-                    attempts += 1
                     try:
                         return await create(
                             model=req.model,
@@ -566,6 +570,18 @@ class TokenFactoryClient:
                         )
                     except openai.APITimeoutError:
                         timeouts += 1  # the provider may have generated (and billed) it all
+                        raise
+                    except openai.APIConnectionError as err:
+                        if not isinstance(err.__cause__, httpx.ConnectError):
+                            timeouts += 1  # lost after sending: it may have been generated
+                        raise  # a connection that never opened sent nothing: not billed
+                    except openai.RateLimitError:
+                        raise  # refused before any work: nothing billed
+                    except openai.APIStatusError as err:
+                        if err.status_code in _GATEWAY_TIMEOUTS:
+                            timeouts += 1  # the upstream timed out, possibly after generating
+                        else:
+                            attempts += 1  # 5xx: the input may have been processed
                         raise
         except Exception as err:
             if _retryable(err):
