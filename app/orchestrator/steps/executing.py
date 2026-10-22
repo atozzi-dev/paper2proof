@@ -424,7 +424,9 @@ class ExecutingStep:
             (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
         )
         smoke = f"p2p-smoke-{run_slug(ctx.run_id)}-"  # left by a restart, before `finish`
-        if not await stop_jobs(ctx, smoke, poll_s=self._poll_s, sleep=self._sleep):
+        if not await stop_jobs(
+            ctx, smoke, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
+        ):
             raise P2PError(ErrorCode.TIMEOUT, "an earlier smoke job did not stop")
         previous = await self._retry_started(ctx, plan)
         first = 1 if previous is None else 2
@@ -451,7 +453,9 @@ class ExecutingStep:
                     raise
                 await self._warn(ctx, f"the on-demand retry was not started ({err})")
                 exec_jobs = f"p2p-exec-{run_slug(ctx.run_id)}-"  # a re-attached retry, cancelled
-                if not await stop_jobs(ctx, exec_jobs, poll_s=self._poll_s, sleep=self._sleep):
+                if not await stop_jobs(
+                    ctx, exec_jobs, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
+                ):
                     kept, state, _ = previous  # it may still write: never read attempt 1
                     return await self._no_retry(ctx, kept, state, None)
                 return await self._no_retry(ctx, *previous)

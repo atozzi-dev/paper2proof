@@ -530,3 +530,36 @@ async def test_a_cancel_failing_in_an_outage_is_left_to_the_reaper(store: Store)
     assert outcome.timed_out and not outcome.stopped
     record = await store.get_job(NAME)
     assert record is not None and record.status not in ("SUCCEEDED", "FAILED", "CANCELLED")
+
+
+async def test_stop_jobs_is_bounded_by_wall_time(store: Store) -> None:
+    """Each status call may take a minute (an SDK timeout): poll_s alone undercounts."""
+    from app.orchestrator.steps.jobs import stop_jobs
+
+    clock = Clock()
+
+    class Slow(ScriptedBackend):
+        async def status(self, handle: JobHandle) -> JobState:
+            clock.t += 60
+            return R  # it never stops
+
+    backend = Slow([R])
+    ctx = await _ctx(store, backend)
+    await backend.submit(_spec())
+    stopped = await stop_jobs(ctx, "p2p-exec-", poll_s=30, sleep=clock.sleep, clock=clock)
+    assert stopped is False and backend.cancelled == [NAME]
+    assert clock.t <= STOP_WAIT_S + 60 + 30 + 60
+
+
+async def test_a_gpu_cap_that_cuts_the_bill_is_logged(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The hidden-start cap assumes the runner stopped itself: say so when it bites."""
+    backend = FlakyStatus([R], failures=10**6)
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    with caplog.at_level("WARNING", logger="app.orchestrator.steps.jobs"):
+        await run_job(
+            ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+        )
+    assert any("GPU time capped" in r.getMessage() for r in caplog.records)

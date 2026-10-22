@@ -206,7 +206,9 @@ class ProvisioningStep:
             await self._json(await output_of(ctx, StepName.DISCOVERING))
         )
         smoke = f"p2p-smoke-{run_slug(ctx.run_id)}-"  # left by a restart: it mounts the bucket rw
-        if not await stop_jobs(ctx, smoke, poll_s=self._poll_s, sleep=self._sleep):
+        if not await stop_jobs(
+            ctx, smoke, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
+        ):
             raise P2PError(ErrorCode.TIMEOUT, "an earlier smoke job did not stop")
         packages = await self._packages(ctx, plan, discovery)
         bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
@@ -267,7 +269,9 @@ class ProvisioningStep:
         job is submitted only after the digest is stored. None when the run was cancelled."""
         for kind in (JobKind.FETCH, JobKind.EXEC):  # exec can't run yet: a cheap extra guard
             prefix = f"p2p-{kind.value}-{run_slug(ctx.run_id)}-"
-            if not await stop_jobs(ctx, prefix, poll_s=self._poll_s, sleep=self._sleep):
+            if not await stop_jobs(
+                ctx, prefix, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
+            ):
                 raise P2PError(ErrorCode.TIMEOUT, f"an earlier {kind.value} job did not stop")
         policy = self._policy.config
         runner_digest = self._config.runner_image.rsplit("@", 1)[1]

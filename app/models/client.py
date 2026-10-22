@@ -307,6 +307,15 @@ def _wait(state: RetryCallState) -> float:
 _GATEWAY_TIMEOUTS = frozenset({504, 524})
 
 
+class _Failed(Exception):
+    """A non-retryable error ended the retries; `attempts`/`timeouts` as in _Exhausted."""
+
+    def __init__(self, attempts: int, timeouts: int) -> None:
+        super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
+        self.attempts = attempts
+        self.timeouts = timeouts
+
+
 class _Exhausted(Exception):
     """Retries on the role's model are used up (429/5xx/timeouts). `attempts` counts those the
     model processed (5xx), `timeouts` those that may have been generated in full."""
@@ -481,12 +490,21 @@ class TokenFactoryClient:
             tout = exhausted.timeouts * out_cap
             await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
-        except openai.APIStatusError as err:
-            await self._settle(reservations, 0, 0, 0.0)  # rejected (4xx): nothing generated
-            raise P2PError(
-                ErrorCode.MODEL_UNAVAILABLE,
-                f"model call for role {role.value} failed: HTTP {err.status_code}",
-            ) from None
+        except _Failed as failed:
+            cause = failed.__cause__
+            # The attempts before the final error count as above; the final one is free when
+            # it was refused (4xx), else it may have been sent: its input counts too.
+            refused = isinstance(cause, openai.APIStatusError)
+            tin = (failed.attempts + failed.timeouts + (0 if refused else 1)) * est_in
+            tout = failed.timeouts * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
+            if isinstance(cause, openai.APIStatusError):
+                raise P2PError(
+                    ErrorCode.MODEL_UNAVAILABLE,
+                    f"model call for role {role.value} failed: HTTP {cause.status_code}",
+                ) from None
+            assert cause is not None  # noqa: S101 (always raised `from err`)
+            raise cause from None
         except BaseException:
             await self._settle(reservations, *input_only)
             raise
@@ -580,13 +598,13 @@ class TokenFactoryClient:
                     except openai.APIStatusError as err:
                         if err.status_code in _GATEWAY_TIMEOUTS:
                             timeouts += 1  # the upstream timed out, possibly after generating
-                        else:
+                        elif err.status_code >= 500:
                             attempts += 1  # 5xx: the input may have been processed
-                        raise
+                        raise  # a 4xx is refused before any work
         except Exception as err:
             if _retryable(err):
                 raise _Exhausted(attempts, timeouts) from err
-            raise
+            raise _Failed(attempts, timeouts) from err  # the retries before it still count
         raise _Exhausted(attempts, timeouts)  # pragma: no cover - always returns or raises
 
 

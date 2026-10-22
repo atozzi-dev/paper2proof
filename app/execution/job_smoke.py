@@ -97,7 +97,12 @@ class JobSmokeExecutor:
 
         async with self._lock:
             stopped = await stop_jobs(
-                self._ctx, prefix, poll_s=self._poll_s, sleep=self._sleep, keep=started_here
+                self._ctx,
+                prefix,
+                poll_s=self._poll_s,
+                sleep=self._sleep,
+                keep=started_here,
+                clock=self._clock,
             )
             if not stopped:
                 raise SmokeUnavailable("an earlier smoke job is still stopping")
