@@ -293,6 +293,17 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.TFSTATE_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
+          # a fresh token for this step (P1-9): the first one would be up to ~2 h old here.
+          # OIDC only; in key mode the long-lived key stays in the token step alone. A failed
+          # refresh keeps the earlier token (the script deletes its --out file on a failure).
+          if [ "$NEBIUS_AUTH_MODE" = oidc ]; then
+            if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token.new"; then
+              mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"
+            else
+              echo "::warning::Nebius token refresh failed: using the earlier token"
+            fi
+          fi
           NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
           export NEBIUS_IAM_TOKEN
           var_file=()
@@ -366,6 +377,17 @@ jobs:
           P2P_EXPECT_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # a fresh token for this step (P1-9): the first one would be up to ~2 h old here.
+          # OIDC only; in key mode the long-lived key stays in the token step alone. A failed
+          # refresh keeps the earlier token (the script deletes its --out file on a failure).
+          if [ "$NEBIUS_AUTH_MODE" = oidc ]; then
+            if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token.new"; then
+              mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"
+            else
+              echo "::warning::Nebius token refresh failed: using the earlier token"
+            fi
+          fi
           NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
           export NEBIUS_IAM_TOKEN
           python3 .github/scripts/prod_env.py deploy/digests.json > "$RUNNER_TEMP/prod.env"
@@ -427,6 +449,17 @@ jobs:
           P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
         run: |
           set -euo pipefail
+          # a fresh token for this step (P1-9): the first one would be up to ~2 h old here.
+          # OIDC only; in key mode the long-lived key stays in the token step alone. A failed
+          # refresh keeps the earlier token (the script deletes its --out file on a failure).
+          if [ "$NEBIUS_AUTH_MODE" = oidc ]; then
+            if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token.new"; then
+              mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"
+            else
+              echo "::warning::Nebius token refresh failed: using the earlier token"
+            fi
+          fi
           NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
           export NEBIUS_IAM_TOKEN
           previous="$RUNNER_TEMP/previous/digests.json"
@@ -461,6 +494,6 @@ jobs:
       - name: Remove credentials
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/nebius.token" "$RUNNER_TEMP/tfplan.json" "$TF_DIR/tfplan" \
+          rm -f "$RUNNER_TEMP/nebius.token" "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP"/nebius-*.input "$RUNNER_TEMP/tfplan.json" "$TF_DIR/tfplan" \
             "$RUNNER_TEMP/prod.env"
           skopeo logout --all || true

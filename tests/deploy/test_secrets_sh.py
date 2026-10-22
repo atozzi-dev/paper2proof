@@ -96,10 +96,13 @@ if sys.argv[3]:
     payload[0]["string_value"] += "-changed"
 print(json.dumps({"data": payload}))
 """
-KEY_JSON = """import json, sys
+KEY_JSON = """import json, os, sys
 sa, sub = sys.argv[1], sys.argv[2]
 creds = {"alg": "RS256", "private-key": "PRIVATE-" + sa, "kid": "publickey-" + sa}
 creds.update(iss=sub, sub=sub)
+creds.update(json.loads(os.environ.get("GENERATE_SET") or "{}"))  # a field changed
+for field in filter(None, os.environ.get("GENERATE_DROP", "").split(",")):
+    creds.pop(field, None)
 print(json.dumps({"subject-credentials": creds}, indent=2))
 """
 ENV_JSON = json.dumps(
@@ -448,6 +451,28 @@ def test_a_key_file_for_another_account_is_refused(tmp_path: Path) -> None:
     assert done.returncode != 0 and payload is None
     assert "credentials JSON" in done.stderr and "auth-public-key list" in done.stderr
     assert not [c for c in calls if "secret-version create" in c]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"GENERATE_DROP": "iss,sub"},  # the SDK needs both: it would fail at startup
+        {"GENERATE_DROP": "alg"},
+        {"GENERATE_SET": '{"alg": "ES256"}'},
+        {"GENERATE_SET": '{"type": "OTHER"}'},
+        {"GENERATE_SET": '{"iss": "serviceaccount-other"}'},  # iss must equal sub
+    ],
+)
+def test_a_key_file_the_sdk_would_reject_is_refused(tmp_path: Path, change: dict[str, str]) -> None:
+    """Checked like the Nebius SDK loads it (alg RS256, type JWT, iss == sub == the account)."""
+    done, calls, payload = _run(tmp_path, **change)
+    assert done.returncode != 0 and payload is None
+    assert not [c for c in calls if "secret-version create" in c]
+
+
+def test_a_jwt_typed_key_file_is_accepted(tmp_path: Path) -> None:
+    done, _, payload = _run(tmp_path, GENERATE_SET='{"type": "JWT"}')
+    assert done.returncode == 0 and payload is not None
 
 
 def test_nebius_tracing_in_prod_env_needs_the_observability_key(tmp_path: Path) -> None:

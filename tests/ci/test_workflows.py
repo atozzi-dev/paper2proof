@@ -364,3 +364,32 @@ def test_smoke_cron_runs_daily_during_judging_and_reports_failures() -> None:
     report = _job("smoke-cron.yml", "report")
     assert "failure" in str(report.get("if", ""))
     assert "smoke" in report.get("needs", [])
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Terraform plan, guard, apply",
+        "Replace the endpoint with the new digests",
+        "Rollback to the previous deployment",
+    ],
+)
+def test_long_steps_take_a_fresh_nebius_token_in_oidc_mode(name: str) -> None:
+    """One token for the whole job lived up to ~2 h (push, terraform, endpoint, rollback):
+    each later step asks for a fresh one before reading it (OIDC needs no stored secret)."""
+    step = _step("deploy.yml", "deploy", name)
+    run = str(step["run"])
+    refresh = run.index('if [ "$NEBIUS_AUTH_MODE" = oidc ]; then')
+    assert ".github/scripts/nebius_token.py" in run[refresh:]
+    assert refresh < run.index('NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")')
+    assert "NEBIUS_SA_CREDENTIALS" not in yaml.safe_dump(step.get("env", {}))
+    # A failed refresh never loses the earlier token (the script deletes its --out file on a
+    # failure): it goes to a new file, which replaces the old one only on success.
+    assert '--out "$RUNNER_TEMP/nebius.token.new"' in run
+    assert 'mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"' in run
+    assert "::warning::" in run
+
+
+def test_the_refreshed_token_file_is_removed_too() -> None:
+    cleanup = str(_step("deploy.yml", "deploy", "Remove credentials")["run"])
+    assert '"$RUNNER_TEMP/nebius.token.new"' in cleanup

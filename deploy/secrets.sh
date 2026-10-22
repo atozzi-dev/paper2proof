@@ -80,7 +80,8 @@ is_key() { # is_key NAME: one of KEYS or OPTIONAL, matched exactly
 #   digest-pairs   the same digest for key\0value\0 ... on stdin
 #   request ID     key\0value\0 ... on stdin -> the secret-version create request
 #   field PATH     a string at a dotted path of the JSON on stdin (non-secret Terraform outputs)
-#   check-key SA   an authorized key JSON on stdin is for SA; prints its kid (not a secret)
+#   check-key SA   an authorized key JSON on stdin is for SA (RS256, iss == sub == SA, as the
+#                  SDK requires at startup); prints its kid (not a secret)
 #   check-expiry T T is a UTC timestamp at least 30 days ahead
 #   token          a new random 64-hex-character token
 py() {
@@ -134,8 +135,10 @@ elif op == "field":
 elif op == "check-key":
     try:
         creds = json.load(sys.stdin)["subject-credentials"]
+        # what the Nebius SDK checks when it loads the file at startup (credentials_file.py)
         ok = bool(creds["private-key"]) and bool(creds["kid"])
-        ok = ok and all(creds.get(f) in (None, args[0]) for f in ("iss", "sub"))
+        ok = ok and creds.get("alg") == "RS256" and creds.get("type", "") in ("", "JWT")
+        ok = ok and creds.get("iss") == args[0] and creds.get("sub") == args[0]
     except (ValueError, KeyError, TypeError):
         ok = False
     if not ok:
