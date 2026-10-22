@@ -360,11 +360,9 @@ class SmokeTestingStep:
                     args = parse_args(call.name, call.arguments)
                     if isinstance(args, ReadFile):
                         text = ws.read(args.path)
-                        result = (
-                            wrap_untrusted(text, source="repository", max_chars=TOOL_RESULT_CHARS)
-                            if args.path.startswith("repo/")
-                            else text[:TOOL_RESULT_CHARS]
-                        )
+                        # The workspace is model-written, often from paper text: data, too.
+                        source = "repository" if args.path.startswith("repo/") else "workspace"
+                        result = wrap_untrusted(text, source=source, max_chars=TOOL_RESULT_CHARS)
                     elif isinstance(args, WriteFile):
                         ws.write(args.path, args.content)
                         await save()

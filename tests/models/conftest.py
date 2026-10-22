@@ -74,9 +74,12 @@ def completion(
 class Sleeps:
     def __init__(self) -> None:
         self.calls: list[float] = []
+        self.interrupt: BaseException | None = None  # raised from the backoff (a cancel)
 
     async def __call__(self, seconds: float) -> None:
         self.calls.append(seconds)
+        if self.interrupt is not None:
+            raise self.interrupt
 
 
 @pytest.fixture

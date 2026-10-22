@@ -304,7 +304,16 @@ def _wait(state: RetryCallState) -> float:
     return backoff + random.uniform(0, 0.25)  # noqa: S311 (jitter, not crypto)
 
 
-_GATEWAY_TIMEOUTS = frozenset({504, 524})
+# 408: the server gave up waiting; 504/524: a gateway did. The work may have been done.
+_GATEWAY_TIMEOUTS = frozenset({408, 504, 524})
+
+
+@dataclass
+class _Tally:
+    """Attempts counted so far, kept even when the call is cancelled mid-retry."""
+
+    attempts: int = 0  # processed by the model (5xx): input billed
+    timeouts: int = 0  # possibly generated in full
 
 
 class _Failed(Exception):
@@ -478,11 +487,11 @@ class TokenFactoryClient:
         reservations = await self._reserve(run_id, model_id, est_in, out_cap)
         # Abandoned or failed generations may still be billed by the provider: charge the input
         # estimate. Unusable 200s are charged the full reservation (invariant 7, conservative).
-        input_only = (est_in, 0, self.pricing.estimate(model_id, est_in, 0))
         full = (est_in, out_cap, self.pricing.estimate(model_id, est_in, out_cap))
         started = time.monotonic()
+        tally = _Tally()
         try:
-            raw = await self._call_with_retries(request)
+            raw = await self._call_with_retries(request, tally)
         except _Exhausted as exhausted:
             # Every attempt the model processed may be billed for its input (a 429 or a
             # connection error never reached it); a timed-out one possibly in full.
@@ -506,7 +515,11 @@ class TokenFactoryClient:
             assert cause is not None  # noqa: S101 (always raised `from err`)
             raise cause from None
         except BaseException:
-            await self._settle(reservations, *input_only)
+            # Cancelled (or an unexpected error): the attempts already counted are charged as
+            # above, plus the input of one that may be in flight.
+            tin = (tally.attempts + tally.timeouts + 1) * est_in
+            tout = tally.timeouts * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
         try:
@@ -553,7 +566,9 @@ class TokenFactoryClient:
             latency_ms=latency_ms,
         )
 
-    async def _call_with_retries(self, req: "ChatRequest") -> LegacyAPIResponse[ChatCompletion]:
+    async def _call_with_retries(
+        self, req: "ChatRequest", tally: _Tally
+    ) -> LegacyAPIResponse[ChatCompletion]:
         retrying = AsyncRetrying(
             stop=stop_after_attempt(self.config.provider.max_retries),
             wait=_wait,
@@ -562,7 +577,6 @@ class TokenFactoryClient:
             sleep=self._sleep or asyncio.sleep,
         )
         create = self._openai.chat.completions.with_raw_response.create
-        attempts = timeouts = 0
         try:
             async for attempt in retrying:
                 with attempt:
@@ -587,25 +601,25 @@ class TokenFactoryClient:
                             extra_body=req.extra_body or None,
                         )
                     except openai.APITimeoutError:
-                        timeouts += 1  # the provider may have generated (and billed) it all
+                        tally.timeouts += 1  # the provider may have generated (and billed) it all
                         raise
                     except openai.APIConnectionError as err:
                         if not isinstance(err.__cause__, httpx.ConnectError):
-                            timeouts += 1  # lost after sending: it may have been generated
+                            tally.timeouts += 1  # lost after sending: it may have been generated
                         raise  # a connection that never opened sent nothing: not billed
                     except openai.RateLimitError:
                         raise  # refused before any work: nothing billed
                     except openai.APIStatusError as err:
                         if err.status_code in _GATEWAY_TIMEOUTS:
-                            timeouts += 1  # the upstream timed out, possibly after generating
+                            tally.timeouts += 1  # the upstream timed out, possibly after generating
                         elif err.status_code >= 500:
-                            attempts += 1  # 5xx: the input may have been processed
+                            tally.attempts += 1  # 5xx: the input may have been processed
                         raise  # a 4xx is refused before any work
         except Exception as err:
             if _retryable(err):
-                raise _Exhausted(attempts, timeouts) from err
-            raise _Failed(attempts, timeouts) from err  # the retries before it still count
-        raise _Exhausted(attempts, timeouts)  # pragma: no cover - always returns or raises
+                raise _Exhausted(tally.attempts, tally.timeouts) from err
+            raise _Failed(tally.attempts, tally.timeouts) from err  # the retries before count
+        raise _Exhausted(tally.attempts, tally.timeouts)  # pragma: no cover - returns or raises
 
 
 @dataclass(frozen=True)
