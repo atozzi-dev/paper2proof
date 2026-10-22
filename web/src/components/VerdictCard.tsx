@@ -66,7 +66,7 @@ export function VerdictCard({ claim, claimId, verdict, explanationMd, ...inputs 
         {numbers.length > 0 && (
           <dl className="verdict-figures">
             {numbers.map((n) => (
-              <div key={n.label} className={n.emphasis ? 'figure emphasis' : 'figure'}>
+              <div key={n.label} className={['figure', n.emphasis && 'emphasis', n.value.length > 9 && 'wide'].filter(Boolean).join(' ')}>
                 <dt>{n.label}</dt>
                 <dd className="mono">{n.value}</dd>
               </div>
