@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 import { verdictSummaryText, warningTitle } from '../src/run/verdictCopy'
 import type { RunEvent, RunView } from '../src/types/api'
-import { ev, fullRun, runConditions } from './fixtures'
+import { claimAbs, ev, fullRun, notReproduced, runConditions } from './fixtures'
 
 const RUN_ID = 'r_' + 'a'.repeat(26)
 
@@ -103,19 +103,28 @@ describe('Home onboarding', () => {
     expect(within(steps).getAllByRole('listitem')).toHaveLength(3)
   })
 
-  it('offers a finished run as a 30-second replay before the form', async () => {
+  it('shows the newest gallery verdict next to the form, with its chart', async () => {
+    mockFetch((url) => {
+      if (url === '/api/gallery') return json([card])
+      if (url === `/api/runs/${RUN_ID}`)
+        return json(runView({ status: 'COMPLETED', claims: [{ claim: claimAbs, selected: true }], verdicts: [{ claim_id: claimAbs.id, verdict: notReproduced }] }))
+      return undefined
+    })
+    window.location.hash = '#/'
+    render(<App />)
+    const latest = await screen.findByRole('complementary', { name: 'Not reproduced under our conditions' })
+    expect(within(latest).getByRole('img')).toHaveAccessibleName(/tolerance band/)
+    expect(within(latest).getByRole('link', { name: /Open this run/ })).toHaveAttribute('href', `#/runs/${RUN_ID}`)
+  })
+
+  it('never puts a replay button above the form: replays start from a run card', async () => {
     mockFetch((url) => (url === '/api/gallery' ? json([card]) : undefined))
     window.location.hash = '#/'
     render(<App />)
-    const watch = await screen.findByRole('link', { name: /Watch a finished run/ })
-    expect(watch).toHaveAttribute('href', `#/runs/${RUN_ID}?replay=1`)
-  })
-
-  it('shows no replay link when nothing is in the gallery yet', async () => {
-    const fetchMock = mockFetch((url) => (url === '/api/gallery' ? json([]) : undefined))
-    window.location.hash = '#/'
-    render(<App />)
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(await screen.findByRole('link', { name: 'Replay the run on arXiv 0000.00001' })).toHaveAttribute(
+      'href',
+      `#/runs/${RUN_ID}?replay=1`,
+    )
     expect(screen.queryByRole('link', { name: /Watch a finished run/ })).toBeNull()
   })
 })
