@@ -6,6 +6,13 @@ const n = (x: number) => x.toLocaleString('en-US')
 export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]; update: CostUpdate | null }) {
   const r = costReceipt(calls, update)
   return (
+    <>
+      {r.cloudReported && (
+        <p className="cost-total">
+          <span className="mono">{formatUsd(r.totalUsd)}</span> for the whole run
+        </p>
+      )}
+      <div className="table-wrap">
     <table className="receipt">
       <caption>Cost receipt</caption>
       <thead>
@@ -36,6 +43,7 @@ export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]
       <tfoot>
         <tr>
           <th scope="row">Inference</th>
+          <td />
           <td>{r.rows.reduce((s, x) => s + x.calls, 0)}</td>
           <td>{n(r.tokensIn)}</td>
           <td>{n(r.tokensOut)}</td>
@@ -43,12 +51,12 @@ export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]
         </tr>
         <tr>
           <th scope="row">Cloud jobs</th>
-          <td colSpan={3} />
+          <td colSpan={4} />
           <td>{r.cloudReported ? formatUsd(r.cloudUsd) : <span className="muted">not reported yet</span>}</td>
         </tr>
         <tr>
           <th scope="row">Total</th>
-          <td colSpan={3} />
+          <td colSpan={4} />
           <td>
             <strong>{formatUsd(r.totalUsd)}</strong>
             {!r.cloudReported && <span className="muted"> + cloud not reported yet</span>}
@@ -56,12 +64,14 @@ export function CostReceiptView({ calls, update }: { calls: readonly ModelCall[]
         </tr>
         {r.unpricedCalls > 0 && (
           <tr>
-            <td colSpan={5} className="muted">
+            <td colSpan={6} className="muted">
               * {r.unpricedCalls} call(s) used a model without a configured price and are not included.
             </td>
           </tr>
         )}
       </tfoot>
     </table>
+      </div>
+    </>
   )
 }

@@ -58,25 +58,37 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
     ? Object.entries(state.verdicts).map(([claimId, v]) => ({ claimId, ...v }))
     : (run?.verdicts.map((v) => ({ claimId: v.claim_id, verdict: v.verdict, explanation_md: '' })) ?? [])
   const claimById = new Map(claims.map((c) => [c.id, c]))
+  // The tested claim in words, under the title: what this run is about.
+  const headline = claims.find((c) => tested.has(c.id))?.text ?? claims[0]?.text ?? null
 
   return (
     <article className="run">
       <header className="run-header">
-        <h1>
-          arXiv{' '}
-          {run ? (
-            <a href={`https://arxiv.org/abs/${encodeURIComponent(run.arxiv_id)}`} rel="noreferrer noopener" target="_blank">
-              {run.arxiv_id}
+        <div className="run-header-main">
+          <p className="muted small breadcrumb">
+            <a href={href.gallery}>Gallery</a> / run <span className="mono">{id}</span>
+            {run && !run.listed && ' · private to this browser session'}
+            {run?.listed && ' · in the public gallery'}
+          </p>
+          <h1>
+            arXiv{' '}
+            {run ? (
+              <a href={`https://arxiv.org/abs/${encodeURIComponent(run.arxiv_id)}`} rel="noreferrer noopener" target="_blank">
+                {run.arxiv_id}
+              </a>
+            ) : (
+              '…'
+            )}
+          </h1>
+          {headline && <p className="run-subtitle">{headline}</p>}
+        </div>
+        {!replay && terminal && (
+          <p className="run-actions">
+            <a className="button ghost" href={href.run(id, true)}>
+              ▶ Replay at 10×
             </a>
-          ) : (
-            '…'
-          )}
-        </h1>
-        <p className="muted">
-          Run {id}
-          {run && !run.listed && ' · private to this browser session'}
-          {run?.listed && ' · in the public gallery'}
-        </p>
+          </p>
+        )}
         {replay && (
           <p className="banner">
             Replay of a recorded run at 10× speed. Nothing is executed. <a href={href.run(id)}>Show it without replay</a>
@@ -88,7 +100,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
       <StatusTimeline steps={state.steps} status={status} mode={mode} replay={replay} />
 
       {(state.warnings.length > 0 || state.errors.length > 0 || state.egressBlocked.length > 0) && (
-        <section aria-labelledby="notices-h">
+        <section className="card notices-card" aria-labelledby="notices-h">
           <h2 id="notices-h">Notices</h2>
           <ul className="notices">
             {state.errors.map((e, i) => (
@@ -110,29 +122,10 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
         </section>
       )}
 
-      <section aria-labelledby="claims-h">
-        <h2 id="claims-h">Claims</h2>
-        <ClaimsTable claims={claims} tested={tested} />
-      </section>
-
-      {state.plan && <PlanCard runId={id} plan={state.plan} approval={state.approval} readOnly={replay} />}
-
-      <section aria-labelledby="logs-h">
-        <h2 id="logs-h">Logs</h2>
-        <p className="muted">Output of generated code, shown as plain text.</p>
-        <div className="logs">
-          <LogPanel title="Sandbox output" lines={state.sandboxLines} />
-          <LogPanel title="Job logs" lines={state.jobLines} />
-        </div>
-      </section>
-
-      <section aria-labelledby="jobs-h">
-        <h2 id="jobs-h">Cloud jobs</h2>
-        <JobsList jobs={state.jobs} />
-      </section>
-
       <section aria-labelledby="verdicts-h">
-        <h2 id="verdicts-h">Verdicts</h2>
+        <h2 id="verdicts-h" className="section-title">
+          Verdicts
+        </h2>
         {verdicts.length === 0 && <p className="muted">No verdict yet.</p>}
         <div className="verdicts">
           {verdicts.map((v) => {
@@ -153,21 +146,46 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
         </div>
       </section>
 
-      <section aria-labelledby="cost-h">
-        <h2 id="cost-h">Cost</h2>
-        <CostReceiptView calls={state.modelCalls} update={state.cost} />
+      <div className="run-columns">
+        <section className="card" aria-labelledby="cost-h">
+          <h2 id="cost-h">Cost</h2>
+          <p className="muted small">Every model call of this run, by role and model, on Nebius Token Factory.</p>
+          <CostReceiptView calls={state.modelCalls} update={state.cost} />
+        </section>
+
+        <div className="run-side">
+          {status === 'COMPLETED' && (
+            <section className="card" aria-labelledby="bundle-h">
+              <h2 id="bundle-h">Proof Bundle</h2>
+              <p className="muted small">
+                Everything needed to check and re-run this result: claims, plan, code, logs, measurements and the
+                verdict configuration.
+              </p>
+              <BundleDownload runId={id} warnings={state.warnings} />
+            </section>
+          )}
+          {state.plan && <PlanCard runId={id} plan={state.plan} approval={state.approval} readOnly={replay} />}
+        </div>
+      </div>
+
+      <section className="card" aria-labelledby="claims-h">
+        <h2 id="claims-h">Claims</h2>
+        <ClaimsTable claims={claims} tested={tested} />
       </section>
 
-      {status === 'COMPLETED' && (
-        <section aria-labelledby="bundle-h">
-          <h2 id="bundle-h">Proof Bundle</h2>
-          <p>
-            Everything needed to check and re-run this result: claims, plan, code, logs, measurements and the
-            verdict configuration.
-          </p>
-          <BundleDownload runId={id} warnings={state.warnings} />
-        </section>
-      )}
+      <section className="card" aria-labelledby="logs-h">
+        <h2 id="logs-h">Logs</h2>
+        <p className="muted small">Output of generated code, shown as plain text.</p>
+        <div className="logs">
+          <LogPanel title="Sandbox output" lines={state.sandboxLines} />
+          <LogPanel title="Job logs" lines={state.jobLines} />
+        </div>
+      </section>
+
+      <section className="card" aria-labelledby="jobs-h">
+        <h2 id="jobs-h">Cloud jobs</h2>
+        <JobsList jobs={state.jobs} />
+      </section>
     </article>
   )
 }
