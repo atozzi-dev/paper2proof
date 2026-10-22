@@ -27,9 +27,9 @@
   --log-muted: #9aa5b8;
   --log-err: #ffab90;
   --shadow: 0 1px 2px rgba(13, 22, 38, 0.06), 0 12px 32px rgba(13, 22, 38, 0.06);
-  --font-display: 'Space Grotesk', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
-  --font-body: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --font-display: 'Space Grotesk Variable', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'Inter Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Mono', SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light;
   font-family: var(--font-body);
   font-size: 16px;

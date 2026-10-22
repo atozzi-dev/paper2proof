@@ -1,6 +1,7 @@
 """FastAPI application factory. Wiring of real services happens in app/main.py (A-14)."""
 
 import logging
+import mimetypes
 from pathlib import PurePath
 
 from fastapi import FastAPI, Request, Response
@@ -22,6 +23,9 @@ from app.api.security_headers import (
 
 __all__ = ["AppState", "create_app"]
 log = logging.getLogger(__name__)
+# The UI's self-hosted fonts (process-wide, idempotent). Windows and slim images (no
+# /etc/mime.types) do not know .woff2, and under nosniff a font served as text/plain is fragile.
+mimetypes.add_type("font/woff2", ".woff2")
 
 
 def create_app(state: AppState) -> FastAPI:

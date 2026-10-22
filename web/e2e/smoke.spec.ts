@@ -69,6 +69,12 @@ test('gallery replay of a fixture run reaches the verdict in under 30 s', async 
   await expect(page.getByRole('status').filter({ hasText: 'Up to date' })).toBeVisible()
   await expect(page.getByText('Completed', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+  // The three typefaces are served from our own origin, so the CSP lets them load.
+  const loaded = await page.evaluate(async () => {
+    await document.fonts.ready
+    return [...document.fonts].filter((f) => f.status === 'loaded').map((f) => f.family.replace(/"/g, ''))
+  })
+  expect(new Set(loaded)).toEqual(new Set(['Inter Variable', 'Space Grotesk Variable', 'JetBrains Mono Variable']))
   expect(unmocked).toEqual([])
   expect(violations).toEqual([])
 })
