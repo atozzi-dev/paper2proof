@@ -244,6 +244,29 @@ watchdog counts from there as before.
   during the gap; the row is then marked `ACTIVE` with that deadline. Queue cap plus the longest exec watchdog (20 + 35 min) stays
 under the platform's 1 h timeout, which may count the queue.
 
+**Status outages.** Polling can fail for two different reasons.
+- **An outage of the status API** (`JobStatusUnavailable` from the backend for UNAVAILABLE,
+  DEADLINE_EXCEEDED, INTERNAL, UNKNOWN, RESOURCE_EXHAUSTED or ABORTED, plus timeouts and
+  connection errors) that still fails after its retries is never a reason to cancel. A poll
+  makes 4 attempts with 14 s of backoff between them, plus each request's own timeout.
+  - It counts as `UNKNOWN` for billing (errs high), and the loop goes on.
+  - While polls fail, the queue cap does not apply: a job never seen out of the queue is
+    cancelled only at its latest possible deadline (submission + queue cap + watchdog).
+  - A job first seen out of the queue after an outage gets its watchdog from then, but never
+    past that deadline.
+  - A cancel sent while polls fail, or a cancel that fails in the outage (it is tried once
+    more), goes through the same stop wait as a queue timeout. That wait is bounded by wall
+    time, 5 minutes. The row is left to the reaper when the job is not seen to stop.
+  - When an outage hid when a new job started, its GPU time is capped at its watchdog plus one
+    poll and the stop wait, because its runner stops itself within the watchdog. A job that was
+    watched is billed in full.
+- **Any other error** (permission, a handle naming another job, a bug) fails the step at once,
+  as before.
+
+`DELETING` maps to `CANCELLED`: a job being deleted is assumed to run no more [S-4, verify], so it
+neither keeps the gateway up nor is cancelled again by the reaper. Today the only delete is of a
+job left by a refused creation, which never ran.
+
 **No GPU capacity** (architecture §15). `submit()` raises `CapacityError` when the platform refuses
 to create the job for lack of capacity (gRPC `RESOURCE_EXHAUSTED` on create, or a create operation
 that ends with it: GPU quota used up, "not enough resources"); no job exists afterwards and the

@@ -484,14 +484,17 @@ async def test_transient_status_errors_are_retried(store: Store, tmp_path: Path)
     assert result.next is StepName.SMOKE_TESTING
 
 
-async def test_a_failing_poll_cancels_the_job_and_settles_the_budget(
+async def test_a_status_outage_ends_at_the_provisioning_deadline(
     store: Store, tmp_path: Path
 ) -> None:
+    """Polls that keep failing never cancel the job early: it is cancelled at its deadline
+    (it may be working fine meanwhile), and the budget is settled."""
     ctx, artifacts = await _setup(store, tmp_path, packages=[])
-    jobs = _FlakyStatus(1000, final_state=JobState.RUNNING)
+    jobs = _FlakyStatus(10**6, final_state=JobState.RUNNING)
     ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
-    with pytest.raises(ConnectionError):
+    with pytest.raises(P2PError) as err:
         await _step(store, artifacts, FakeRunStorage(), FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.TIMEOUT
     assert jobs.cancelled == [f"p2p-prov-{RUN[2:]}-1"]
     assert not ctx.budget._inflight
 

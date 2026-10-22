@@ -6,11 +6,19 @@ from typing import Any
 import pytest
 
 from app.domain.models import StepName
-from app.execution.backend import JobHandle, JobKind, JobSpec, JobState, QuotaExceeded
+from app.execution.backend import (
+    JobHandle,
+    JobKind,
+    JobSpec,
+    JobState,
+    JobStatusUnavailable,
+    QuotaExceeded,
+)
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.nebius_backend import JobBackendError
 from app.orchestrator.budget import BudgetExceeded, SpendKind
 from app.orchestrator.context import RunContext
-from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job
+from app.orchestrator.steps.jobs import QUEUE_CAP_S, STOP_WAIT_S, JobOutcome, run_job
 from app.storage.store import Store
 from tests.steps.conftest import RUN, ctx_at
 
@@ -350,3 +358,175 @@ class _Ticking:
     def __call__(self) -> datetime:
         self.clock.t += 5
         return self.clock()
+
+
+class FlakyStatus(ScriptedBackend):
+    """The status API fails for `failures` polls in a row (a control-plane outage)."""
+
+    def __init__(self, script: list[JobState], failures: int) -> None:
+        super().__init__(script)
+        self.failures = failures
+        self.calls = 0
+
+    async def status(self, handle: JobHandle) -> JobState:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise ConnectionError("status API unreachable")
+        return await super().status(handle)
+
+
+async def test_a_status_outage_never_cancels_a_running_job(store: Store) -> None:
+    """Minutes of failed polls (4 attempts each, 14 s of backoff): the job goes on."""
+    backend = FlakyStatus(_states((R, 1), (JobState.SUCCEEDED, 1)), failures=4 * 30)
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.state is JobState.SUCCEEDED and backend.cancelled == []
+    assert clock.t > 600  # the outage lasted longer than ten minutes
+
+
+async def test_a_status_outage_still_ends_at_the_watchdog(store: Store) -> None:
+    """Polling never recovers: the watchdog (or queue cap) still bounds the job."""
+    backend = FlakyStatus([R], failures=10**6)
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.timed_out and not outcome.queue_timed_out  # never "no capacity" blind
+    assert backend.cancelled == [NAME]
+    assert clock.t >= QUEUE_CAP_S + 1500  # its latest legitimate deadline, not the queue cap
+
+
+async def test_a_blind_job_is_never_billed_more_gpu_than_it_reserved(store: Store) -> None:
+    """An outage hid when it started: GPU time is capped at what it can use (invariant 7)."""
+    backend = FlakyStatus([R], failures=10**6)
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    # its watchdog, one poll and the stop wait: not the 45 minutes since its submission
+    assert await ctx.budget.run_spend(RUN, SpendKind.GPU_MINUTES) <= (1500 + 30 + STOP_WAIT_S) / 60
+
+
+async def test_a_blind_cancel_waits_for_the_job_to_stop(store: Store) -> None:
+    """Cancelled while polls fail: not known to have stopped, so the row is left to the
+    reaper (it may still be running and writing)."""
+    backend = FlakyStatus([R], failures=10**6)
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.timed_out and not outcome.stopped
+    record = await store.get_job(NAME)
+    assert record is not None and record.status not in ("SUCCEEDED", "FAILED", "CANCELLED")
+
+
+async def test_a_job_seen_running_late_after_an_outage_keeps_a_normal_watchdog(
+    store: Store,
+) -> None:
+    """Blind for 25 minutes, then RUNNING: not killed at once for a watchdog it never had."""
+    script = _states((R, 3), (JobState.SUCCEEDED, 1))
+    backend = FlakyStatus(script, failures=4 * 34)  # 34 polls of 44 s: about 25 minutes
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.state is JobState.SUCCEEDED and not outcome.timed_out
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TypeError("bug"),
+        JobBackendError("handle names another job"),
+        PermissionError("docker socket"),  # an OSError, but no outage
+    ],
+)
+async def test_a_status_error_that_is_not_an_outage_fails_fast(
+    store: Store, error: Exception
+) -> None:
+    class Broken(ScriptedBackend):
+        async def status(self, handle: JobHandle) -> JobState:
+            raise error
+
+    backend = Broken([R])
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    with pytest.raises(type(error)):
+        await run_job(
+            ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+        )
+    assert backend.cancelled == [NAME] and clock.t < 60
+
+
+class SlowCancel(ScriptedBackend):
+    """cancel() takes 200 s (an operation wait) while the job keeps running and billing."""
+
+    def __init__(self, script: list[JobState], clock: Clock) -> None:
+        super().__init__(script)
+        self.clock = clock
+
+    async def cancel(self, handle: JobHandle) -> None:
+        self.clock.t += 200
+        await super().cancel(handle)
+
+
+async def test_a_watched_job_is_billed_all_the_gpu_time_it_used(store: Store) -> None:
+    """The GPU cap is only for a start hidden by an outage: a slow cancel is billed."""
+    clock = Clock()
+    backend = SlowCancel([R], clock)
+    ctx = await _ctx(store, backend)
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.timed_out
+    assert await ctx.budget.run_spend(RUN, SpendKind.GPU_MINUTES) >= (1500 + 200) / 60
+
+
+class SlowOutage(FlakyStatus):
+    """Every failing status call also takes 60 s (the SDK's request timeout)."""
+
+    def __init__(self, script: list[JobState], failures: int, clock: Clock) -> None:
+        super().__init__(script, failures)
+        self.clock = clock
+
+    async def status(self, handle: JobHandle) -> JobState:
+        if self.calls + 1 <= self.failures:
+            self.clock.t += 60
+        return await super().status(handle)
+
+
+async def test_the_stop_wait_is_bounded_by_wall_time(store: Store) -> None:
+    clock = Clock()
+    backend = SlowOutage([R], 10**6, clock)
+    ctx = await _ctx(store, backend)
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.timed_out and not outcome.stopped
+    deadline = QUEUE_CAP_S + 1500
+    # one more blind poll after the deadline, then at most the stop wait plus one poll
+    assert clock.t <= deadline + 2 * (4 * 60 + 14 + 30) + STOP_WAIT_S
+
+
+class CancelDuringOutage(FlakyStatus):
+    async def cancel(self, handle: JobHandle) -> None:
+        raise JobStatusUnavailable("control plane unavailable")
+
+
+async def test_a_cancel_failing_in_an_outage_is_left_to_the_reaper(store: Store) -> None:
+    backend = CancelDuringOutage([R], failures=10**6)
+    ctx = await _ctx(store, backend)
+    clock = Clock()
+    outcome = await run_job(
+        ctx, _spec(), usd_per_hour=1.0, poll_s=30, clock=clock, sleep=clock.sleep, gpu=True
+    )
+    assert outcome.timed_out and not outcome.stopped
+    record = await store.get_job(NAME)
+    assert record is not None and record.status not in ("SUCCEEDED", "FAILED", "CANCELLED")

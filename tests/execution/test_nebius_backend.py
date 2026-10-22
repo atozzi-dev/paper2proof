@@ -61,6 +61,7 @@ from app.execution.backend import (
     JobKind,
     JobSpec,
     JobState,
+    JobStatusUnavailable,
     QuotaExceeded,
     VolumeMount,
 )
@@ -774,7 +775,7 @@ async def test_submit_does_not_wait_for_a_long_running_create(world: World) -> N
         (State.STARTING, JobState.STARTING),
         (State.RUNNING, JobState.RUNNING),
         (State.CANCELLING, JobState.RUNNING),
-        (State.DELETING, JobState.UNKNOWN),
+        (State.DELETING, JobState.CANCELLED),  # being deleted: it runs no more
         (State.COMPLETED, JobState.SUCCEEDED),
         (State.FAILED, JobState.FAILED),
         (State.ERROR, JobState.FAILED),
@@ -785,6 +786,33 @@ async def test_status_maps_every_state(world: World, sdk_state: Any, expected: J
     job = world.jobs.add(spec().name, sdk_state)
     handle = JobHandle(name=spec().name, nebius_id=job.metadata.id)
     assert await world.backend.status(handle) is expected
+
+
+@pytest.mark.parametrize(
+    "code", [StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXCEEDED, StatusCode.INTERNAL]
+)
+async def test_a_transient_status_error_is_an_outage(world: World, code: StatusCode) -> None:
+    job = world.jobs.add(spec().name, State.RUNNING)
+    handle = JobHandle(name=spec().name, nebius_id=job.metadata.id)
+
+    async def failing(request: Any) -> Job:
+        raise rpc_error(code)
+
+    world.jobs.get = failing  # type: ignore[method-assign]
+    with pytest.raises(JobStatusUnavailable):
+        await world.backend.status(handle)
+
+
+async def test_a_permission_error_on_status_is_not_an_outage(world: World) -> None:
+    job = world.jobs.add(spec().name, State.RUNNING)
+    handle = JobHandle(name=spec().name, nebius_id=job.metadata.id)
+
+    async def failing(request: Any) -> Job:
+        raise rpc_error(StatusCode.PERMISSION_DENIED)
+
+    world.jobs.get = failing  # type: ignore[method-assign]
+    with pytest.raises(RequestError):
+        await world.backend.status(handle)
 
 
 async def test_status_of_a_vanished_job_is_unknown(world: World) -> None:
@@ -991,6 +1019,14 @@ async def test_gateway_idle_check_stops_an_idle_vm(world: World) -> None:
     assert [r.id for r in world.instances.requests if isinstance(r, StopInstanceRequest)] == [
         GATEWAY
     ]
+
+
+async def test_a_job_being_deleted_does_not_keep_the_gateway_up(world: World) -> None:
+    world.instances.state = VmState.RUNNING
+    await world.backend.ensure_gateway_up()
+    world.jobs.add(job_name(JobKind.PROVISION, RUN, 1), State.DELETING)
+    world.clock.now += timedelta(minutes=31)
+    assert await world.backend.gateway_idle_check(30) is True
 
 
 async def test_gateway_idle_check_keeps_the_vm_while_a_job_runs(world: World) -> None:

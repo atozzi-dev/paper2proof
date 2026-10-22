@@ -14,6 +14,7 @@ time it watched.
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,13 +23,23 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from app.domain.events import EventType
 from app.domain.models import RunStatus
-from app.execution.backend import CapacityError, JobHandle, JobSpec, JobState, QuotaExceeded
+from app.execution.backend import (
+    CapacityError,
+    JobHandle,
+    JobSpec,
+    JobState,
+    JobStatusUnavailable,
+    QuotaExceeded,
+)
 from app.execution.naming import bucket_name
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
 from app.storage.store import JOB_ACTIVE, JobRecord
 
+log = logging.getLogger(__name__)
 STATUS_ATTEMPTS = 4  # transient control-plane errors while polling
+# what an outage of the status API looks like; anything else is a real error
+OUTAGES = (JobStatusUnavailable, TimeoutError, ConnectionError)
 STOP_WAIT_S = 300  # how long a cancelled job may take to stop
 QUEUE_CAP_S = 1200  # PENDING (waiting for capacity) before the job is given up
 
@@ -54,7 +65,7 @@ async def _status(
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(STATUS_ATTEMPTS),
         wait=wait_exponential(multiplier=2, max=30),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception_type(OUTAGES),
         sleep=sleep,
         reraise=True,
     ):
@@ -108,20 +119,21 @@ async def stop_jobs(
 
 async def _await_stop(
     observe: Callable[[], Awaitable[tuple[JobState, datetime]]],
+    clock: Callable[[], datetime],
     sleep: Callable[[float], Awaitable[None]],
     poll_s: float,
     wait_s: float = STOP_WAIT_S,
 ) -> tuple[bool, JobState]:
-    """Poll a cancelled job until it is terminal: (stopped, last state seen)."""
-    waited = 0.0
+    """Poll a cancelled job until it is terminal: (stopped, last state seen). Bounded by wall
+    time: during an outage one poll alone can take minutes."""
+    until = clock() + timedelta(seconds=wait_s)
     while True:
-        state, _ = await observe()
+        state, seen = await observe()
         if state.is_terminal:
             return True, state
-        if waited >= wait_s:
+        if seen >= until:
             return False, state
         await sleep(poll_s)
-        waited += poll_s
 
 
 async def run_job(
@@ -189,11 +201,19 @@ async def run_job(
     def since(start: datetime | None) -> float:
         return 0.0 if start is None else max(0.0, (clock() - start).total_seconds())
 
+    def gpu_s() -> float:
+        # When an outage hid when a new job started, billing from submission would charge the
+        # queue as GPU time: cap it at what the job can use (its runner stops itself within
+        # the watchdog) plus a poll and the stop wait. Anything watched is billed in full.
+        used = since(gpu_since)
+        hidden = existing is None and (start_hidden or (anchor is None and was_blind))
+        return min(used, spec.watchdog_s + poll_s + STOP_WAIT_S) if hidden else used
+
     async def settle(refused: bool = False) -> None:
         # A creation refused (no capacity, or a quota) left no job behind: nothing to pay.
         await ctx.budget.commit(cost, 0.0 if refused else usd_per_hour * since(usd_since) / 3600)
         if minutes is not None:
-            await ctx.budget.commit(minutes, 0.0 if refused else since(gpu_since) / 60)
+            await ctx.budget.commit(minutes, 0.0 if refused else gpu_s() / 60)
 
     async def job_status(state: JobState) -> None:
         await ctx.emit(
@@ -205,25 +225,37 @@ async def run_job(
     state = JobState.UNKNOWN
     timed_out = cancelled = queue_timed_out = False
     stopped = True
+    blind = False  # the last poll failed: nothing is known about the job
+    was_blind = False  # a poll failed (only read while the job was never seen)
+    start_hidden = False  # first seen only after an outage: when it began is unknown
     last_queued: datetime | None = None
 
     async def observe() -> tuple[JobState, datetime]:
         """One poll; GPU time starts at the last poll that still saw the job queued."""
-        nonlocal last_queued, gpu_since, anchor, mark
+        nonlocal last_queued, gpu_since, anchor, mark, blind, was_blind, start_hidden
         assert handle is not None  # noqa: S101 (polled only after submit)
         before = clock()
-        current = await _status(ctx, handle, sleep)
+        try:
+            current = await _status(ctx, handle, sleep)
+            blind = False
+        except OUTAGES:  # an outage of the status API is never a reason to cancel: the
+            # job may be fine; it is billed as UNKNOWN and bounded by its latest deadline
+            log.warning("job status unavailable", extra={"job": spec.name}, exc_info=True)
+            current, blind, was_blind = JobState.UNKNOWN, True, True
         if current is JobState.PENDING:
             last_queued = before
             if anchor is None:  # seen queued again: an UNKNOWN poll before was not running
                 gpu_since = None
             return current, clock()
         left = last_queued or submitted  # it left the queue after that poll
-        if gpu_since is None:  # UNKNOWN too: it may be running (DELETING, an unmapped state)
+        if gpu_since is None:  # UNKNOWN too: it may be running (an unmapped state, an outage)
             gpu_since = left
         if current is not JobState.UNKNOWN:
             if anchor is None:
-                anchor = left
+                # seen out of the queue only after an outage: from when it was first seen,
+                # never past the latest deadline (submission + queue cap + watchdog)
+                start_hidden = not last_queued and was_blind
+                anchor = min(before, submitted + queue_cap) if start_hidden else left
             if mark:
                 mark = False
                 await ctx.store.mark_job_active(spec.name, deadline=anchor + watchdog)
@@ -256,13 +288,22 @@ async def run_job(
                 cancelled = True
             elif anchor is not None and seen - anchor >= watchdog:
                 timed_out = True
-            elif anchor is None and seen - submitted >= queue_cap:
+            elif anchor is None and not blind and seen - submitted >= queue_cap:
                 queue_timed_out = True
+            elif anchor is None and seen - submitted >= queue_cap + watchdog:
+                timed_out = True  # blind all along: the latest it could legitimately run
             if cancelled or timed_out or queue_timed_out:
-                await ctx.jobs.cancel(handle)
-                if queue_timed_out:
-                    # "nothing ran" only once it has stopped: it may have started meanwhile
-                    stopped, state = await _await_stop(observe, sleep, poll_s)
+                try:
+                    await ctx.jobs.cancel(handle)
+                    unconfirmed = queue_timed_out or blind
+                except OUTAGES:  # the same outage: try once more while waiting for the stop
+                    log.warning("job cancel unavailable", extra={"job": spec.name})
+                    unconfirmed = True
+                    with contextlib.suppress(*OUTAGES):
+                        await ctx.jobs.cancel(handle)
+                if unconfirmed:
+                    # "nothing ran" (or "it stopped") only once seen terminal
+                    stopped, state = await _await_stop(observe, clock, sleep, poll_s)
                 else:
                     state = JobState.CANCELLED
                 await job_status(state)
@@ -282,7 +323,7 @@ async def run_job(
         await settle(refused=handle is None and isinstance(err, CapacityError | QuotaExceeded))
         raise
     await settle()
-    elapsed_s = since(gpu_since)
+    elapsed_s = gpu_s()
     settled = existing is not None and existing.status in _SETTLED  # keep what it cost
     if stopped and not settled:  # unstopped: the row stays unsettled for the reaper
         await ctx.store.update_job(
