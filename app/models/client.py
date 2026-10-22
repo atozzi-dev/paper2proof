@@ -497,12 +497,15 @@ class TokenFactoryClient:
         failure: Exception | None = None
         for reservation in reservations:
             amount = 0.0 if reservation.kind in charged else actual[reservation.kind]
-            charged.add(reservation.kind)
             try:
                 await self.budget.commit(reservation, amount)
-            except Exception as exc:
-                log.error("ledger commit failed", extra={"run_id": reservation.run_id})
+            except Exception as exc:  # the next reservation of this kind carries the actual
+                log.error(
+                    "ledger commit failed", extra={"run_id": reservation.run_id}, exc_info=True
+                )
                 failure = failure or exc
+            else:
+                charged.add(reservation.kind)
         return failure
 
     async def _complete_role(
