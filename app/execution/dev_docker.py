@@ -102,6 +102,13 @@ class DevDockerBackend:
         parents = [self._root / d for d in ("buckets", "cache", "jobs")]
         for parent in parents:
             parent.mkdir(parents=True, exist_ok=True)
+        # uid 10001 may be a real account on this host: the root is ours alone, so nobody else
+        # reaches the shared parents (dockerd mounts as root; containers never walk the root).
+        # Never chmod the parents themselves: that would reset the ACL mask.
+        owner = self._root.stat().st_uid
+        if owner != self._host_uid:
+            raise RuntimeError(f"{self._root} is not owned by uid {self._host_uid} (uid {owner})")
+        self._root.chmod(0o700)
         users = (JOB_UID, self._host_uid)
         entries = ",".join(f"u:{uid}:rwX" for uid in users)
         defaults = ",".join(f"d:u:{uid}:rwX" for uid in users)
