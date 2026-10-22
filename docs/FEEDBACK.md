@@ -1,6 +1,39 @@
 # Feedback — Nebius Token Factory, Nebius AI Cloud, NVIDIA
 
-Collected during development. Consolidated into the Devpost feedback field at submission (task A-33).
+Collected while we built Paper2Proof, from 2026-10-15 to the submission. Every entry below says
+what we were doing, what happened, what we expected, what it cost us and what we suggest. The
+summary comes first, ranked by impact.
+
+## Summary
+
+**What blocked or slowed us most**
+
+1. **New tenants start with 0 non-GPU vCPUs** (blocker). No CPU job and no Serverless endpoint
+   can start until a quota request is approved, while GPU jobs work. It held up our endpoint,
+   network and mount tests for more than a day. A small default CPU quota, or a line in the Serverless
+   quickstart, would fix it.
+2. **GitHub Actions OIDC to Nebius is undocumented** (major). The token exchange, the accepted
+   audience (`sts.nebius.com`, no scheme) and the subject form with numeric IDs had to be found
+   by trial, over about two hours and several CI runs. An official example or a `nebius/login`
+   action would save every team this time.
+3. **A job volume needs a bucket ID, and a name fails** with `unsupported volume source type`
+   (major). Endpoints accept names. This was a production bug that only a live test found.
+4. **Job lifecycle commands are undocumented** (major): `get` / `get-by-name`, the list of job
+   states and `endpoint update` are missing from the Serverless pages, so idempotent deploys
+   could not be written from the docs alone.
+5. **No OTLP metrics ingest and no alerts on custom metrics** (major). Traces have a direct OTLP
+   endpoint, but metrics need an extra collector, and alerts cover only VMs and buckets.
+
+**Smaller gaps:** GPU jobs wait for capacity with no state detail; Sandboxes pricing is not
+documented; the model catalog and `/v1/models` disagree, and `/v1/models` has no context
+length; Super ignores `response_format: json_schema`, and the thinking switch works only through
+`chat_template_kwargs`; the Batch API wire format is not shown in full; the Python SDK needs an
+undeclared package on Windows; tracing ingest is gRPC-only.
+
+**What worked well:** Token Factory's OpenAI-compatible API with forced tool calls on every
+Nemotron model; Sandboxes with networking disabled (truly isolated, 1.5 s start); the Python
+SDK's message types and service clients, which made the cloud adapter easy to test; Tavily,
+which worked on the first call.
 
 ## Token Factory (inference API)
 
@@ -144,6 +177,13 @@ Collected during development. Consolidated into the Devpost feedback field at su
 - **Suggestion:** expose `context_length` and modalities in `/models`, and keep the catalog in sync.
 - **Severity:** minor
 
-## NemoClaw / OpenShell
-
 ## Tavily
+
+### 2026-10-21 — Key, credits and search worked on the first call (praise)
+- **Context:** spike S8 (H-03), repository discovery and documentation search for the Coder.
+- **What happened:** one basic search returned a JSON result list; the dashboard showed 4,125
+  credits and the cost of each call (1 credit for a basic search).
+- **Expected:** this.
+- **Impact:** none; per-run and per-day credit caps were easy to set from the documented costs.
+- **Suggestion:** none.
+- **Severity:** praise
