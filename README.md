@@ -202,7 +202,15 @@ allowlisted. Each run's bucket is a directory under `var/jobs/buckets/`. Executi
 uses the CPU runner, since there is no GPU locally. On a Linux docker host the jobs' uid 10001
 is a host uid too, so the backend shares `var/jobs/{buckets,cache,jobs}` with it through ACLs
 (`setfacl`, from the `acl` package) and makes `var/jobs` private to you. Rootless docker and
-userns-remap are not supported. Docker Desktop needs none of this.
+userns-remap are not supported. Docker Desktop needs none of this. Directories created before
+this change keep their old permissions: remove them, or grant the ACLs yourself with the same
+`setfacl -m` (add `-R` for what they already hold).
+
+Finished job containers stay around for their logs. Remove them with:
+
+```bash
+docker container prune --filter label=p2p-dev=1
+```
 
 ### Deploying
 

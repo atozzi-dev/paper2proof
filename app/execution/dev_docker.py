@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -39,6 +40,7 @@ _STATES = {
     "restarting": JobState.STARTING,
     "running": JobState.RUNNING,
 }
+log = logging.getLogger(__name__)
 DOCKER_TIMEOUT_S = 120.0
 LABEL = "p2p-dev"
 JOB_UID = 10001  # the images' non-root user
@@ -59,6 +61,18 @@ def _host_uid() -> int | None:
     if sys.platform == "linux":
         return os.getuid()
     return None
+
+
+def _plain_dir(path: Path) -> Path:
+    """`path` as a real directory: created when missing, refused when a link (or a Windows
+    junction) or anything else sits there, so nothing is created or mounted through a link."""
+    info = _lstat(path, str(path))
+    if info is None:
+        path.mkdir(parents=True, exist_ok=True)
+        info = _lstat(path, str(path))
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{path} is not a directory: refused")
+    return path
 
 
 def _when(value: object) -> datetime | None:
@@ -133,7 +147,7 @@ class DevDockerBackend:
     async def ensure_run_bucket(self, run_id: str) -> str:
         name = bucket_name(run_id)
         await self._share_job_dirs()
-        self._bucket(name).mkdir(parents=True, exist_ok=True)
+        _plain_dir(self._bucket(name))
         return name
 
     async def delete_run_bucket(self, run_id: str) -> None:
@@ -206,8 +220,11 @@ class DevDockerBackend:
         await self._share_job_dirs()
         job = self._root / "jobs" / spec.name
         shutil.rmtree(job, ignore_errors=True)
-        (job / "work").mkdir(parents=True)
-        (job / "home").mkdir()
+        if _lstat(job, str(job)) is not None:  # a job can lock its own files (a 0700 mkdir)
+            log.warning("%s could not be removed: its leftovers are reused", job)
+        _plain_dir(job)
+        _plain_dir(job / "work")
+        _plain_dir(job / "home")
         argv = [
             "run", "-d", f"--name={spec.name}", f"--label={LABEL}=1",
             f"--label=p2p-root={self._root_label}", f"--label=p2p-watchdog={spec.watchdog_s}",
@@ -222,8 +239,7 @@ class DevDockerBackend:
             argv.append("--network=none")
         for volume in spec.volumes:
             cache = volume.source == CACHE_BUCKET
-            source = self._root / "cache" if cache else self._bucket(volume.source)
-            source.mkdir(parents=True, exist_ok=True)
+            source = _plain_dir(self._root / "cache" if cache else self._bucket(volume.source))
             mounts.append((source, volume.mount_path, volume.mode))
         for index, (path, content) in enumerate(sorted(spec.inject_files.items())):
             local = job / f"inject-{index}"
@@ -389,9 +405,11 @@ class LocalRunStorage:
         if create:
             base.mkdir(parents=True, exist_ok=True)
         try:
-            fd = os.open(base, os.O_RDONLY | _DIRECTORY)
+            fd = os.open(base, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
         except FileNotFoundError:
             return None
+        except OSError as exc:  # ELOOP: the bucket itself is a link
+            raise ValueError(f"{key} goes through a link: refused") from exc
         for part in parts[:-1]:
             try:
                 if create:
@@ -469,6 +487,8 @@ class LocalRunStorage:
         current = self._base(run_id)
         if create:
             current.mkdir(parents=True, exist_ok=True)
+        if _lstat(current, key) is None:  # the bucket itself may be a junction: refused there
+            return None
         for part in parts[:-1]:
             current = current / part
             info = _lstat(current, key)

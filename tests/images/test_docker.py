@@ -178,32 +178,43 @@ def test_a_provisioned_overlay_imports_in_the_cpu_runner(tmp_path: Path) -> None
         "deadline_unix": 4102444800.0,
     }  # fmt: skip
     (tmp_path / "provision.json").write_text(json.dumps(manifest))
-    done = _docker(
-        ["run", "--rm", "--user", "0:0",  # host bind mounts are root-owned on Docker Desktop
-         "-v", f"{run}:/mnt/run", "-v", f"{cache}:/mnt/cache",
-         "-v", f"{tmp_path / 'provision.json'}:/etc/p2p/provision.json:ro",
-         f"p2p-provisioner:{TAG}"],
-        timeout=900,
-    )  # fmt: skip
-    assert done.returncode == 0, done.stderr[-3000:]
-    report = json.loads((run / "staging" / "packages_report.json").read_text())
-    assert report["schema"] == "p2p.packages-report/v1" and report["overlay_cache_hit"] is False
-    assert (cache / "overlays" / f"{report['overlay_cache_key']}.tar.zst").is_file()
-    overlay = run / "staging" / "overlay.tar.zst"
-    assert hashlib.sha256(overlay.read_bytes()).hexdigest() == report["overlay_sha256"]
-    script = (
-        "import pathlib, subprocess, sys\n"
-        "sys.path.insert(0, '/opt/p2p')\n"
-        "import entrypoint\n"
-        "entrypoint.tar_extract(pathlib.Path('/mnt/run/staging/overlay.tar.zst'),"
-        f" pathlib.Path('/tmp/overlay'), {report['overlay_sha256']!r})\n"
-        "assert not [p for p in pathlib.Path('/tmp/overlay').iterdir()"
-        " if p.name.startswith(('torch', 'nvidia', 'cuda', 'triton'))"
-        " and not p.name.startswith('torchmetrics')], 'the runner provides torch'\n"
-        "subprocess.run([sys.executable, '-c', 'import tabulate, torchmetrics'], check=True,"
-        " env={'PYTHONPATH': '/tmp/overlay'})\n"
-    )
-    _run("p2p-runner-cpu", "-c", script, entrypoint="python", mounts=("-v", f"{run}:/mnt/run:ro"))
+    try:
+        done = _docker(
+            ["run", "--rm", "--user", "0:0",  # host bind mounts are root-owned on Docker Desktop
+             "-v", f"{run}:/mnt/run", "-v", f"{cache}:/mnt/cache",
+             "-v", f"{tmp_path / 'provision.json'}:/etc/p2p/provision.json:ro",
+             f"p2p-provisioner:{TAG}"],
+            timeout=900,
+        )  # fmt: skip
+        assert done.returncode == 0, done.stderr[-3000:]
+        report = json.loads((run / "staging" / "packages_report.json").read_text())
+        assert report["schema"] == "p2p.packages-report/v1" and report["overlay_cache_hit"] is False
+        assert (cache / "overlays" / f"{report['overlay_cache_key']}.tar.zst").is_file()
+        overlay = run / "staging" / "overlay.tar.zst"
+        assert hashlib.sha256(overlay.read_bytes()).hexdigest() == report["overlay_sha256"]
+        script = (
+            "import pathlib, subprocess, sys\n"
+            "sys.path.insert(0, '/opt/p2p')\n"
+            "import entrypoint\n"
+            "entrypoint.tar_extract(pathlib.Path('/mnt/run/staging/overlay.tar.zst'),"
+            f" pathlib.Path('/tmp/overlay'), {report['overlay_sha256']!r})\n"
+            "assert not [p for p in pathlib.Path('/tmp/overlay').iterdir()"
+            " if p.name.startswith(('torch', 'nvidia', 'cuda', 'triton'))"
+            " and not p.name.startswith('torchmetrics')], 'the runner provides torch'\n"
+            "subprocess.run([sys.executable, '-c', 'import tabulate, torchmetrics'], check=True,"
+            " env={'PYTHONPATH': '/tmp/overlay'})\n"
+        )
+        _run(
+            "p2p-runner-cpu", "-c", script, entrypoint="python", mounts=("-v", f"{run}:/mnt/run:ro")
+        )
+    finally:  # files the provisioner wrote as root: let tmp_path's cleanup remove them
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(
+                ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chmod",
+                 "-v", f"{run}:/mnt/run", "-v", f"{cache}:/mnt/cache",
+                 f"p2p-provisioner:{TAG}", "-R", "a+rwX", "/mnt/run", "/mnt/cache"],
+                timeout=60,
+            )  # fmt: skip
 
 
 def _fetch_job(tmp_path: Path, *mounts: str) -> "subprocess.CompletedProcess[str]":
