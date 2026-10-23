@@ -43,7 +43,12 @@ def _matches(pattern: str, path: str) -> bool:
     body = pattern.strip("/")
     if pattern in ("*", "**", "/**"):
         return True
-    regex = re.escape(body).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
+    regex = (
+        re.escape(body)
+        .replace(r"\*\*/", "(?:.*/)?")  # `**/`: zero or more directories
+        .replace(r"\*\*", ".*")
+        .replace(r"\*", "[^/]*")
+    )
     prefix = "" if anchored else "(?:.*/)?"
     if pattern.endswith("/") or "*" not in body:
         regex += "(?:/.*)?"  # a directory (or a file) and everything below it
@@ -69,11 +74,12 @@ def test_every_guarded_path_ends_on_its_own_rule_with_an_owner() -> None:
         assert winner is not None, f"{guarded} has no code owner"
         pattern, owners = winner
         assert pattern == guarded, f"{guarded} is overridden by the later rule {pattern}"
-        assert owners and all(owner.startswith("@") for owner in owners), guarded
+        assert "@atozzi-dev" in owners, f"{guarded} is not owned by the maintainer"
 
 
 def test_a_later_broad_or_ownerless_rule_would_be_caught() -> None:
     text = CODEOWNERS.read_text(encoding="utf-8")
-    for extra in ("* @someone", "/app/ @someone", "/** @someone", "app/", "/app/main.py"):
+    later = ("* @x", "/app/ @x", "/** @x", "app/", "/app/main.py", "/app/**/*.py @x")
+    for extra in later:
         winner = _owners_of(text + f"\n{extra}\n", "/app/main.py")
         assert winner is not None and (winner[0] != "/app/main.py" or not winner[1]), extra
