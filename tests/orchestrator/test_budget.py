@@ -312,5 +312,37 @@ async def test_settle_goes_on_past_a_failed_write_and_raises_it(
     monkeypatch.setattr(store, "add_ledger_entry", first_fails)
     with pytest.raises(OSError, match="disk full"):
         await budget.settle(held, {SpendKind.TOKENS_IN: 30.0, SpendKind.TOKENS_OUT: 7.0})
-    assert await budget.run_spend(RUN, SpendKind.TOKENS_IN) == 30.0  # carried to the next one
-    assert budget._inflight == {}
+    # the unwritten 30 stay held in memory (counted once, never booked twice); the rest is out
+    assert await budget.run_spend(RUN, SpendKind.TOKENS_IN) == 0.0
+    assert budget._inflight_total(SpendKind.TOKENS_IN, RUN, None) == 30.0
+    assert await budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 7.0
+    assert budget._inflight_total(SpendKind.TOKENS_OUT, RUN, None) == 0.0
+
+
+async def test_a_failed_ledger_write_still_counts_against_the_caps(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: spend that could not be written is held, never forgotten by the caps."""
+    await _runs(store)
+    budget = _budget(store)
+    cap = _limits().per_run.tokens_in
+    reservation = await budget.check_and_reserve(RUN, SpendKind.TOKENS_IN, 100.0)
+
+    async def fails(*args: object, **kwargs: object) -> None:
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(store, "add_ledger_entry", fails)
+    with pytest.raises(OSError, match="locked"):
+        await budget.commit(reservation, 40.0)
+    with pytest.raises(BudgetExceeded):
+        await budget.check_and_reserve(RUN, SpendKind.TOKENS_IN, cap - 40.0 + 1.0)
+    await budget.check_and_reserve(RUN, SpendKind.TOKENS_IN, cap - 40.0)
+
+
+async def test_settle_refuses_actuals_missing_a_held_kind(store: Store) -> None:
+    await _runs(store)
+    budget = _budget(store)
+    held = [await budget.check_and_reserve(RUN, SpendKind.TOKENS_OUT, 10.0)]
+    with pytest.raises(ValueError, match="tokens_out"):
+        await budget.settle(held, {SpendKind.TOKENS_IN: 1.0})
+    assert len(budget._inflight) == 1  # untouched: the caller still settles it

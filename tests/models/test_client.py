@@ -481,11 +481,11 @@ async def test_a_failed_ledger_write_still_releases_the_other_reservations(
 
 
 @respx.mock
-async def test_a_failed_ledger_write_moves_the_actual_to_the_next_reservation(
+async def test_a_failed_ledger_write_keeps_the_actual_held(
     store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A retried call holds two tokens_out reservations: when the first commit fails, the
-    second one books the actual instead of 0."""
+    """A retried call holds two tokens_out reservations: when the write of the actual fails,
+    the actual stays held in memory and the other reservation is released at 0."""
     await _run(store)
     respx.post(f"{BASE}chat/completions").mock(
         side_effect=[httpx.Response(503, json={}), completion(tokens=(10, 5))]
@@ -501,8 +501,9 @@ async def test_a_failed_ledger_write_moves_the_actual_to_the_next_reservation(
     monkeypatch.setattr(store, "add_ledger_entry", tokens_out_fails_once)
     with pytest.raises(OSError, match="disk full"):
         await client.complete(Role.UTILITY, USER, run_id=RUN)
-    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
-    assert client.budget._inflight == {}
+    # the 5 tokens out that could not be written stay held: counted once, never twice
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 0
+    assert client.budget._inflight_total(SpendKind.TOKENS_OUT, RUN, None) == 5
 
 
 @respx.mock
@@ -544,3 +545,26 @@ async def test_a_cancel_in_the_backoff_charges_only_the_attempts_made(
     one = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
     four = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
     assert one > 0 and one * 4 == four
+
+
+@respx.mock
+async def test_a_cancel_while_the_request_is_out_charges_it_in_full(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """A cancelled request may still be generated (and billed) to the end, like a timeout."""
+    await _run(store)
+    sent = asyncio.Event()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        sent.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    respx.post(f"{BASE}chat/completions").mock(side_effect=hang)
+    task = asyncio.create_task(client.complete(Role.UTILITY, USER, run_id=RUN))
+    await sent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    out_cap = client.config.roles[Role.UTILITY].max_output
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == out_cap

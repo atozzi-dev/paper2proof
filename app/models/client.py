@@ -542,9 +542,9 @@ class TokenFactoryClient:
             raise cause from None
         except BaseException:
             # Cancelled (or an unexpected error): the attempts already counted are charged as
-            # above, plus the input of a request that was out with no answer yet.
+            # above, plus a request that was out with no answer yet, in full like a timeout.
             tin = (tally.attempts + tally.timeouts + int(tally.in_flight)) * est_in
-            tout = tally.timeouts * out_cap
+            tout = (tally.timeouts + int(tally.in_flight)) * out_cap
             await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
