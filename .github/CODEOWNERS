@@ -15,5 +15,8 @@
 # Which bytes a 0000.NNNNN ID gets, and the hash the gates compare.
 /app/ingestion/canaries.py @atozzi-dev
 /app/orchestrator/steps/ingesting.py @atozzi-dev
+# Keeps third-party repositories out of canary runs; wires the allowlist and the gates.
+/app/orchestrator/steps/discovering.py @atozzi-dev
+/app/main.py @atozzi-dev
 /tests/ci/test_codeowners.py @atozzi-dev
 /.github/CODEOWNERS @atozzi-dev
