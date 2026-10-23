@@ -13,8 +13,10 @@ except for the provision job, never for the fetch job.
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -39,6 +41,7 @@ _STATES = {
     "restarting": JobState.STARTING,
     "running": JobState.RUNNING,
 }
+log = logging.getLogger(__name__)
 DOCKER_TIMEOUT_S = 120.0
 LABEL = "p2p-dev"
 JOB_UID = 10001  # the images' non-root user
@@ -59,6 +62,18 @@ def _host_uid() -> int | None:
     if sys.platform == "linux":
         return os.getuid()
     return None
+
+
+def _plain_dir(path: Path) -> Path:
+    """`path` as a real directory: created when missing, refused when a link (or a Windows
+    junction) or anything else sits there, so nothing is created or mounted through a link."""
+    info = _lstat(path, str(path))
+    if info is None:
+        path.mkdir(parents=True, exist_ok=True)
+        info = _lstat(path, str(path))
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{path} is not a directory: refused")
+    return path
 
 
 def _when(value: object) -> datetime | None:
@@ -133,7 +148,7 @@ class DevDockerBackend:
     async def ensure_run_bucket(self, run_id: str) -> str:
         name = bucket_name(run_id)
         await self._share_job_dirs()
-        self._bucket(name).mkdir(parents=True, exist_ok=True)
+        _plain_dir(self._bucket(name))
         return name
 
     async def delete_run_bucket(self, run_id: str) -> None:
@@ -206,8 +221,18 @@ class DevDockerBackend:
         await self._share_job_dirs()
         job = self._root / "jobs" / spec.name
         shutil.rmtree(job, ignore_errors=True)
-        (job / "work").mkdir(parents=True)
-        (job / "home").mkdir()
+        if _lstat(job, str(job)) is not None:  # a job can lock its own files (a 0700 mkdir)
+            # Ours to move even when a subdirectory is not ours to empty: a resubmit (a smoke
+            # iteration after a prune) always starts from nothing, never from old code's files.
+            trash = job.with_name(f".trash-{spec.name}-{secrets.token_hex(4)}")
+            job.rename(trash)
+            log.warning(
+                "job directory moved aside: its files could not be removed",
+                extra={"run_id": run_id, "path": str(trash)},
+            )
+        _plain_dir(job)
+        _plain_dir(job / "work")
+        _plain_dir(job / "home")
         argv = [
             "run", "-d", f"--name={spec.name}", f"--label={LABEL}=1",
             f"--label=p2p-root={self._root_label}", f"--label=p2p-watchdog={spec.watchdog_s}",
@@ -222,8 +247,7 @@ class DevDockerBackend:
             argv.append("--network=none")
         for volume in spec.volumes:
             cache = volume.source == CACHE_BUCKET
-            source = self._root / "cache" if cache else self._bucket(volume.source)
-            source.mkdir(parents=True, exist_ok=True)
+            source = _plain_dir(self._root / "cache" if cache else self._bucket(volume.source))
             mounts.append((source, volume.mount_path, volume.mode))
         for index, (path, content) in enumerate(sorted(spec.inject_files.items())):
             local = job / f"inject-{index}"
@@ -231,7 +255,8 @@ class DevDockerBackend:
             mounts.append((local, path, "ro"))
         for source, target, mode in mounts:
             readonly = ",readonly" if mode == "ro" else ""
-            argv += ["--mount", f"type=bind,source={source.resolve()},target={target}{readonly}"]
+            # the checked path itself (under the resolved root), never re-resolved
+            argv += ["--mount", f"type=bind,source={source},target={target}{readonly}"]
         for name, value in sorted(spec.env.items()):
             argv += ["-e", f"{name}={value}"]
         argv.append(image)
@@ -387,11 +412,18 @@ class LocalRunStorage:
     def _parent_fd(self, run_id: str, parts: tuple[str, ...], key: str, create: bool) -> int | None:
         base = self._base(run_id)
         if create:
-            base.mkdir(parents=True, exist_ok=True)
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:  # a dangling link at the bucket
+                raise ValueError(f"{key} goes through a link: refused") from exc
         try:
-            fd = os.open(base, os.O_RDONLY | _DIRECTORY)
+            fd = os.open(base, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):  # the bucket is a link
+                raise ValueError(f"{key} goes through a link: refused") from exc
+            raise ValueError(f"{key} is unreadable") from exc
         for part in parts[:-1]:
             try:
                 if create:
@@ -468,7 +500,12 @@ class LocalRunStorage:
         """The parent directory of the key, every component checked; None if it is missing."""
         current = self._base(run_id)
         if create:
-            current.mkdir(parents=True, exist_ok=True)
+            try:
+                current.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:  # a dangling link or junction at the bucket
+                raise ValueError(f"{key} goes through a link: refused") from exc
+        if _lstat(current, key) is None:  # the bucket itself may be a junction: refused there
+            return None
         for part in parts[:-1]:
             current = current / part
             info = _lstat(current, key)
