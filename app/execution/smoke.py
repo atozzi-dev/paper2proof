@@ -121,17 +121,24 @@ def _text(value: Any) -> str:
     return value[-MAX_OUTPUT_CHARS:] if isinstance(value, str) else ""
 
 
+def _finite(value: Any) -> float | None:
+    """A real number that fits a float, else None (an integer can be too large for one)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def parse_metrics(raw: Any) -> dict[str, float] | None:
     if not isinstance(raw, dict):
         return None
     return {
-        k: float(v)
+        k: number
         for k, v in raw.items()
-        if isinstance(k, str)
-        and _METRIC.fullmatch(k)
-        and isinstance(v, int | float)
-        and not isinstance(v, bool)
-        and math.isfinite(v)
+        if isinstance(k, str) and _METRIC.fullmatch(k) and (number := _finite(v)) is not None
     }
 
 

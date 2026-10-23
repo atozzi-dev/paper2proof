@@ -38,7 +38,8 @@ class RunConditions(BaseModel):
     attempt: int  # the GPU job attempt the verdict is based on
     scale: ScaleView
     seeds_planned: list[int]
-    seeds_used: list[int]
+    seeds_used: list[int]  # seeds that gave at least one claim a value
+    seeds_used_by_claim: dict[str, list[int]]  # by claim id: a seed may fail one claim only
     hardware: HardwareView
     code: PlanMode | None  # None when the plan can't be read
     deviations: list[str]  # deviations from the paper recorded in the plan
@@ -105,20 +106,21 @@ async def _conditions(store: Store, artifacts: ArtifactStore, run_id: str) -> Ru
     except ValidationError:
         log.warning("run conditions not readable", extra={"run_id": run_id})
         return None
-    if analysis.measurements is None:
+    if not analysis.claims:  # a contract error: nothing was measured
         return None
     plan = await _plan(artifacts, refs.get(StepName.PLANNING))
     hardware = await _hardware(artifacts, refs.get(StepName.EXECUTING), manifest.attempt)
     return RunConditions(
         attempt=manifest.attempt,
         scale=ScaleView(
-            scale=analysis.measurements.scale,
+            scale=Scale.FULL if manifest.scale.full else Scale.REDUCED,
             fraction_of_data=manifest.scale.fraction_of_data,
             epochs=manifest.scale.epochs,
             paper_epochs=manifest.scale.paper_epochs,
         ),
         seeds_planned=manifest.seeds,
         seeds_used=analysis.used_seeds,
+        seeds_used_by_claim={ref: c.used_seeds for ref, c in analysis.claims.items()},
         hardware=HardwareView(
             platform=hardware.platform if hardware else None,
             preset=hardware.preset if hardware else None,

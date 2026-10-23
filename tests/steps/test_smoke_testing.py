@@ -55,12 +55,16 @@ async def _setup(
     baseline_name: str = "ResNet-18",
     entrypoint_hint: str | None = None,
     report: dict[str, Any] | None = None,
+    two_claims: bool = False,
 ) -> tuple[RunContext, LocalArtifactStore]:
     artifacts = LocalArtifactStore(tmp_path)
+    ids = ["c1", "c2"] if two_claims else ["c1"]
     plan = Plan(
         mode=PlanMode.FROM_SCRATCH,
-        claim_ids=["c1"],
-        claim_types={"c1": ClaimType.RELATIVE},
+        claim_ids=ids,
+        claim_types={"c1": ClaimType.RELATIVE, "c2": ClaimType.ABSOLUTE}
+        if two_claims
+        else {"c1": ClaimType.RELATIVE},
         scale=Scale.REDUCED,
         seeds=[0, 1, 2],
         gpu_minutes_est=10,
@@ -90,7 +94,20 @@ async def _setup(
         baseline_name=baseline_name,
         source_ref="Table 2",
     )
-    await store.save_claims(RUN, [claim], selected={"c1"})
+    claims = [claim]
+    if two_claims:
+        claims.append(
+            claim.model_copy(
+                update={
+                    "id": "c2",
+                    "text": "Ours reaches 94.1% top-1 on CIFAR-10",
+                    "claim_type": ClaimType.ABSOLUTE,
+                    "reported_value": 0.941,
+                    "baseline_name": None,
+                }
+            )
+        )
+    await store.save_claims(RUN, claims, selected=set(ids))
     return ctx, artifacts
 
 
@@ -124,7 +141,11 @@ async def test_a_planted_bug_is_fixed_and_finished(store: Store, tmp_path: Path)
     assert result.output_ref is not None
     final = artifacts.get_json(result.output_ref)
     assert final["entrypoint"] == "workspace/train.py"
-    assert final["metric_unit"] == "fraction"  # what VERDICT aligns a percent claim with
+    assert final["measures"] == [  # the unit is what VERDICT aligns a percent claim with
+        {"claim_id": "c1", "key": "top1_accuracy", "baseline_key": "baseline/top1_accuracy",
+         "unit": "fraction"}
+    ]  # fmt: skip
+    assert final["unmeasured"] == []
     archive = storage.objects[(RUN, "staging/workspace.tar")]
     assert archive == pack_workspace(files)  # exactly what the last smoke run tested
     assert final["workspace_sha256"] == hashlib.sha256(archive).hexdigest()
@@ -288,10 +309,10 @@ async def test_the_declared_metric_unit_must_fit_the_smoke_values(
     assert result.next is StepName.EXECUTING
     errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
     assert len(errors) == 2
-    assert "metric_unit" in errors[0]
+    assert "measures" in errors[0]
     assert "not a fraction" in errors[1] and "top1_accuracy" in errors[1]
     assert result.output_ref is not None
-    assert artifacts.get_json(result.output_ref)["metric_unit"] == "percent"
+    assert artifacts.get_json(result.output_ref)["measures"][0]["unit"] == "percent"
 
 
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:
@@ -404,3 +425,40 @@ def test_a_short_history_is_left_alone() -> None:
 
     messages = _history(2)
     assert compact_history(messages) == messages
+
+
+async def test_one_experiment_measures_every_planned_claim(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, two_claims=True)
+    step, models = _step("two_claims", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    final = artifacts.get_json(result.output_ref)
+    assert [m["claim_id"] for m in final["measures"]] == ["c1", "c2"]
+    assert final["measures"][1]["baseline_key"] is None
+    _, first = models.requests[0]
+    user = str(first[1].content)
+    assert "Ours beats ResNet-18" in user and "Ours reaches 94.1%" in user  # both claims given
+
+
+async def test_finish_accounts_for_every_planned_claim(store: Store, tmp_path: Path) -> None:
+    """Forgotten, all unmeasured, a RELATIVE claim without its baseline key, a key the smoke
+    run never wrote, a baseline key equal to the claim's key: refused. A claim declared
+    unmeasured with a reason: accepted."""
+    ctx, artifacts = await _setup(store, tmp_path, two_claims=True)
+    step, models = _step(
+        "finish_claims_errors", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert len(errors) == 5
+    assert "c2" in errors[0]
+    assert "measures" in errors[1]
+    assert "baseline_key" in errors[2]
+    assert "missing/key" in errors[3]
+    assert "baseline_key must differ from key" in errors[4]  # a delta of 0 by construction
+    final = artifacts.get_json(result.output_ref)
+    assert [m["claim_id"] for m in final["measures"]] == ["c1"]
+    assert final["unmeasured"] == [
+        {"claim_id": "c2", "reason": "the paper's test split is not public"}
+    ]

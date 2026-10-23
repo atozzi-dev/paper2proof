@@ -19,6 +19,9 @@ from app.domain.models import (
     VerdictKind,
 )
 
+# No real metric comes near this; anything larger would overflow the variance below.
+MAX_METRIC_ABS = 1e100
+
 
 def _inconclusive(reason: ReasonCode, n_seeds: int) -> Verdict:
     return Verdict(
@@ -43,7 +46,7 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
     if n < cfg.min_seeds:
         return _inconclusive(ReasonCode.INSUFFICIENT_SEEDS, n)
     raw = [*measurements.per_seed, *(base or [])]
-    if not all(math.isfinite(x) for x in raw):
+    if not all(math.isfinite(x) and abs(x) <= MAX_METRIC_ABS for x in raw):
         return _inconclusive(ReasonCode.RUNTIME_ERROR, n)
 
     # Normalize direction: after this, higher is better everywhere.

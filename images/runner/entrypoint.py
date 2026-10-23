@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -54,9 +55,14 @@ RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 MANIFEST_KEYS = {
     "schema", "run_id", "attempt", "image_digest", "entrypoint", "args", "seeds", "budget_seconds",
-    "paths", "claim_ref", "metric", "higher_is_better", "claim_type", "baseline_name", "scale",
-    "archives", "workspace_sha256",
+    "paths", "claims", "scale", "archives", "workspace_sha256",
 }  # fmt: skip
+CLAIM_KEYS = {
+    "claim_ref", "claim_type", "metric", "higher_is_better", "metric_key", "baseline_name",
+    "baseline_key",
+}  # fmt: skip
+METRIC_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$")
+MAX_CLAIMS = 5
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PATH_KEYS = {"overlay", "repo", "data_dir", "workspace", "cache", "results"}
 SCALE_KEYS = {"full", "fraction_of_data", "epochs", "paper_epochs"}
@@ -96,6 +102,10 @@ def _short_str(value: Any, limit: int) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit
 
 
+def _metric_key(value: Any) -> bool:
+    return isinstance(value, str) and bool(METRIC_KEY.fullmatch(value))
+
+
 def _validate(manifest: Any) -> dict[str, Any]:
     def need(ok: bool, what: str) -> None:
         if not ok:
@@ -103,7 +113,7 @@ def _validate(manifest: Any) -> dict[str, Any]:
 
     need(isinstance(manifest, dict) and set(manifest) == MANIFEST_KEYS, "keys")
     m: dict[str, Any] = manifest
-    need(m["schema"] == "p2p.manifest/v1", "schema")
+    need(m["schema"] == "p2p.manifest/v2", "schema")
     need(isinstance(m["run_id"], str) and bool(RUN_ID.fullmatch(m["run_id"])), "run_id")
     need(type(m["attempt"]) is int and 1 <= m["attempt"] <= 5, "attempt")
     need(
@@ -134,12 +144,23 @@ def _validate(manifest: Any) -> dict[str, Any]:
     need(all(isinstance(paths[k], str) for k in PATH_KEYS - {"repo"}), "paths")
     need(paths["repo"] is None or isinstance(paths["repo"], str), "paths.repo")
     need(not any(_runner_flag(a) for a in args), "args set a runner flag")
-    need(_short_str(m["claim_ref"], 128), "claim_ref")
-    need(_short_str(m["metric"], 64), "metric")
-    need(isinstance(m["higher_is_better"], bool), "higher_is_better")
-    need(m["claim_type"] in ("ABSOLUTE", "RELATIVE"), "claim_type")
-    need(m["baseline_name"] is None or _short_str(m["baseline_name"], 128), "baseline_name")
-    need(m["claim_type"] == "ABSOLUTE" or bool(m["baseline_name"]), "baseline_name")
+    claims = m["claims"]
+    need(isinstance(claims, list) and 1 <= len(claims) <= MAX_CLAIMS, "claims")
+    for claim in claims:
+        need(isinstance(claim, dict) and set(claim) == CLAIM_KEYS, "claims keys")
+        need(_short_str(claim["claim_ref"], 64), "claim_ref")
+        need(_short_str(claim["metric"], 64), "metric")
+        need(isinstance(claim["higher_is_better"], bool), "higher_is_better")
+        need(claim["claim_type"] in ("ABSOLUTE", "RELATIVE"), "claim_type")
+        need(_metric_key(claim["metric_key"]), "metric_key")
+        if claim["claim_type"] == "RELATIVE":
+            need(_short_str(claim["baseline_name"], 128), "baseline_name")
+            need(_metric_key(claim["baseline_key"]), "baseline_key")
+            need(claim["baseline_key"] != claim["metric_key"], "baseline_key is the metric_key")
+        else:
+            need(claim["baseline_name"] is None and claim["baseline_key"] is None, "baseline")
+    refs = [c["claim_ref"] for c in claims]
+    need(len(set(refs)) == len(refs), "claim_ref must be unique")
     scale = m["scale"]
     need(isinstance(scale, dict) and set(scale) <= SCALE_KEYS, "scale")
     need(isinstance(scale.get("full"), bool), "scale.full")
@@ -400,16 +421,47 @@ def run_seed(
     return code, timed_out
 
 
-def _read_metric(path: Path, key: str) -> float | None:
+MAX_METRICS_BYTES = 64 * 1024
+
+
+def _read_metrics(path: Path) -> dict[str, Any] | None:
+    """The seed's metrics.json, read once for every claim; None if missing or unusable. The
+    untrusted script owns the file: a symlink, a FIFO or a device is never followed, opened
+    blocking or read past the cap (a link to /dev/zero would read forever)."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        if path.stat().st_size > 64 * 1024:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_METRICS_BYTES:
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        value = data[key]
-        if type(value) not in (int, float):  # no bools, no numeric strings
+        chunks: list[bytes] = []
+        size = 0
+        while size <= MAX_METRICS_BYTES:  # the file may grow after fstat: bound the read
+            chunk = os.read(fd, MAX_METRICS_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > MAX_METRICS_BYTES:
             return None
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    finally:
+        os.close(fd)
+    return data if isinstance(data, dict) else None
+
+
+def _metric(metrics: dict[str, Any] | None, key: str) -> float | None:
+    value = metrics.get(key) if metrics is not None else None
+    if isinstance(value, bool) or not isinstance(value, int | float):  # no strings, no nesting
+        return None
+    try:
         number = float(value)
-    except (OSError, ValueError, RecursionError, KeyError, TypeError, OverflowError):
+    except OverflowError:
         return None
     return number if math.isfinite(number) else None
 
@@ -456,32 +508,45 @@ def run(
     paths = manifest["paths"]
     results = Path(paths["results"])
     results.mkdir(parents=True, exist_ok=True)
-    metric, relative = manifest["metric"], manifest["claim_type"] == "RELATIVE"
-    per_seed: list[dict[str, Any]] = []
-    baseline: list[dict[str, Any]] = []
+    claims = manifest["claims"]
+    seeds_done: list[int] = []
+    values: dict[str, list[dict[str, Any]]] = {c["claim_ref"]: [] for c in claims}
+    baselines: dict[str, list[dict[str, Any]]] = {c["claim_ref"]: [] for c in claims}
     gpu = "unknown"
 
-    def write_results(status: int) -> None:
-        done = {s["seed"] for s in per_seed}
-        missing = [s for s in manifest["seeds"] if s not in done]
-        report = {
-            "schema": "p2p.results/v1",
-            "run_id": manifest["run_id"],
-            "attempt": manifest["attempt"],
-            "claim_ref": manifest["claim_ref"],
-            "claim_type": manifest["claim_type"],
-            "metric": metric,
-            "higher_is_better": manifest["higher_is_better"],
-            "scale": manifest["scale"],
-            "per_seed": per_seed + [{"seed": s, "value": None, "ok": False} for s in missing],
+    def padded(entries: list[dict[str, Any]], empty: dict[str, Any]) -> list[dict[str, Any]]:
+        """Each list padded from its own seeds: a SIGTERM between two claims of one seed
+        leaves the lists uneven, and a seed must never appear twice."""
+        done = {e["seed"] for e in entries}
+        return entries + [{"seed": s, **empty} for s in manifest["seeds"] if s not in done]
+
+    def claim_results(claim: dict[str, Any]) -> dict[str, Any]:
+        ref, relative = claim["claim_ref"], claim["claim_type"] == "RELATIVE"
+        return {
+            "claim_ref": ref,
+            "claim_type": claim["claim_type"],
+            "metric": claim["metric"],
+            "metric_key": claim["metric_key"],
+            "higher_is_better": claim["higher_is_better"],
+            "per_seed": padded(values[ref], {"value": None, "ok": False}),
             "baseline": (
                 {
-                    "name": manifest["baseline_name"],
-                    "per_seed": baseline + [{"seed": s, "value": None} for s in missing],
+                    "name": claim["baseline_name"],
+                    "key": claim["baseline_key"],
+                    "per_seed": padded(baselines[ref], {"value": None}),
                 }
                 if relative
                 else None
             ),
+        }
+
+    def write_results(status: int) -> None:
+        report = {
+            "schema": "p2p.results/v2",
+            "run_id": manifest["run_id"],
+            "attempt": manifest["attempt"],
+            "scale": manifest["scale"],
+            "claims": [claim_results(c) for c in claims],
             "wall_clock_s": round(time.monotonic() - started, 3),
             "gpu": gpu,
             "exit_reason": REASONS[status],
@@ -551,25 +616,32 @@ def run(
                     argv, env=env, cwd=run_dir, budget_s=remaining, kill_grace_s=kill_grace_s,
                     stdout=out, stderr=err, live=live,
                 )  # fmt: skip
-                value = _read_metric(seed_dir / "metrics.json", metric) if code == 0 else None
+                metrics = _read_metrics(seed_dir / "metrics.json") if code == 0 else None
+                measured = False
+                for claim in claims:
+                    ref = claim["claim_ref"]
+                    value = _metric(metrics, claim["metric_key"])
+                    values[ref].append({"seed": seed, "value": value, "ok": value is not None})
+                    measured = measured or value is not None
+                    if claim["claim_type"] == "RELATIVE":
+                        base = (
+                            _metric(metrics, claim["baseline_key"]) if value is not None else None
+                        )
+                        baselines[ref].append({"seed": seed, "value": base})
+                seeds_done.append(seed)
                 if timed_out:
                     status = EXIT_BUDGET
-                elif value is None and status == EXIT_OK:
+                elif not measured and status == EXIT_OK:  # a claim missing alone is its own
                     status = EXIT_EXPERIMENT
-                per_seed.append({"seed": seed, "value": value, "ok": value is not None})
-                base = None
-                if relative and value is not None:
-                    base = _read_metric(seed_dir / "metrics.json", f"baseline/{metric}")
-                baseline.append({"seed": seed, "value": base})
                 write_results(EXIT_BUDGET)  # not done yet: a stopped job never shows an ending
                 if on_seed is not None:
-                    on_seed(len(per_seed))
+                    on_seed(len(seeds_done))
                 if timed_out:
                     break
         except Terminated:
             status = EXIT_BUDGET
             print("TERMINATED: writing partial results", file=sys.stderr)
-    if status == EXIT_OK and len(per_seed) < len(manifest["seeds"]):
+    if status == EXIT_OK and len(seeds_done) < len(manifest["seeds"]):
         status = EXIT_BUDGET
     write_results(status)
     for name in ("stdout.log", "stderr.log"):

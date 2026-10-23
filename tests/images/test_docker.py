@@ -325,7 +325,7 @@ def _canary_manifest(workspace_sha256: str, overlay: str, data: str) -> ExecMani
     attempt = 1
     return ExecManifest.model_validate(
         {
-            "schema": "p2p.manifest/v1", "run_id": "r_01jb7z00000000000000000000",
+            "schema": "p2p.manifest/v2", "run_id": "r_01jb7z00000000000000000000",
             "attempt": attempt, "image_digest": "sha256:" + "ab" * 32,
             "entrypoint": "workspace/train.py", "args": ["--steps", "3"], "seeds": [0, 1, 2],
             "budget_seconds": 120,
@@ -335,8 +335,10 @@ def _canary_manifest(workspace_sha256: str, overlay: str, data: str) -> ExecMani
                 "workspace": "/mnt/run/staging/workspace.tar", "cache": "/mnt/cache",
                 "results": f"/mnt/run/results/{attempt}",
             },
-            "claim_ref": "c1", "metric": "top1_accuracy", "higher_is_better": True,
-            "claim_type": "RELATIVE", "baseline_name": "resnet18", "scale": {"full": False},
+            "claims": [{"claim_ref": "c1", "claim_type": "RELATIVE", "metric": "top1_accuracy",
+                        "higher_is_better": True, "metric_key": "top1_accuracy",
+                        "baseline_name": "resnet18", "baseline_key": "baseline/top1_accuracy"}],
+            "scale": {"full": False},
             "archives": {"overlay": overlay, "repo": None,
                          "data": [{"name": "canary", "sha256": data}]},
             "workspace_sha256": workspace_sha256,
@@ -386,10 +388,10 @@ def test_the_cpu_runner_runs_a_canary_workspace_to_a_valid_results_json(tmp_path
         assert (analysis.exit_reason, analysis.used_seeds, analysis.gpu) == (
             "completed", [0, 1, 2], "cpu",
         )  # fmt: skip
-        assert analysis.measurements is not None
+        measured = analysis.claims["c1"]
         expected = [0.75 + s / 100 + 0.003 for s in (0, 1, 2)]
-        assert analysis.measurements.per_seed == pytest.approx(expected)
-        assert analysis.measurements.baseline_per_seed == pytest.approx([v - 0.1 for v in expected])
+        assert measured.measurements.per_seed == pytest.approx(expected)
+        assert measured.measurements.baseline_per_seed == pytest.approx([v - 0.1 for v in expected])
         env = json.loads((results / "env.json").read_text(encoding="utf-8"))
         assert env["image_digest"] == manifest.image_digest
         assert "seed 2: " in (results / "stdout.log").read_text(encoding="utf-8")

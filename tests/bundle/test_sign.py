@@ -24,7 +24,7 @@ from app.bundle.sign import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-MANIFEST = b'{"schema": "p2p.bundle/v1", "run_id": "r_01jb7z00000000000000000000"}'
+MANIFEST = b'{"schema": "p2p.bundle/v2", "run_id": "r_01jb7z00000000000000000000"}'
 
 
 async def test_fake_signer_round_trip() -> None:
@@ -172,7 +172,7 @@ SIGN = ["sign", "--key-id", "kms-key-1", "--run-id", "r_01jb7z000000000000000000
 async def _unsigned_bundle(tmp_path: Path, tamper: bool = False) -> Path:
     from app.bundle.build import BundleFile, Origin, assemble, pack
 
-    meta = {"run_id": "r_01jb7z00000000000000000000", "verdict": "REPRODUCED"}
+    meta = {"run_id": "r_01jb7z00000000000000000000", "verdicts": {"c1": "REPRODUCED"}}
     files = [BundleFile("claims.json", b"[]", Origin.CONTROL_PLANE)]
     assembled = assemble(files, [], meta, ())
     files = {**assembled.files, "MANIFEST.json": assembled.manifest}

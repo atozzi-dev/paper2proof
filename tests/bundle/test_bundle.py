@@ -62,13 +62,13 @@ async def test_layout_manifest_and_signature(run: Run, signer: FakeSigner) -> No
     assert set(files) == expected
     assert verify_files(files, (await signer.public_key_pem()).encode()) == []
     manifest = _manifest(files)
-    assert manifest["schema"] == "p2p.bundle/v1"
+    assert manifest["schema"] == "p2p.bundle/v2"
     assert manifest["run_id"] == RUN
     assert manifest["arxiv_id"] == "2106.09685"
     assert manifest["paper_sha256"] == "d" * 64
     assert manifest["config_sha256"] == "c" * 64
-    assert manifest["claim_id"] == "c1"
-    assert manifest["verdict"] == "REPRODUCED_AT_REDUCED_SCALE"
+    assert manifest["schema"] == "p2p.bundle/v2"
+    assert manifest["verdicts"] == {"c1": "REPRODUCED_AT_REDUCED_SCALE"}
     assert manifest["judged_attempt"] == 1
     assert manifest["paper2proof"]["commit"] == "0123abc"
     assert manifest["built_at"] == "2026-10-25T10:00:00Z"
@@ -96,10 +96,10 @@ async def test_content_of_the_control_plane_files(run: Run, signer: FakeSigner) 
     claims = json.loads(files["claims.json"])
     assert [(c["id"], c["selected"]) for c in claims] == [("c1", True), ("c2", False)]
     verdict = json.loads(files["verdict.json"])
-    assert verdict["verdict"]["kind"] == "REPRODUCED_AT_REDUCED_SCALE"
+    assert verdict["verdicts"][0]["verdict"]["kind"] == "REPRODUCED_AT_REDUCED_SCALE"
     assert verdict["config"] == {"tol_rel": 0.02}
-    assert "explanation_md" not in verdict
-    assert files["explanation.md"].decode().startswith("It held up.")
+    assert "explanation_md" not in verdict["verdicts"][0]
+    assert files["explanation.md"].decode().startswith("## Claim c1\n\nIt held up.")
     receipt = json.loads(files["cost_receipt.json"])
     assert {(m["role"], m["tokens_in"], m["tokens_out"]) for m in receipt["model_calls"]} == {
         ("planner", 1000, 200),

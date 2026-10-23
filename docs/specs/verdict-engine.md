@@ -33,6 +33,7 @@ class ReasonCode(StrEnum):
     HIGH_VARIANCE = "HIGH_VARIANCE"
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
+    NOT_MEASURED = "NOT_MEASURED"  # set by VERDICT, never by decide()
 
 class Claim(BaseModel):
     id: str
@@ -82,7 +83,7 @@ Normalize direction first: if `higher_is_better` is false, negate `reported_valu
 if claim.claim_type == ABSOLUTE and claim.reported_value is None: return INCONCLUSIVE(UNDERSPECIFIED_CLAIM)
 if claim.claim_type == RELATIVE and m.baseline_per_seed is None:  return INCONCLUSIVE(UNDERSPECIFIED_CLAIM)
 if len(m.per_seed) < cfg.min_seeds:                               return INCONCLUSIVE(INSUFFICIENT_SEEDS)
-if any value is not finite:                                       return INCONCLUSIVE(RUNTIME_ERROR)
+if any value is not finite or |value| > 1e100 (MAX_METRIC_ABS): return INCONCLUSIVE(RUNTIME_ERROR)
 
 k      = len(values)
 mean   = average(values)
@@ -124,10 +125,10 @@ Use `scipy.stats.t.ppf`. If `s == 0`, then `half = 0` (deterministic runs are al
 Papers often state accuracy-like metrics in percent ("94.1%", "by 1.7 points") while scripts
 write fractions (0.941). The factor is decided from two declared facts, never inferred from the
 measured values:
-- **the metric's unit**: the Coder's `finish` call must declare `metric_unit` (`fraction`,
-  `percent` or `raw`). SMOKE_TESTING refuses it when the last smoke run's values do not fit
-  (`fraction` in [0, 1], `percent` in [0, 100]; `raw` is unchecked) and stores it in
-  `smoke_result.json`;
+- **the metric's unit**: each of the Coder's `finish` measures declares a `unit` (`fraction`,
+  `percent` or `raw`). SMOKE_TESTING refuses it when the last smoke run's values for that
+  measure's keys do not fit (`fraction` in [0, 1], `percent` in [0, 100]; `raw` is unchecked)
+  and stores it, per claim, in `smoke_result.json`;
 - **whether the claim is in percent**: the claim's own number (`reported_value`, or
   `claimed_delta` for RELATIVE, compared without its sign) appears in its text followed by `%`
   (LaTeX `\%` too), "percent", "per cent", "points" or "pp", optionally with a `± std` in
@@ -151,8 +152,12 @@ VERDICT calls `align_to_claim(claim, measurements, unit)` before `decide()`:
 
 The conversion is deterministic (invariant 2 holds). It gets its own `Scale:` line in the
 verdict's Limitations, and that line is written by code: one of the `ScaleNote` constants.
-`verdict.json` keeps `measurements` (aligned), `measured` (as the script wrote them) and
-`scale_factor`.
+`verdict.json` keeps, for each claim, `measurements` (aligned), `measured` (as the script
+wrote them) and `scale_factor`.
+
+A run decides every claim of its plan. A claim the experiment does not measure (the Coder
+declared it unmeasured at `finish`) is decided as if it had no seeds, and VERDICT replaces
+INSUFFICIENT_SEEDS with `NOT_MEASURED`: still INCONCLUSIVE, the reason set by code.
 
 Known limit: for values in [0, 1], both units pass the smoke check, so the Coder's declaration
 alone picks ×100 or ×1. A wrong declaration there can mislead in either direction: a 0.9%

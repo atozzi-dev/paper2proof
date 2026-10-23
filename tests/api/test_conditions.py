@@ -12,7 +12,7 @@ from app.api.main import AppState
 from app.domain.models import ClaimType, Measurements, Plan, PlanMode, Scale, StepName
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
-from app.verdict.results import Analysis
+from app.verdict.results import Analysis, ClaimAnalysis
 from tests.api.conftest import login
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,10 +65,18 @@ async def _store_run(
         analysis = {
             "analysis": Analysis(
                 exit_reason="completed",
-                measurements=Measurements(
-                    scale=Scale.REDUCED, per_seed=[0.9, 0.91], baseline_per_seed=[0.8, 0.81]
-                ),
-                used_seeds=[0, 1],
+                claims={
+                    "c1": ClaimAnalysis(
+                        measurements=Measurements(
+                            scale=Scale.REDUCED, per_seed=[0.9, 0.91], baseline_per_seed=[0.8, 0.81]
+                        ),
+                        used_seeds=[0, 1],
+                    ),
+                    "c2": ClaimAnalysis(  # seed 1 gave c1 a value but not c2
+                        measurements=Measurements(scale=Scale.REDUCED, per_seed=[0.9]),
+                        used_seeds=[0],
+                    ),
+                },
                 wall_clock_s=1200.0,
                 gpu=gpu,
             ).model_dump(mode="json"),
@@ -109,6 +117,7 @@ async def test_the_run_view_carries_the_conditions_of_its_verdict(
         "scale": {"scale": "REDUCED", "fraction_of_data": 0.1, "epochs": 5, "paper_epochs": 200},
         "seeds_planned": [0, 1, 2],
         "seeds_used": [0, 1],
+        "seeds_used_by_claim": {"c1": [0, 1], "c2": [0]},
         "hardware": {**GPU, "gpu": "NVIDIA L40S"},
         "code": "FROM_SCRATCH",
         "deviations": ["Smaller model than the paper."],

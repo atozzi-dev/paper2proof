@@ -244,14 +244,21 @@ async def _cli(args: argparse.Namespace) -> int:
         if problems:
             return 1
         manifest = json.loads(files[MANIFEST])
-        if manifest.get("verdict") not in {k.value for k in VerdictKind}:
+        verdicts = manifest.get("verdicts")
+        kinds = {k.value for k in VerdictKind}
+        if (
+            not isinstance(verdicts, dict)
+            or not verdicts
+            or not all(v in kinds for v in verdicts.values())
+        ):
             print("ERROR MANIFEST.json has no valid verdict", file=sys.stderr)
             return 1
         if manifest.get("run_id") != args.run_id:
             print(f"ERROR the bundle is not run {args.run_id}", file=sys.stderr)
             return 1
         digest = hashlib.sha256(files[MANIFEST]).hexdigest()
-        print(f"run {args.run_id} verdict {manifest.get('verdict')} MANIFEST.json {digest}")
+        shown = ", ".join(f"{printable(str(c))} {v}" for c, v in verdicts.items())
+        print(f"run {args.run_id} verdicts {shown} MANIFEST.json {digest}")
         question = "Sign only a bundle fetched from p2p-bundles. Sign? [y/N] "
         if not args.yes and (await asyncio.to_thread(input, question)).strip().lower() != "y":
             return 1

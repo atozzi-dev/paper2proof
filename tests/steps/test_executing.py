@@ -154,6 +154,15 @@ async def _setup(
         {
             "entrypoint": "workspace/train.py",
             "args": ["--epochs", "5"],
+            "measures": [
+                {
+                    "claim_id": "c1",
+                    "key": "method/top1_accuracy",
+                    "baseline_key": "resnet18/top1_accuracy",
+                    "unit": "fraction",
+                }
+            ],
+            "unmeasured": [],
             "smoke_metrics": {},
             "workspace_sha256": "f" * 64,
         },
@@ -223,8 +232,11 @@ async def test_the_exec_job_runs_the_validated_manifest(store: Store, tmp_path: 
     assert manifest.entrypoint == "workspace/train.py" and manifest.args == ["--epochs", "5"]
     assert manifest.seeds == [0, 1, 2] and manifest.budget_seconds == 600
     assert spec.watchdog_s == 600 + EXEC_MARGIN_S
-    assert manifest.claim_ref == "c1" and manifest.metric == "top1_accuracy"
-    assert manifest.claim_type is ClaimType.RELATIVE and manifest.baseline_name == "ResNet-18"
+    [spec_c1] = manifest.claims
+    assert spec_c1.claim_ref == "c1" and spec_c1.metric == "top1_accuracy"
+    assert spec_c1.claim_type is ClaimType.RELATIVE and spec_c1.baseline_name == "ResNet-18"
+    assert spec_c1.metric_key == "method/top1_accuracy"
+    assert spec_c1.baseline_key == "resnet18/top1_accuracy"
     assert manifest.scale.full is False
     assert manifest.paths.repo == "/mnt/run/staging/repo.tar.zst"
     assert manifest.paths.results == "/mnt/run/results/1"

@@ -45,6 +45,7 @@ export const runConditions: RunConditions = {
   scale: { scale: 'REDUCED', fraction_of_data: 0.1, epochs: 5, paper_epochs: 200 },
   seeds_planned: [0, 1, 2],
   seeds_used: [0, 1],
+  seeds_used_by_claim: { c1: [0, 1], c2: [0] },
   hardware: { platform: 'gpu-l40s-a', preset: '1gpu-8vcpu-32gb', preemptible: true, gpu: 'NVIDIA L40S' },
   code: 'FROM_SCRATCH',
   deviations: ['Smaller model than the paper.'],

@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.domain.contracts import MAX_CLAIMS_PER_JOB, METRIC_KEY_PATTERN
 from app.execution.smoke import (
     SmokeContractError,
     validate_path,
@@ -65,11 +66,24 @@ class RequestPackages(_Args):
     reason: str = Field(max_length=500)
 
 
+class Measure(_Args):
+    claim_id: str = Field(min_length=1, max_length=64)
+    key: str = Field(pattern=METRIC_KEY_PATTERN)  # where metrics.json has the claim's value
+    baseline_key: str | None = Field(default=None, pattern=METRIC_KEY_PATTERN)  # RELATIVE
+    unit: MetricUnit  # checked against the smoke values; VERDICT aligns with it
+
+
+class Unmeasured(_Args):
+    claim_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=200)  # model text: shown as such
+
+
 class Finish(_Args):
     entrypoint: str = Field(max_length=200)
     args: list[str] = Field(default_factory=list, max_length=20)
     expected_outputs: list[str] = Field(default_factory=list, max_length=10)
-    metric_unit: MetricUnit  # checked against the smoke values; VERDICT aligns with it
+    measures: list[Measure] = Field(min_length=1, max_length=MAX_CLAIMS_PER_JOB)
+    unmeasured: list[Unmeasured] = Field(default_factory=list, max_length=MAX_CLAIMS_PER_JOB)
 
 
 ARGS: dict[str, type[_Args]] = {
@@ -94,10 +108,11 @@ _DESCRIPTIONS = {
     "request_packages": "Ask for missing pip packages (max 5). Nothing is installed by you: "
     "deterministic code validates them and provisions again.",
     "finish": "Declare the experiment ready: the entrypoint (workspace script) passed its last "
-    "smoke run and writes the claim's metric (and baseline/<metric> for RELATIVE claims). "
-    "metric_unit says how metrics.json writes it: fraction (0.941 means 94.1%), percent (94.1, "
-    "or 0.9 for a 0.9% error rate) or raw (not a share: loss, BLEU, reward). It must fit the "
-    "smoke values.",
+    "smoke run. List every claim to test exactly once: in `measures` with the metrics.json "
+    "`key` of its value (and `baseline_key` of the baseline's value, RELATIVE claims only) and "
+    "the `unit` the values use: fraction (0.941 means 94.1%), percent (94.1, or 0.9 for a 0.9% "
+    "error rate) or raw (not a share: loss, BLEU, reward); or in `unmeasured` with a short "
+    "reason, only if the experiment truly cannot measure it. At least one claim is measured.",
 }
 TOOL_DEFS = [
     ToolDef(name=name, description=_DESCRIPTIONS[name], parameters=model.model_json_schema())

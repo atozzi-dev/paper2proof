@@ -1,25 +1,44 @@
 {
-  "schema": "p2p.results/v1",
+  "schema": "p2p.results/v2",
   "run_id": "r_01jb7z00000000000000000000",
   "attempt": 1,
-  "claim_ref": "c1",
-  "claim_type": "RELATIVE",
-  "metric": "top1_accuracy",
-  "higher_is_better": true,
   "scale": {"full": false, "fraction_of_data": 0.1, "epochs": 5, "paper_epochs": 200},
-  "per_seed": [
-    {"seed": 0, "value": 0.921, "ok": true},
-    {"seed": 1, "value": 0.919, "ok": true},
-    {"seed": 2, "value": null, "ok": false}
+  "claims": [
+    {
+      "claim_ref": "c1",
+      "claim_type": "RELATIVE",
+      "metric": "top1_accuracy",
+      "metric_key": "method/top1_accuracy",
+      "higher_is_better": true,
+      "per_seed": [
+        {"seed": 0, "value": 0.921, "ok": true},
+        {"seed": 1, "value": 0.919, "ok": true},
+        {"seed": 2, "value": null, "ok": false}
+      ],
+      "baseline": {
+        "name": "resnet18",
+        "key": "resnet18/top1_accuracy",
+        "per_seed": [
+          {"seed": 0, "value": 0.901},
+          {"seed": 1, "value": 0.902},
+          {"seed": 2, "value": null}
+        ]
+      }
+    },
+    {
+      "claim_ref": "c2",
+      "claim_type": "ABSOLUTE",
+      "metric": "top1_accuracy",
+      "metric_key": "method/top1_accuracy",
+      "higher_is_better": true,
+      "per_seed": [
+        {"seed": 0, "value": 0.921, "ok": true},
+        {"seed": 1, "value": 0.919, "ok": true},
+        {"seed": 2, "value": null, "ok": false}
+      ],
+      "baseline": null
+    }
   ],
-  "baseline": {
-    "name": "resnet18",
-    "per_seed": [
-      {"seed": 0, "value": 0.901},
-      {"seed": 1, "value": 0.902},
-      {"seed": 2, "value": null}
-    ]
-  },
   "wall_clock_s": 812.4,
   "gpu": "NVIDIA L40S",
   "exit_reason": "experiment_error"

@@ -1,5 +1,6 @@
 """The bundle in the run: built at the end of VERDICT, served by GET /api/runs/{id}/bundle."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -56,13 +57,18 @@ async def test_verdict_builds_a_signed_bundle(store: Store, tmp_path: Path) -> N
     artifacts, bundles, warnings = await _verdict_with(store, tmp_path, signer)
     assert warnings == []
     doc = artifacts.get_json(f"runs/{RUN}/verdict.json")
-    assert doc["attempt"] == 1 and doc["claim"]["id"] == "c1"
-    assert "### Limitations" in doc["explanation_md"]
+    decided = doc["verdicts"][0]
+    assert doc["attempt"] == 1 and decided["claim"]["id"] == "c1"
+    assert "### Limitations" in decided["explanation_md"]
     stored = await bundles.get(RUN)
     assert stored is not None
     files = read_archive(stored)
     assert verify_files(files, (await signer.public_key_pem()).encode()) == []
-    assert files["explanation.md"].decode() == doc["explanation_md"]
+    assert files["explanation.md"].decode() == f"## Claim c1\n\n{decided['explanation_md']}"
+    manifest = json.loads(files["MANIFEST.json"])
+    assert manifest["schema"] == "p2p.bundle/v2"
+    assert manifest["verdicts"] == {"c1": decided["verdict"]["kind"]}
+    assert "explanation_md" not in json.loads(files["verdict.json"])["verdicts"][0]
 
 
 async def test_an_unsigned_bundle_is_a_warning(store: Store, tmp_path: Path) -> None:

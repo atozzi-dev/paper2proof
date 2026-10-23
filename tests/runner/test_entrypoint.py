@@ -48,6 +48,10 @@ if a.mode == "longlines":
     print("z" * 5_000, file=sys.stderr, flush=True)
     sys.stdout.buffer.write(b"\\xff\\xfe not utf-8\\n"); sys.stdout.flush()
 os.makedirs(a.out, exist_ok=True)
+if a.mode == "devzero":  # an endless "file": the runner must not read it
+    os.symlink("/dev/zero", os.path.join(a.out, "metrics.json")); raise SystemExit(0)
+if a.mode == "fifo":  # a read that would block until the watchdog
+    os.mkfifo(os.path.join(a.out, "metrics.json")); raise SystemExit(0)
 metrics = {"top1_accuracy": 0.90 + a.seed / 100, "baseline/top1_accuracy": 0.88 + a.seed / 100}
 if a.mode == "nan":
     metrics["top1_accuracy"] = float("nan")
@@ -91,7 +95,7 @@ def _setup(
     (tmp_path / "workspace.tar").write_bytes(workspace)
     results = tmp_path / "results"
     manifest = {
-        "schema": "p2p.manifest/v1",
+        "schema": "p2p.manifest/v2",
         "run_id": "r_01jb7z00000000000000000000",
         "attempt": 1,
         "image_digest": "sha256:" + "0" * 64,
@@ -107,11 +111,7 @@ def _setup(
             "cache": str(tmp_path / "cache"),
             "results": str(results),
         },
-        "claim_ref": "c1",
-        "metric": "top1_accuracy",
-        "higher_is_better": True,
-        "claim_type": "RELATIVE",
-        "baseline_name": "resnet18",
+        "claims": [RELATIVE_C1],
         "scale": {"full": False, "fraction_of_data": 0.1, "epochs": 2, "paper_epochs": 200},
         "archives": {"overlay": "a" * 64, "repo": None, "data": []},
         "workspace_sha256": hashlib.sha256(workspace).hexdigest(),
@@ -121,6 +121,25 @@ def _setup(
     path.write_text(json.dumps(manifest))
     return path, results
 
+
+RELATIVE_C1: dict[str, Any] = {
+    "claim_ref": "c1",
+    "claim_type": "RELATIVE",
+    "metric": "top1_accuracy",
+    "higher_is_better": True,
+    "metric_key": "top1_accuracy",
+    "baseline_name": "resnet18",
+    "baseline_key": "baseline/top1_accuracy",
+}
+ABSOLUTE_C2: dict[str, Any] = {
+    "claim_ref": "c2",
+    "claim_type": "ABSOLUTE",
+    "metric": "top1_accuracy",
+    "higher_is_better": True,
+    "metric_key": "top1_accuracy",
+    "baseline_name": None,
+    "baseline_key": None,
+}
 
 EXTRACTED: list[tuple[str, str]] = []
 
@@ -158,9 +177,9 @@ def test_three_seeds_produce_valid_results(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path)
     assert _run(manifest, tmp_path) == 0
     data = _results(results)
-    assert [s["seed"] for s in data["per_seed"]] == [0, 1, 2]
-    assert [s["value"] for s in data["per_seed"]] == pytest.approx([0.90, 0.91, 0.92])
-    assert all(s["ok"] for s in data["per_seed"])
+    assert [s["seed"] for s in data["claims"][0]["per_seed"]] == [0, 1, 2]
+    assert [s["value"] for s in data["claims"][0]["per_seed"]] == pytest.approx([0.90, 0.91, 0.92])
+    assert all(s["ok"] for s in data["claims"][0]["per_seed"])
     assert data["exit_reason"] == "completed"
     assert data["gpu"] == "NVIDIA L40S"
     assert (results / "seeds" / "1" / "metrics.json").is_file()
@@ -170,7 +189,7 @@ def test_three_seeds_produce_valid_results(tmp_path: Path) -> None:
 def test_relative_claims_pick_up_the_baseline(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path)
     _run(manifest, tmp_path)
-    baseline = _results(results)["baseline"]
+    baseline = _results(results)["claims"][0]["baseline"]
     assert baseline["name"] == "resnet18"
     assert [b["value"] for b in baseline["per_seed"]] == pytest.approx([0.88, 0.89, 0.90])
     assert [b["seed"] for b in baseline["per_seed"]] == [0, 1, 2]
@@ -180,7 +199,7 @@ def test_a_failing_seed_is_an_experiment_error(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path, mode="fail")
     assert _run(manifest, tmp_path) == 10
     data = _results(results)
-    seed1 = next(s for s in data["per_seed"] if s["seed"] == 1)
+    seed1 = next(s for s in data["claims"][0]["per_seed"] if s["seed"] == 1)
     assert seed1 == {"seed": 1, "value": None, "ok": False}
     assert data["exit_reason"] == "experiment_error"
 
@@ -188,7 +207,7 @@ def test_a_failing_seed_is_an_experiment_error(tmp_path: Path) -> None:
 def test_non_finite_metrics_count_as_failed_seeds(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path, mode="nan")
     assert _run(manifest, tmp_path) == 10
-    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+    assert all(s["ok"] is False for s in _results(results)["claims"][0]["per_seed"])
 
 
 def test_budget_timeout(tmp_path: Path) -> None:
@@ -249,15 +268,15 @@ def test_a_missing_overlay_or_a_broken_archive_is_a_contract_error(tmp_path: Pat
     assert _run(manifest, tmp_path / "b", extract=broken) == 30
     data = _results(results)
     assert data["exit_reason"] == "contract_error"
-    assert all(s["ok"] is False for s in data["per_seed"])
+    assert all(s["ok"] is False for s in data["claims"][0]["per_seed"])
 
 
 def test_metric_values_must_be_real_numbers(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path, mode="typed")
     assert _run(manifest, tmp_path) == 10
     data = _results(results)
-    assert [s["ok"] for s in data["per_seed"]] == [False, False, True]
-    assert [b["value"] for b in data["baseline"]["per_seed"]] == [None, None, 0.8]
+    assert [s["ok"] for s in data["claims"][0]["per_seed"]] == [False, False, True]
+    assert [b["value"] for b in data["claims"][0]["baseline"]["per_seed"]] == [None, None, 0.8]
 
 
 def test_output_is_bounded_and_decoded_leniently(tmp_path: Path) -> None:
@@ -274,7 +293,7 @@ def test_results_are_written_after_every_seed(tmp_path: Path) -> None:
     seen: list[int] = []
 
     def on_seed(done: int) -> None:
-        seen.append(sum(s["ok"] for s in _results(results)["per_seed"]))
+        seen.append(sum(s["ok"] for s in _results(results)["claims"][0]["per_seed"]))
 
     assert _run(manifest, tmp_path, on_seed=on_seed) == 0
     assert seen == [1, 2, 3]
@@ -316,7 +335,7 @@ def test_metrics_planted_before_a_seed_are_ignored(tmp_path: Path) -> None:
     planted.mkdir(parents=True)
     (planted / "metrics.json").write_text('{"top1_accuracy": 0.99}')
     assert _run(manifest, tmp_path) == 10
-    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+    assert all(s["ok"] is False for s in _results(results)["claims"][0]["per_seed"])
 
 
 def test_termination_writes_partial_results(tmp_path: Path) -> None:
@@ -329,7 +348,7 @@ def test_termination_writes_partial_results(tmp_path: Path) -> None:
     assert _run(manifest, tmp_path, on_seed=on_seed) == 20
     data = _results(results)
     assert data["exit_reason"] == "budget_timeout"
-    assert [s["ok"] for s in data["per_seed"]] == [True, False, False]
+    assert [s["ok"] for s in data["claims"][0]["per_seed"]] == [True, False, False]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
@@ -389,7 +408,7 @@ def test_safe_extraction_skips_links_and_rejects_escapes(tmp_path: Path) -> None
 def test_a_huge_integer_metric_fails_the_seed_not_the_runner(tmp_path: Path) -> None:
     manifest, results = _setup(tmp_path, mode="huge")
     assert _run(manifest, tmp_path) == 10
-    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+    assert all(s["ok"] is False for s in _results(results)["claims"][0]["per_seed"])
 
 
 def test_termination_during_extraction_writes_results(tmp_path: Path) -> None:
@@ -528,5 +547,111 @@ def test_a_planted_seed_symlink_is_removed(tmp_path: Path) -> None:
     (results / "seeds").mkdir(parents=True)
     (results / "seeds" / "0").symlink_to(elsewhere, target_is_directory=True)
     assert _run(manifest, tmp_path) == 10
-    assert all(s["ok"] is False for s in _results(results)["per_seed"])
+    assert all(s["ok"] is False for s in _results(results)["claims"][0]["per_seed"])
     assert (elsewhere / "metrics.json").exists()  # the link went, not what it pointed to
+
+
+def test_one_job_measures_every_claim_from_the_same_seeds(tmp_path: Path) -> None:
+    """Two claims read the same metrics.json: the script runs once per seed, not per claim."""
+    manifest, results = _setup(tmp_path, claims=[RELATIVE_C1, ABSOLUTE_C2])
+    assert _run(manifest, tmp_path) == 0
+    data = _results(results)
+    assert [c["claim_ref"] for c in data["claims"]] == ["c1", "c2"]
+    for claim in data["claims"]:
+        assert [s["value"] for s in claim["per_seed"]] == pytest.approx([0.90, 0.91, 0.92])
+    assert data["claims"][0]["baseline"]["key"] == "baseline/top1_accuracy"
+    assert data["claims"][1]["baseline"] is None
+    assert len(list((results / "seeds").iterdir())) == 3  # one script run per seed
+
+
+def test_a_claim_whose_key_is_missing_fails_alone(tmp_path: Path) -> None:
+    """A completed script that never writes a claim's key: that claim has no values, the
+    other claims are untouched and the job still completes."""
+    absent = {**ABSOLUTE_C2, "metric_key": "forest/top1_accuracy"}
+    manifest, results = _setup(tmp_path, claims=[RELATIVE_C1, absent])
+    assert _run(manifest, tmp_path) == 0
+    data = _results(results)
+    assert all(s["ok"] for s in data["claims"][0]["per_seed"])
+    assert [(s["value"], s["ok"]) for s in data["claims"][1]["per_seed"]] == [(None, False)] * 3
+    assert data["exit_reason"] == "completed"
+
+
+def test_a_seed_with_no_claim_value_is_an_experiment_error(tmp_path: Path) -> None:
+    absent = {**ABSOLUTE_C2, "metric_key": "forest/top1_accuracy"}
+    manifest, results = _setup(tmp_path, claims=[absent])
+    assert _run(manifest, tmp_path) == 10
+    assert _results(results)["exit_reason"] == "experiment_error"
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        [],
+        [RELATIVE_C1, RELATIVE_C1],
+        [{**RELATIVE_C1, "baseline_key": None}],
+        [{**ABSOLUTE_C2, "baseline_key": "baseline/top1_accuracy"}],
+        [{**ABSOLUTE_C2, "metric_key": "../top1_accuracy"}],
+        [ABSOLUTE_C2] * 6,
+        [{**RELATIVE_C1, "baseline_key": "top1_accuracy"}],
+    ],
+    ids=["none", "duplicate", "relative-no-key", "absolute-key", "bad-key", "too-many", "same-key"],
+)
+def test_an_invalid_claim_list_is_a_contract_error(
+    tmp_path: Path, claims: list[dict[str, Any]]
+) -> None:
+    manifest, _ = _setup(tmp_path, claims=claims)
+    assert _run(manifest, tmp_path) == 30
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and FIFOs")
+@pytest.mark.parametrize("mode", ["devzero", "fifo"])
+def test_a_metrics_file_that_is_not_a_regular_file_fails_the_seed(
+    tmp_path: Path, mode: str
+) -> None:
+    manifest, results = _setup(tmp_path, mode=mode, budget=60)
+    started = time.monotonic()
+    assert _run(manifest, tmp_path) == 10  # every seed failed, the runner did not hang
+    assert time.monotonic() - started < 30
+    assert _results(results)["exit_reason"] == "experiment_error"
+
+
+def test_a_termination_between_two_claims_never_repeats_a_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIGTERM can land while one seed's values are being recorded claim by claim."""
+    manifest, results = _setup(tmp_path, claims=[RELATIVE_C1, ABSOLUTE_C2])
+    real, calls = entrypoint._metric, []
+
+    def metric(metrics: Any, key: str) -> Any:
+        calls.append(key)
+        if len(calls) == 5:  # seed 1: c1 and its baseline recorded, c2 not yet
+            raise entrypoint.Terminated
+        return real(metrics, key)
+
+    monkeypatch.setattr(entrypoint, "_metric", metric)
+    assert _run(manifest, tmp_path) == 20
+    data = _results(results)
+    for claim in data["claims"]:
+        assert [s["seed"] for s in claim["per_seed"]] == [0, 1, 2]
+    baseline = data["claims"][0]["baseline"]["per_seed"]
+    assert [s["seed"] for s in baseline] == [0, 1, 2]
+    assert [s["ok"] for s in data["claims"][1]["per_seed"]] == [True, False, False]
+
+
+def test_a_missing_baseline_key_keeps_the_claims_values(tmp_path: Path) -> None:
+    claim = {**RELATIVE_C1, "baseline_key": "forest/top1_accuracy"}
+    manifest, results = _setup(tmp_path, claims=[claim])
+    assert _run(manifest, tmp_path) == 0
+    data = _results(results)["claims"][0]
+    assert all(s["ok"] for s in data["per_seed"])
+    assert [s["value"] for s in data["baseline"]["per_seed"]] == [None] * 3
+
+
+def test_a_claim_measured_on_some_seeds_only_still_completes(tmp_path: Path) -> None:
+    """mode typed: top1_accuracy is a real number on seed 2 only; the baseline key on all."""
+    other = {**ABSOLUTE_C2, "metric_key": "baseline/top1_accuracy"}
+    manifest, results = _setup(tmp_path, mode="typed", claims=[RELATIVE_C1, other])
+    assert _run(manifest, tmp_path) == 0
+    c1, c2 = _results(results)["claims"]
+    assert [s["ok"] for s in c1["per_seed"]] == [False, False, True]
+    assert all(s["ok"] for s in c2["per_seed"])
