@@ -13,6 +13,7 @@ except for the provision job, never for the fetch job.
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -221,7 +222,14 @@ class DevDockerBackend:
         job = self._root / "jobs" / spec.name
         shutil.rmtree(job, ignore_errors=True)
         if _lstat(job, str(job)) is not None:  # a job can lock its own files (a 0700 mkdir)
-            log.warning("%s could not be removed: its leftovers are reused", job)
+            # Ours to move even when a subdirectory is not ours to empty: a resubmit (a smoke
+            # iteration after a prune) always starts from nothing, never from old code's files.
+            trash = job.with_name(f".trash-{spec.name}-{secrets.token_hex(4)}")
+            job.rename(trash)
+            log.warning(
+                "job directory moved aside: its files could not be removed",
+                extra={"run_id": run_id, "path": str(trash)},
+            )
         _plain_dir(job)
         _plain_dir(job / "work")
         _plain_dir(job / "home")
@@ -247,7 +255,8 @@ class DevDockerBackend:
             mounts.append((local, path, "ro"))
         for source, target, mode in mounts:
             readonly = ",readonly" if mode == "ro" else ""
-            argv += ["--mount", f"type=bind,source={source.resolve()},target={target}{readonly}"]
+            # the checked path itself (under the resolved root), never re-resolved
+            argv += ["--mount", f"type=bind,source={source},target={target}{readonly}"]
         for name, value in sorted(spec.env.items()):
             argv += ["-e", f"{name}={value}"]
         argv.append(image)
@@ -403,13 +412,18 @@ class LocalRunStorage:
     def _parent_fd(self, run_id: str, parts: tuple[str, ...], key: str, create: bool) -> int | None:
         base = self._base(run_id)
         if create:
-            base.mkdir(parents=True, exist_ok=True)
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:  # a dangling link at the bucket
+                raise ValueError(f"{key} goes through a link: refused") from exc
         try:
             fd = os.open(base, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
         except FileNotFoundError:
             return None
-        except OSError as exc:  # ELOOP: the bucket itself is a link
-            raise ValueError(f"{key} goes through a link: refused") from exc
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):  # the bucket is a link
+                raise ValueError(f"{key} goes through a link: refused") from exc
+            raise ValueError(f"{key} is unreadable") from exc
         for part in parts[:-1]:
             try:
                 if create:
@@ -486,7 +500,10 @@ class LocalRunStorage:
         """The parent directory of the key, every component checked; None if it is missing."""
         current = self._base(run_id)
         if create:
-            current.mkdir(parents=True, exist_ok=True)
+            try:
+                current.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:  # a dangling link or junction at the bucket
+                raise ValueError(f"{key} goes through a link: refused") from exc
         if _lstat(current, key) is None:  # the bucket itself may be a junction: refused there
             return None
         for part in parts[:-1]:

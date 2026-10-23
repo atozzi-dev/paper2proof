@@ -575,17 +575,41 @@ async def test_the_backend_never_mounts_or_creates_through_a_link(tmp_path: Path
     assert list(elsewhere.iterdir()) == []
 
 
-async def test_a_job_directory_the_cleanup_could_not_remove_is_reused(
+async def test_a_job_directory_the_cleanup_could_not_remove_is_moved_aside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A job can lock its own files (a 0700 directory): the resubmit still starts."""
-    leftover = tmp_path / "jobs" / f"p2p-exec-{SLUG}-1" / "work"
-    leftover.mkdir(parents=True)
+    """A job can lock its own files (a 0700 directory): the resubmit starts from an empty job
+    directory, never from the files of an earlier iteration."""
+    leftover = tmp_path / "jobs" / f"p2p-exec-{SLUG}-1" / "home" / "stale.pth"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("import planted")
     monkeypatch.setattr(dev_docker.shutil, "rmtree", lambda *a, **k: None)
     docker = Docker()
     await _backend(tmp_path, docker).submit(_spec())
     assert _run_argv(docker)
-    assert "could not be removed" in caplog.text
+    assert not leftover.exists() and leftover.parent.is_dir()
+    assert [d.name.startswith(".trash-") for d in (tmp_path / "jobs").iterdir()].count(True) == 1
+    assert "moved aside" in caplog.text
+
+
+async def test_a_file_at_the_bucket_root_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "buckets").mkdir()
+    (tmp_path / "buckets" / f"p2p-run-{SLUG}").write_text("not a directory")
+    with pytest.raises(ValueError, match="not a directory"):
+        await _backend(tmp_path, Docker()).ensure_run_bucket(RUN)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows links")
+async def test_a_junction_at_the_cache_is_never_mounted(tmp_path: Path) -> None:
+    import _winapi
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _winapi.CreateJunction(str(elsewhere), str(tmp_path / "cache"))  # type: ignore[attr-defined]
+    docker = Docker()
+    with pytest.raises(ValueError, match="link"):
+        await _backend(tmp_path, docker).submit(_spec())
+    assert not [c for c in docker.calls if c[1] == "run"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="junctions are Windows links")
