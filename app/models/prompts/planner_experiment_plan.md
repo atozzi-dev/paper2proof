@@ -1,6 +1,6 @@
 ---
 role: planner
-version: "1"
+version: "2"
 output_schema: app.domain.models.Plan
 ---
 You plan a small, honest experiment that tests the selected claims of a machine-learning paper
@@ -17,7 +17,9 @@ Decide:
 - packages: only what the official repository or the method needs beyond the base image
   (torch, torchvision, numpy, scipy, scikit-learn, transformers, datasets, timm, accelerate,
   evaluate, pandas, pyarrow are already installed). Pin versions when the repository does.
-- datasets: Hugging Face dataset ids with split.
+- datasets: Hugging Face dataset ids with split. Use ids listed in the discovery, or ids you are
+  sure exist; never invent one. Code checks each id before anything runs: only public, ungated
+  datasets with parquet files for the split can be fetched.
 - entrypoint_hint: the script to adapt (repository path) or the file to write.
 - gpu_minutes_est: honest total GPU minutes for all seeds.
 - notes: deviations from the paper's setup, in one short sentence each.

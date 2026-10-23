@@ -5,6 +5,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 
+from app.discovery.hf_datasets import DatasetProblem, DatasetReport, RunCpu
 from app.domain.discovery import (
     HF_DATASET_ID,
     HF_SPLIT,
@@ -12,6 +13,7 @@ from app.domain.discovery import (
     MAX_DATASETS_BYTES,
     Discovery,
 )
+from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import ClaimType, DatasetReq, PackageReq, Plan, Scale, StepName
 from app.models.client import Message, ModelClient, Role
@@ -27,6 +29,12 @@ from app.storage.artifacts import ArtifactStore
 
 MIN_SEEDS = 3
 PackageCheck = Callable[[list[PackageReq]], Awaitable[list[PackageReq]]]
+DatasetCheck = Callable[[list[DatasetReq], RunCpu], Awaitable[DatasetReport]]
+
+
+def _problems(dropped: list[DatasetProblem]) -> str:
+    """Code-written lines; the ids already match HF_DATASET_ID (correct_plan)."""
+    return "\n".join(f"- {d.id} (split {d.split or 'train'}): {d.reason}" for d in dropped)
 
 
 def correct_plan(plan: Plan, *, selected: set[str], gpu_cap: float) -> tuple[Plan, list[str]]:
@@ -82,12 +90,14 @@ class PlanningStep:
         *,
         preemptible: bool,
         package_check: PackageCheck | None = None,
+        dataset_check: DatasetCheck | None = None,
     ) -> None:
         self._models = models
         self._artifacts = artifacts
         self._cloud = cloud
         self._preemptible = preemptible
         self._package_check = package_check
+        self._dataset_check = dataset_check
 
     async def run(self, ctx: RunContext) -> StepResult:
         claims = [c for c, selected in await ctx.store.get_claims(ctx.run_id) if selected]
@@ -111,17 +121,18 @@ class PlanningStep:
                 discovery.model_dump_json(indent=1), source="discovery", max_chars=10_000
             ),
         )
+        messages = [
+            Message(role="system", content=UNTRUSTED_NOTICE),
+            Message(role="user", content=user),
+        ]
         proposed = await self._models.structured(
-            Role.PLANNER,
-            [Message(role="system", content=UNTRUSTED_NOTICE), Message(role="user", content=user)],
-            Plan,
-            run_id=ctx.run_id,
-            step=ctx.step.value,
-            prompt=prompt.name,
+            Role.PLANNER, messages, Plan, run_id=ctx.run_id, step=ctx.step.value, prompt=prompt.name
         )
-        plan, _ = correct_plan(
-            proposed, selected={c.id for c in claims}, gpu_cap=limits.gpu_minutes
-        )
+        selected = {c.id for c in claims}
+        plan, _ = correct_plan(proposed, selected=selected, gpu_cap=limits.gpu_minutes)
+        if self._dataset_check is not None and plan.datasets:
+            history = [*messages, _said(proposed)]
+            plan = await self._fetchable(ctx, self._dataset_check, plan, history, selected)
         if self._package_check is not None:
             plan = plan.model_copy(update={"packages": await self._package_check(plan.packages)})
         else:
@@ -162,3 +173,67 @@ class PlanningStep:
         )
         target = StepName.AWAITING_APPROVAL if needs_approval else StepName.PROVISIONING
         return StepResult(next=target, output_ref=key)
+
+    async def _fetchable(
+        self,
+        ctx: RunContext,
+        check: DatasetCheck,
+        plan: Plan,
+        history: list[Message],
+        selected: set[str],
+    ) -> Plan:
+        """Datasets that cannot be fetched (a made-up id, gated, no parquet for the split, over
+        the cap) get the Planner one more try with code-written reasons; whatever still fails
+        is dropped, noted and warned about. Never a loop: one retry at most."""
+        gpu_cap = ctx.limits.per_run.gpu_minutes
+        report = await check(plan.datasets, ctx.run_cpu)
+        notes: list[str] = []
+        if report.dropped:
+            feedback = load_prompt("planner_dataset_feedback")
+            try:
+                retried = await self._models.structured(
+                    Role.PLANNER,
+                    [
+                        *history,
+                        Message(
+                            role="user", content=feedback.render(problems=_problems(report.dropped))
+                        ),
+                    ],
+                    Plan,
+                    run_id=ctx.run_id,
+                    step=ctx.step.value,
+                    prompt=feedback.name,
+                )
+            except P2PError:  # no usable second plan: keep the first, minus what cannot run
+                plan = plan.model_copy(update={"datasets": report.kept})
+            else:
+                plan, _ = correct_plan(retried, selected=selected, gpu_cap=gpu_cap)
+                kept = {d.id for d in plan.datasets}
+                notes += [
+                    f"dataset {d.id} replaced: {d.reason}"
+                    for d in report.dropped
+                    if d.id not in kept  # still planned: noted as dropped below, never as fixed
+                ]
+                report = await check(plan.datasets, ctx.run_cpu)
+                plan = plan.model_copy(update={"datasets": report.kept})
+            for d in report.dropped:
+                notes.append(f"dataset {d.id} dropped: {d.reason}")
+                await ctx.emit(
+                    EventType.WARNING,
+                    {
+                        "code": "DATASET_UNAVAILABLE",
+                        "message": f"dataset {d.id} cannot be fetched ({d.reason}): the "
+                        "experiment runs without it",
+                    },
+                )
+        if report.unchecked:
+            notes.append(
+                "datasets that could not be checked on Hugging Face (checked again at "
+                f"provisioning): {', '.join(report.unchecked)}"
+            )
+        return plan.model_copy(update={"notes": [*plan.notes, *notes]})
+
+
+def _said(plan: Plan) -> Message:
+    """The Planner's first plan, as it proposed it, for the retry's conversation."""
+    return Message(role="assistant", content=plan.model_dump_json())

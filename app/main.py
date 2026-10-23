@@ -34,6 +34,7 @@ from app.api.main import create_app
 from app.bundle.build import Bundler
 from app.bundle.sign import NebiusKmsSigner, Signer, sign_manifest
 from app.bundle.store import ArtifactBundleStore, BundleStore
+from app.discovery.hf_datasets import HfDatasets
 from app.discovery.tavily import TavilyClient
 from app.domain.errors import P2PError
 from app.domain.models import ErrorCode, PackageReq, StepName
@@ -507,6 +508,7 @@ def build_runtime(
             cloud,
             preemptible=execution.preemptible_gpu,
             package_check=package_check,
+            dataset_check=HfDatasets(store, http).check,
         ),
         StepName.AWAITING_APPROVAL: AwaitingApprovalStep(
             timeout=timedelta(minutes=limits.approval.approval_timeout_min)

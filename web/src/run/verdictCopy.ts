@@ -36,6 +36,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   DISCOVERY_DEGRADED: 'Search partly unavailable',
   ABSOLUTE_AT_REDUCED_SCALE: 'Absolute value at reduced scale',
   PACKAGE_REJECTED: 'Package rejected',
+  DATASET_UNAVAILABLE: 'Dataset unavailable',
   CLAIM_NOT_MEASURED: 'Claim not measured',
   PACKAGES_REQUESTED: 'Packages requested',
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
@@ -55,6 +56,7 @@ export function warningTitle(code: string): string {
 const DEVIATION_WARNINGS = new Set([
   'ABSOLUTE_AT_REDUCED_SCALE',
   'PACKAGE_REJECTED',
+  'DATASET_UNAVAILABLE',
   'REPO_SNAPSHOT_UNAVAILABLE',
   'JOB_PREEMPTED',
   'DISCOVERY_DEGRADED',
