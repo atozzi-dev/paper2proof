@@ -1,7 +1,8 @@
 """LocalTrustedExecutor: smoke runs in local docker, for development only.
 
 The single exception to invariant 1: it refuses to exist unless `P2P_ENV=dev`, and refuses to
-prepare a run unless the paper's sha256 is in `config/canary_allowlist.yaml` (papers we wrote).
+prepare a run unless `config/canary_allowlist.yaml` binds the paper's sha256 to the arXiv ID
+the run was submitted as (papers we wrote).
 Even then the container has no network, a read-only root, no capabilities and a non-root user.
 """
 
@@ -14,6 +15,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import yaml
 
@@ -43,13 +45,38 @@ class PaperRef:
 PaperLookup = Callable[[str], Awaitable[PaperRef | None]]
 
 
+class _RunRecord(Protocol):
+    @property
+    def arxiv_id(self) -> str: ...
+
+    @property
+    def paper_sha256(self) -> str | None: ...
+
+
+class _Runs(Protocol):
+    async def get_run(self, run_id: str) -> _RunRecord | None: ...
+
+
+def store_paper_lookup(runs: _Runs) -> PaperLookup:
+    """The run's paper as submitted (its arXiv ID) and as ingested (the sha256 INGESTING
+    computed); None until INGESTING has hashed it. The one lookup both local executors use."""
+
+    async def lookup(run_id: str) -> PaperRef | None:
+        run = await runs.get_run(run_id)
+        if run is None or run.paper_sha256 is None:
+            return None
+        return PaperRef(arxiv_id=run.arxiv_id, sha256=run.paper_sha256)
+
+    return lookup
+
+
 def is_canary(canaries: Mapping[str, str], paper: PaperRef | None) -> bool:
     """A canary only under the arXiv ID its hash is bound to: the hash alone is not enough."""
     return paper is not None and canaries.get(paper.sha256.lower()) == paper.arxiv_id
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_CANARY_ID = re.compile(r"^0000\.\d{5}$")  # month 00: never a real arXiv paper
+_CANARY_ID = re.compile(r"^0000\.\d{5}$", re.ASCII)  # month 00: never a real arXiv paper
 
 
 class LocalTrustedRefused(Exception):
@@ -57,16 +84,21 @@ class LocalTrustedRefused(Exception):
 
 
 def load_canaries(path: Path) -> dict[str, str]:
-    """{e-print sha256: canary arXiv ID}. An entry without a canary ID (0000.NNNNN) and a
-    sha256 binds nothing and is ignored."""
+    """{e-print sha256: canary arXiv ID}. A file of another shape is an error; an entry
+    without a canary ID (0000.NNNNN) and a sha256, both plain strings, binds nothing."""
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    papers = data.get("papers") if isinstance(data, dict) else None
+    if not isinstance(papers, list):
+        raise ValueError(f"{path}: the canary allowlist must be a mapping with a `papers` list")
     canaries: dict[str, str] = {}
-    for entry in data.get("papers") or []:
+    for entry in papers:
         if not isinstance(entry, dict):
             continue
-        digest, arxiv_id = str(entry.get("sha256", "")).lower(), str(entry.get("arxiv_id", ""))
-        if _SHA256.fullmatch(digest) and _CANARY_ID.fullmatch(arxiv_id):
-            canaries[digest] = arxiv_id
+        digest, arxiv_id = entry.get("sha256"), entry.get("arxiv_id")
+        if not (isinstance(digest, str) and isinstance(arxiv_id, str)):
+            continue
+        if _SHA256.fullmatch(digest.lower()) and _CANARY_ID.fullmatch(arxiv_id):
+            canaries[digest.lower()] = arxiv_id
     return canaries
 
 

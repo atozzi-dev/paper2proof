@@ -22,7 +22,7 @@ from app.ingestion.arxiv import ArxivMetadata
 
 log = logging.getLogger(__name__)
 
-CANARY_ARXIV_ID = re.compile(r"^0000\.\d{5}$")  # a subset of app.ingestion.arxiv.ARXIV_ID
+CANARY_ARXIV_ID = re.compile(r"^0000\.\d{5}$", re.ASCII)  # a subset of app.ingestion.arxiv.ARXIV_ID
 _GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"  # no flags, mtime 0, OS unknown
 _STORED_MAX = 0xFFFF
 

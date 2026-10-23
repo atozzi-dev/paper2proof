@@ -2,8 +2,8 @@
 local docker, with per-run "buckets" as directories under `root`.
 
 Like LocalTrustedExecutor, this is the one exception to invariant 1: it refuses to exist unless
-`P2P_ENV=dev`, and refuses every job of a run whose paper's sha256 is not in
-`config/canary_allowlist.yaml`. Containers keep the job's isolation: non-root (10001), no
+`P2P_ENV=dev`, and refuses every job of a run unless `config/canary_allowlist.yaml` binds its
+paper's sha256 to the run's arXiv ID. Containers keep the job's isolation: non-root (10001), no
 capabilities, no new privileges, a read-only root with private scratch space, capped memory and
 logs, a host-side kill at the watchdog, no network except for the provision and fetch jobs
 (the provisioner image, our code; locally their egress is not allowlisted as the gateway does

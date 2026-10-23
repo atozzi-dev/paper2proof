@@ -7,8 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from app.execution.local_trusted import LocalTrustedExecutor, LocalTrustedRefused, PaperRef
+from app.execution.local_trusted import (
+    LocalTrustedExecutor,
+    LocalTrustedRefused,
+    PaperRef,
+    is_canary,
+    store_paper_lookup,
+)
 from app.execution.smoke import SmokeContractError
+from app.storage.store import Store
 
 RUN = "r_01jb7z00000000000000000000"
 CANARY = "a" * 64
@@ -171,3 +178,24 @@ async def test_refuses_a_canary_hash_under_another_arxiv_id(tmp_path: Path) -> N
     )
     with pytest.raises(LocalTrustedRefused):
         await executor.prepare(RUN, {"train.py": b"print(1)"})
+
+
+async def test_the_store_lookup_gives_the_submitted_id_and_the_ingested_hash(
+    store: Store,
+) -> None:
+    """The one lookup both local executors use (app/main.py, smoke_factory): the gate's input
+    comes from the run as submitted and as ingested, never from the allowlist."""
+    runs = {
+        "r_01jb7z00000000000000000001": ("0000.00001", CANARY),  # a canary: accepted
+        "r_01jb7z00000000000000000002": ("2106.09685", CANARY),  # its bytes, another ID
+        "r_01jb7z00000000000000000003": ("0000.00001", None),  # not ingested yet
+    }
+    for run_id, (arxiv_id, digest) in runs.items():
+        await store.create_run(run_id, arxiv_id, created_by=None, claim_hint=None, budget={})
+        if digest is not None:
+            await store.set_paper_sha256(run_id, digest)
+    lookup = store_paper_lookup(store)
+    canaries = {CANARY: "0000.00001"}
+    verdicts = [is_canary(canaries, await lookup(run_id)) for run_id in runs]
+    assert verdicts == [True, False, False]
+    assert await lookup("r_01jb7z00000000000000000009") is None

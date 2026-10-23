@@ -216,6 +216,26 @@ def test_allowlist_entries_without_a_valid_id_or_hash_are_ignored(tmp_path: Path
     assert load_canaries(allowlist) == {"a" * 64: "0000.00001"}
 
 
+def test_allowlist_values_must_be_plain_ascii_strings(tmp_path: Path) -> None:
+    allowlist = tmp_path / "canary_allowlist.yaml"
+    allowlist.write_text(
+        "papers:\n"
+        f"  - {{arxiv_id: 0000.00001, sha256: {'a' * 64}}}\n"  # unquoted: a float, not an ID
+        f"  - {{arxiv_id: '0000.0000{chr(0xFF11)}', sha256: {'b' * 64}}}\n"  # fullwidth 1
+        "  - {arxiv_id: '0000.00003', sha256: [1, 2]}\n",
+        encoding="utf-8",
+    )
+    assert load_canaries(allowlist) == {}
+
+
+@pytest.mark.parametrize("text", ["- a\n", "papers: 5\n", "papers: {a: b}\n"])
+def test_a_malformed_allowlist_is_an_error_not_an_empty_list(tmp_path: Path, text: str) -> None:
+    allowlist = tmp_path / "canary_allowlist.yaml"
+    allowlist.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="canary allowlist"):
+        load_canaries(allowlist)
+
+
 def test_check_reports_a_stale_allowlist(tmp_path: Path) -> None:
     stale = tmp_path / "canary_allowlist.yaml"
     stale.write_text(

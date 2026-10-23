@@ -117,7 +117,7 @@ def source_sha256(canary: Canary) -> str:
 
 def render_allowlist(canaries: list[Canary]) -> str:
     lines = [
-        f'  - {{arxiv_id: "{c.truth.arxiv_id}", sha256: {source_sha256(c)}}}  # {c.name}'
+        f'  - {{arxiv_id: "{c.truth.arxiv_id}", sha256: "{source_sha256(c)}"}}  # {c.name}'
         for c in canaries
     ]
     return _ALLOWLIST_HEADER + "papers:\n" + "".join(f"{line}\n" for line in lines)

@@ -12,5 +12,8 @@
 /app/execution/local_trusted.py @atozzi-dev
 /app/execution/dev_docker.py @atozzi-dev
 /app/execution/smoke_factory.py @atozzi-dev
+# Which bytes a 0000.NNNNN ID gets, and the hash the gates compare.
+/app/ingestion/canaries.py @atozzi-dev
+/app/orchestrator/steps/ingesting.py @atozzi-dev
 /tests/ci/test_codeowners.py @atozzi-dev
 /.github/CODEOWNERS @atozzi-dev

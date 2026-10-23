@@ -24,6 +24,9 @@ def test_the_canary_allowlist_and_papers_need_a_code_owner_review() -> None:
         "/eval/canaries/",
         "/app/execution/local_trusted.py",
         "/app/execution/dev_docker.py",
+        "/app/execution/smoke_factory.py",
+        "/app/ingestion/canaries.py",  # which bytes a 0000.NNNNN ID gets
+        "/app/orchestrator/steps/ingesting.py",  # computes the hash the gates compare
         "/.github/CODEOWNERS",
     )
     for pattern in guarded:
