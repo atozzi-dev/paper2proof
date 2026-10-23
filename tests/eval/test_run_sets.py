@@ -395,3 +395,45 @@ async def test_a_failed_run_records_only_the_exception_type() -> None:
     info, run = await attempt(Leaky(), "2410.01234")
     assert run is None and info.error == "HTTPError"
     assert "invite" not in info.model_dump_json()
+
+
+@respx.mock
+async def test_http_pipeline_keeps_the_session_against_a_local_dev_backend() -> None:
+    """`make dev` serves plain http on localhost, and the session cookie is `__Host-` (Secure):
+    httpx would never send it back, so every run was refused with 401 (set A, 2026-10-23)."""
+    local = "http://localhost:8000"
+    cookie = "__Host-p2p_session=sess-not-real; Path=/; Secure; HttpOnly; SameSite=Strict"
+    respx.post(f"{local}/api/session").mock(
+        return_value=httpx.Response(204, headers={"set-cookie": cookie})
+    )
+
+    def create(request: httpx.Request) -> httpx.Response:
+        if "__Host-p2p_session=sess-not-real" not in request.headers.get("cookie", ""):
+            return httpx.Response(401, json={"error": "no session"})
+        return httpx.Response(202, json={"run_id": RUN, "events_url": f"/api/runs/{RUN}/events"})
+
+    respx.post(f"{local}/api/runs").mock(side_effect=create)
+    respx.get(f"{local}/api/runs/{RUN}").mock(
+        return_value=httpx.Response(200, json=_view("COMPLETED", done=True))
+    )
+    respx.get(f"{local}/api/runs/{RUN}/events.json").mock(
+        return_value=httpx.Response(200, json=_events())
+    )
+    async with httpx.AsyncClient(base_url=local) as http:
+        pipeline = HttpPipeline(http, SecretStr("invite-not-real"), approve=True, sleep=Sleeps())
+        run = await pipeline.run("0000.00001")
+    assert run.status is RunStatus.COMPLETED
+
+
+async def test_an_http_status_failure_records_the_status_code_too() -> None:
+    """`HTTPStatusError` alone hid the 401 of set A (2026-10-23); the code is safe to keep."""
+
+    class Refused:
+        async def run(self, arxiv_id: str, *, claim_hint: str | None = None) -> PipelineRun:
+            request = httpx.Request("POST", "http://localhost:8000/api/runs")
+            response = httpx.Response(401, request=request, json={"error": "invite-not-real"})
+            raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+    info, run = await attempt(Refused(), "0000.00001")
+    assert run is None and info.error == "HTTPStatusError 401"
+    assert "invite" not in info.model_dump_json()
