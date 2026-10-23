@@ -23,6 +23,7 @@ from eval.results import RunInfo
 
 RUN_ID = re.compile(RUN_ID_PATTERN)
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")  # invariant 11
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})  # plain http is allowed only here
 
 
 class PipelineClaim(BaseModel):
@@ -77,6 +78,13 @@ class HttpPipeline:
             "/api/session", json={"invite_code": self._invite.get_secret_value()}
         )
         response.raise_for_status()
+        url = self._http.base_url
+        if url.scheme == "http" and url.host in _LOCAL_HOSTS:
+            # `make dev` is plain http: httpx never sends the Secure `__Host-` session cookie
+            # back there, while a browser does on localhost. Send it as a header instead.
+            session = "; ".join(f"{name}={value}" for name, value in response.cookies.items())
+            if session:
+                self._http.headers["cookie"] = session
         self._logged_in = True
 
     async def _view(self, run_id: str) -> RunView:
@@ -187,11 +195,15 @@ async def attempt(
     pipeline: Pipeline, arxiv_id: str, *, claim_hint: str | None = None
 ) -> tuple[RunInfo, PipelineRun | None]:
     """Run one paper; a harness failure (network, timeout) is recorded, not raised, so one bad
-    paper never loses the rest of the set. Only the exception type is kept."""
+    paper never loses the rest of the set. Only the exception type is kept, plus the status
+    code of an HTTP error (never a message or a body: they may echo the invite)."""
     try:
         run = await pipeline.run(arxiv_id, claim_hint=claim_hint)
     except Exception as err:
-        return RunInfo(run_id=None, status=None, error=type(err).__name__), None
+        error = type(err).__name__
+        if isinstance(err, httpx.HTTPStatusError):
+            error += f" {err.response.status_code}"
+        return RunInfo(run_id=None, status=None, error=error), None
     info = RunInfo(
         run_id=run.run_id,
         status=run.status,
