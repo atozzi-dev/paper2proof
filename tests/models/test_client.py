@@ -524,3 +524,23 @@ async def test_a_retry_refused_on_dollars_releases_its_token_reservations(
         await client.complete(Role.UTILITY, USER, run_id=RUN)
     assert route.call_count == 1
     assert client.budget._inflight == {}
+
+
+@respx.mock
+async def test_a_cancel_in_the_backoff_charges_only_the_attempts_made(
+    store: Store, client: TokenFactoryClient, sleeps: Sleeps
+) -> None:
+    """No request is in flight during the backoff: one 503 costs one input, not two."""
+    await _run(store)
+    other = "r_01jb7z00000000000000000009"
+    await store.create_run(other, "2106.09685", created_by=None, claim_hint=None, budget={})
+    route = respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(503, json={}))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=other)  # four 503s, no fallback
+    assert route.call_count == 4
+    sleeps.interrupt = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)  # one 503, then cancelled
+    one = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    four = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
+    assert one > 0 and one * 4 == four

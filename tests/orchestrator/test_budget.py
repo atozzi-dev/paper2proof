@@ -265,3 +265,52 @@ async def test_a_failing_cost_update_never_fails_the_commit(
     monkeypatch.setattr(store, "append_event", broken)
     await budget.commit(await budget.check_and_reserve(RUN, SpendKind.CLOUD_USD, 1.0), 0.4)
     assert await budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(0.4)
+
+
+async def test_settle_books_each_actual_once_and_releases_the_rest(store: Store) -> None:
+    """A retried model call holds one reservation per attempt and kind: the actual is booked
+    once per kind, the other reservations are released at 0."""
+    await _runs(store)
+    budget = _budget(store)
+    held = [
+        await budget.check_and_reserve(RUN, kind, 100.0)
+        for _ in range(2)
+        for kind in (SpendKind.TOKENS_IN, SpendKind.TOKENS_OUT)
+    ]
+    await budget.settle(held, {SpendKind.TOKENS_IN: 30.0, SpendKind.TOKENS_OUT: 7.0})
+    assert await budget.run_spend(RUN, SpendKind.TOKENS_IN) == 30.0
+    assert await budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 7.0
+    assert budget._inflight == {}
+
+
+async def test_settle_without_actuals_books_each_reservation_in_full(store: Store) -> None:
+    await _runs(store)
+    budget = _budget(store)
+    held = [await budget.check_and_reserve(RUN, SpendKind.TOKENS_IN, n) for n in (10.0, 5.0)]
+    await budget.settle(held)
+    assert await budget.run_spend(RUN, SpendKind.TOKENS_IN) == 15.0
+
+
+async def test_settle_goes_on_past_a_failed_write_and_raises_it(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _runs(store)
+    budget = _budget(store)
+    held = [
+        await budget.check_and_reserve(RUN, kind, 100.0)
+        for _ in range(2)
+        for kind in (SpendKind.TOKENS_IN, SpendKind.TOKENS_OUT)
+    ]
+    real, failed = store.add_ledger_entry, []
+
+    async def first_fails(*args: object, **kwargs: object) -> None:
+        if not failed:
+            failed.append(args)
+            raise OSError("disk full")
+        await real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "add_ledger_entry", first_fails)
+    with pytest.raises(OSError, match="disk full"):
+        await budget.settle(held, {SpendKind.TOKENS_IN: 30.0, SpendKind.TOKENS_OUT: 7.0})
+    assert await budget.run_spend(RUN, SpendKind.TOKENS_IN) == 30.0  # carried to the next one
+    assert budget._inflight == {}

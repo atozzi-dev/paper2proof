@@ -343,12 +343,10 @@ class BatchRunner:
             SpendKind.TOKENS_OUT: float(tokens_out),
             SpendKind.INFERENCE_USD: usd,
         }
-        for reservation in reservations:
-            await self.budget.commit(reservation, actual[reservation.kind])
+        await self.budget.settle(reservations, actual)
 
     async def _settle_in_full(self, reservations: list[Reservation]) -> None:
-        for reservation in reservations:
-            await self.budget.commit(reservation, reservation.amount)
+        await self.budget.settle(reservations)
 
     async def _wait(self, batch: Batch) -> Batch:
         waited = 0.0
