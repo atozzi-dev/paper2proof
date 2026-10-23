@@ -2,8 +2,8 @@
 local docker, with per-run "buckets" as directories under `root`.
 
 Like LocalTrustedExecutor, this is the one exception to invariant 1: it refuses to exist unless
-`P2P_ENV=dev`, and refuses every job of a run whose paper's sha256 is not in
-`config/canary_allowlist.yaml`. Containers keep the job's isolation: non-root (10001), no
+`P2P_ENV=dev`, and refuses every job of a run unless `config/canary_allowlist.yaml` binds its
+paper's sha256 to the run's arXiv ID. Containers keep the job's isolation: non-root (10001), no
 capabilities, no new privileges, a read-only root with private scratch space, capped memory and
 logs, a host-side kill at the watchdog, no network except for the provision and fetch jobs
 (the provisioner image, our code; locally their egress is not allowlisted as the gateway does
@@ -23,12 +23,18 @@ import secrets
 import shutil
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.execution.backend import CACHE_BUCKET, CACHE_MOUNT, JobHandle, JobKind, JobSpec, JobState
-from app.execution.local_trusted import DockerRunner, LocalTrustedRefused, PaperHash, docker_cli
+from app.execution.local_trusted import (
+    DockerRunner,
+    LocalTrustedRefused,
+    PaperLookup,
+    docker_cli,
+    is_canary,
+)
 from app.execution.naming import bucket_name
 from app.execution.run_storage import MAX_READ_BYTES
 
@@ -88,8 +94,8 @@ class DevDockerBackend:
         self,
         *,
         env: str,
-        canaries: frozenset[str],
-        paper_sha256: PaperHash,
+        canaries: Mapping[str, str],
+        paper: PaperLookup,
         root: Path,
         docker: DockerRunner = docker_cli,
         host_uid: int | None = _host_uid(),
@@ -98,7 +104,7 @@ class DevDockerBackend:
         if env != "dev":
             raise LocalTrustedRefused("the local docker job backend runs only with P2P_ENV=dev")
         self._canaries = canaries
-        self._paper_sha256 = paper_sha256
+        self._paper = paper
         self._root = root.resolve()
         if any(c in str(self._root) for c in ',"\n'):
             raise ValueError(f"{self._root}: docker --mount cannot take this path")
@@ -209,8 +215,7 @@ class DevDockerBackend:
 
     async def submit(self, spec: JobSpec) -> JobHandle:
         run_id = self._checked(spec)
-        digest = await self._paper_sha256(run_id)
-        if digest is None or digest.lower() not in self._canaries:
+        if not is_canary(self._canaries, await self._paper(run_id)):
             raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
         image = local_image(spec.image_digest_ref)
         existing = await self._inspect(spec.name)

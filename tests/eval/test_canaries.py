@@ -19,7 +19,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.domain.models import ClaimType, VerdictKind
-from app.execution.local_trusted import LocalTrustedExecutor, LocalTrustedRefused, load_canaries
+from app.execution.local_trusted import (
+    LocalTrustedExecutor,
+    LocalTrustedRefused,
+    PaperRef,
+    load_canaries,
+)
 from app.ingestion.archive import extract_source
 from app.ingestion.arxiv import ARXIV_ID
 from app.orchestrator.steps.ingesting import _parse
@@ -191,14 +196,51 @@ def test_ingesting_hashes_the_same_bytes_and_finds_the_results_table() -> None:
         assert paper.tables, f"{canary.name}: no table parsed"
 
 
-def test_allowlist_holds_exactly_the_canary_hashes() -> None:
-    assert load_canaries(build.ALLOWLIST) == {build.source_sha256(c) for c in CANARIES}
+def test_allowlist_binds_each_canary_hash_to_its_arxiv_id() -> None:
+    assert load_canaries(build.ALLOWLIST) == {
+        build.source_sha256(c): c.truth.arxiv_id for c in CANARIES
+    }
     assert build.check() == []
+
+
+def test_allowlist_entries_without_a_valid_id_or_hash_are_ignored(tmp_path: Path) -> None:
+    allowlist = tmp_path / "canary_allowlist.yaml"
+    allowlist.write_text(
+        "papers:\n"
+        f"  - {{arxiv_id: '0000.00001', sha256: {'a' * 64}}}\n"
+        f"  - {{arxiv_id: '2106.09685', sha256: {'b' * 64}}}\n"  # a real arXiv ID: never a canary
+        "  - {arxiv_id: '0000.00002', sha256: nothex}\n"
+        f"  - {'c' * 64}\n",  # the old hash-only form binds nothing
+        encoding="utf-8",
+    )
+    assert load_canaries(allowlist) == {"a" * 64: "0000.00001"}
+
+
+def test_allowlist_values_must_be_plain_ascii_strings(tmp_path: Path) -> None:
+    allowlist = tmp_path / "canary_allowlist.yaml"
+    allowlist.write_text(
+        "papers:\n"
+        f"  - {{arxiv_id: 0000.00001, sha256: {'a' * 64}}}\n"  # unquoted: a float, not an ID
+        f"  - {{arxiv_id: '0000.0000{chr(0xFF11)}', sha256: {'b' * 64}}}\n"  # fullwidth 1
+        "  - {arxiv_id: '0000.00003', sha256: [1, 2]}\n",
+        encoding="utf-8",
+    )
+    assert load_canaries(allowlist) == {}
+
+
+@pytest.mark.parametrize("text", ["- a\n", "papers: 5\n", "papers: {a: b}\n"])
+def test_a_malformed_allowlist_is_an_error_not_an_empty_list(tmp_path: Path, text: str) -> None:
+    allowlist = tmp_path / "canary_allowlist.yaml"
+    allowlist.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="canary allowlist"):
+        load_canaries(allowlist)
 
 
 def test_check_reports_a_stale_allowlist(tmp_path: Path) -> None:
     stale = tmp_path / "canary_allowlist.yaml"
-    stale.write_text("papers:\n  - " + "a" * 64 + "\n", encoding="utf-8")
+    stale.write_text(
+        f"papers:\n  - {{arxiv_id: '0000.00001', sha256: {'a' * 64}}}\n", encoding="utf-8"
+    )
     problems = build.check(stale)
     assert any("missing" in p for p in problems)
     assert any("unknown" in p for p in problems)
@@ -214,34 +256,41 @@ def test_write_allowlist_round_trips(tmp_path: Path) -> None:
 async def test_local_trusted_executor_accepts_a_canary_and_refuses_anything_else(
     tmp_path: Path,
 ) -> None:
-    hashes = {RUN: build.source_sha256(CANARIES[0])}
+    canary = CANARIES[0]
+    papers = {RUN: PaperRef(arxiv_id=canary.truth.arxiv_id, sha256=build.source_sha256(canary))}
 
-    async def paper_sha256(run_id: str) -> str | None:
-        return hashes.get(run_id)
+    async def lookup(run_id: str) -> PaperRef | None:
+        return papers.get(run_id)
 
     executor = LocalTrustedExecutor(
         env="dev",
         canaries=load_canaries(build.ALLOWLIST),
-        paper_sha256=paper_sha256,
+        paper=lookup,
         image=IMAGE,
         work_root=tmp_path,
     )
     assert await executor.prepare(RUN, {"train.py": b"print(1)"}) == RUN
-    hashes[RUN] = "b" * 64
+    papers[RUN] = PaperRef(arxiv_id=canary.truth.arxiv_id, sha256="b" * 64)
+    with pytest.raises(LocalTrustedRefused):
+        await executor.prepare(RUN, {"train.py": b"print(1)"})
+    other = "9999.99999"  # the canary's own bytes under another ID: refused too
+    papers[RUN] = PaperRef(arxiv_id=other, sha256=build.source_sha256(canary))
+    executor._approved.clear()
     with pytest.raises(LocalTrustedRefused):
         await executor.prepare(RUN, {"train.py": b"print(1)"})
 
 
 @pytest.mark.parametrize("env", ["prod", "test"])
 async def test_the_allowlist_never_runs_canary_code_outside_dev(tmp_path: Path, env: str) -> None:
-    async def paper_sha256(run_id: str) -> str | None:
-        return build.source_sha256(CANARIES[0])
+    async def lookup(run_id: str) -> PaperRef | None:
+        canary = CANARIES[0]
+        return PaperRef(arxiv_id=canary.truth.arxiv_id, sha256=build.source_sha256(canary))
 
     with pytest.raises(LocalTrustedRefused):
         LocalTrustedExecutor(
             env=env,
             canaries=load_canaries(build.ALLOWLIST),
-            paper_sha256=paper_sha256,
+            paper=lookup,
             image=IMAGE,
             work_root=tmp_path,
         )

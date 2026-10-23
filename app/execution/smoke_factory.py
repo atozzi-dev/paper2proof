@@ -16,7 +16,7 @@ from pydantic import SecretStr
 from app.domain.contracts import ArchiveDigests
 from app.execution.config import ExecutionConfig
 from app.execution.job_smoke import SMOKE_PLATFORM, SMOKE_PRESET, JobSmokeExecutor
-from app.execution.local_trusted import LocalTrustedExecutor, load_canaries
+from app.execution.local_trusted import LocalTrustedExecutor, load_canaries, store_paper_lookup
 from app.execution.run_storage import RunStorage
 from app.execution.sandboxes import SandboxesSmokeExecutor
 from app.execution.smoke import FallbackSmokeExecutor, SmokeExecutor
@@ -58,15 +58,10 @@ def build_smoke_executor(
 ) -> SmokeExecutor:
     jobs = JobSmokeExecutor(ctx, archives=archives, storage=storage, config=config, cloud=cloud)
     if options.kind == "local":
-
-        async def paper_sha256(run_id: str) -> str | None:
-            run = await ctx.store.get_run(run_id)
-            return run.paper_sha256 if run else None
-
         return LocalTrustedExecutor(
             env=options.env,
             canaries=load_canaries(options.canary_allowlist),
-            paper_sha256=paper_sha256,
+            paper=store_paper_lookup(ctx.store),
             image=config.runner_cpu_image,
             work_root=options.work_root,
         )

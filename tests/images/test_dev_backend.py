@@ -10,6 +10,7 @@ import pytest
 
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.dev_docker import DevDockerBackend
+from app.execution.local_trusted import PaperRef
 
 pytestmark = pytest.mark.docker
 RUN = "r_01jb7z00000000000000000000"
@@ -33,11 +34,11 @@ def _image_id(image: str) -> str:
 async def test_a_job_without_its_manifest_runs_and_fails_in_local_docker(tmp_path: Path) -> None:
     image = _image_id("p2p-runner-cpu:dev")
 
-    async def paper_sha256(run_id: str) -> str | None:
-        return CANARY if run_id == RUN else None
+    async def lookup(run_id: str) -> PaperRef | None:
+        return PaperRef(arxiv_id="0000.00001", sha256=CANARY) if run_id == RUN else None
 
     backend = DevDockerBackend(
-        env="dev", canaries=frozenset({CANARY}), paper_sha256=paper_sha256, root=tmp_path
+        env="dev", canaries={CANARY: "0000.00001"}, paper=lookup, root=tmp_path
     )
     name = f"p2p-smoke-{SLUG}-1"
     spec = JobSpec(

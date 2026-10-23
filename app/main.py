@@ -41,7 +41,7 @@ from app.execution.backend import JobBackend
 from app.execution.config import ExecutionConfig
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
-from app.execution.local_trusted import load_canaries
+from app.execution.local_trusted import load_canaries, store_paper_lookup
 from app.execution.nebius_backend import build_nebius_execution
 from app.execution.package_policy import (
     PackagePolicy,
@@ -112,15 +112,11 @@ def dev_adapters(settings: Settings) -> Adapters:
         return Adapters(FakeJobBackend(), FakeRunStorage(), artifacts, bundles)
     store = Store(make_engine(settings.db_url))
 
-    async def paper_sha256(run_id: str) -> str | None:
-        run = await store.get_run(run_id)
-        return run.paper_sha256 if run else None
-
     root = settings.p2p_var_dir / "jobs"
     jobs = DevDockerBackend(
         env=settings.p2p_env,
         canaries=load_canaries(settings.config_dir / "canary_allowlist.yaml"),
-        paper_sha256=paper_sha256,
+        paper=store_paper_lookup(store),
         root=root,
     )
     return Adapters(jobs, LocalRunStorage(root), artifacts, bundles)

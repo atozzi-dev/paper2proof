@@ -194,8 +194,8 @@ make dev-images-env >> .env   # P2P_JOB_BACKEND=docker and the local images by i
 make dev
 ```
 
-Only papers whose sha256 is in `config/canary_allowlist.yaml` get a job: the jobs of any other
-run are refused. Jobs run as uid 10001 with no capabilities, a read-only root, capped memory
+Only canary papers get a job: `config/canary_allowlist.yaml` binds each one's sha256 to its
+`0000.NNNNN` arXiv ID, and the jobs of any other run are refused. Jobs run as uid 10001 with no capabilities, a read-only root, capped memory
 and logs, a kill at their watchdog, and no network. The exception is the provisioner, which
 runs our code on docker's default network: unlike the cloud gateway, its egress is not
 allowlisted. Each run's bucket is a directory under `var/jobs/buckets/`. Executing

@@ -22,7 +22,7 @@ from app.ingestion.arxiv import ArxivMetadata
 
 log = logging.getLogger(__name__)
 
-CANARY_ARXIV_ID = re.compile(r"^0000\.\d{5}$")  # a subset of app.ingestion.arxiv.ARXIV_ID
+CANARY_ARXIV_ID = re.compile(r"^0000\.\d{5}$", re.ASCII)  # a subset of app.ingestion.arxiv.ARXIV_ID
 _GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"  # no flags, mtime 0, OS unknown
 _STORED_MAX = 0xFFFF
 
@@ -74,7 +74,7 @@ class CanaryPapers:
 
 def load_canary_papers(root: Path, allowlist: Path) -> CanaryPapers:
     """Every `<root>/<name>/{truth.yaml,paper.tex}` whose e-print hash is allowlisted."""
-    allowed = load_canaries(allowlist) if allowlist.is_file() else frozenset()
+    allowed = load_canaries(allowlist) if allowlist.is_file() else {}
     papers: dict[str, tuple[str, bytes]] = {}
     for truth_path in sorted(root.glob("*/truth.yaml")) if root.is_dir() else []:
         paper = truth_path.with_name("paper.tex")
@@ -88,7 +88,7 @@ def load_canary_papers(root: Path, allowlist: Path) -> CanaryPapers:
         if not CANARY_ARXIV_ID.fullmatch(arxiv_id):
             log.warning("canary skipped: not a 0000.000NN ID", extra={"arxiv_id": arxiv_id})
             continue
-        if hashlib.sha256(data).hexdigest() not in allowed:
+        if allowed.get(hashlib.sha256(data).hexdigest()) != arxiv_id:  # bound to its ID
             log.warning("canary skipped: not in the allowlist", extra={"arxiv_id": arxiv_id})
             continue
         papers[arxiv_id] = (title, data)

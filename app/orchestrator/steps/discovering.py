@@ -9,6 +9,7 @@
 """
 
 import asyncio
+from collections.abc import Mapping
 from datetime import timedelta
 
 import httpx
@@ -20,6 +21,7 @@ from app.domain.discovery import HF_DATASET_ID, Discovery, RepoRef
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import DatasetReq, StepName
+from app.execution.local_trusted import PaperRef, is_canary
 from app.ingestion.arxiv import ArxivClient, ArxivMetadata
 from app.models.client import ModelClient
 from app.orchestrator.budget import BudgetExceeded
@@ -44,10 +46,10 @@ class DiscoveringStep:
         models: ModelClient,
         artifacts: ArtifactStore,
         http: httpx.AsyncClient | None = None,
-        canaries: frozenset[str] = frozenset(),
+        canaries: Mapping[str, str] | None = None,
     ) -> None:
         self._hf = HfPapers(store, http)
-        self._canaries = canaries
+        self._canaries = canaries or {}
         self._arxiv = arxiv
         self._tavily = tavily
         self._models = models
@@ -107,7 +109,9 @@ class DiscoveringStep:
         run = await ctx.store.get_run(ctx.run_id)
         arxiv_id = run.arxiv_id if run else ""
         notes: list[str] = []
-        if run is not None and (run.paper_sha256 or "").lower() in self._canaries:
+        if run is not None and is_canary(
+            self._canaries, PaperRef(arxiv_id=run.arxiv_id, sha256=run.paper_sha256 or "")
+        ):
             note = "canary paper: no repository or dataset discovery (self-contained experiment)"
             return await self._done(ctx, Discovery(repo=None, datasets=[], notes=[note]))
         meta = await self._metadata(arxiv_id)
