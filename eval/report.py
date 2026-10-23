@@ -133,6 +133,16 @@ def set_a_section(result: SetAResult) -> str:
                 _met(accuracy_ok, f">= {TARGET_ACCURACY:.0%}"),
             ],
             [
+                "Coverage (claims with a decisive verdict)",
+                _ratio(v.coverage, v.judged, v.claims),
+                "",
+            ],
+            [
+                "Accuracy on the judged claims",
+                _ratio(v.judged_accuracy, v.judged_correct, v.judged),
+                "",
+            ],
+            [
                 "False accusations",
                 str(v.false_accusations),
                 _met(v.false_accusations <= TARGET_FALSE_ACCUSATIONS, "0"),
@@ -259,6 +269,8 @@ class SetAStats(_Stats):
     papers: int
     claims: int
     verdict_accuracy: float | None
+    coverage: float | None
+    judged_accuracy: float | None
     false_accusations: int
     extraction_f1: float
     median_usd_per_claim: float | None
@@ -316,6 +328,8 @@ def stats_json(results: EvalResults) -> EvalStats:
             papers=len(a.cases),
             claims=a.verdicts.claims,
             verdict_accuracy=_r(a.verdicts.accuracy),
+            coverage=_r(a.verdicts.coverage),
+            judged_accuracy=_r(a.verdicts.judged_accuracy),
             false_accusations=a.verdicts.false_accusations,
             extraction_f1=_rf(a.extraction.f1),
             median_usd_per_claim=_r(a.cost.median_usd_per_claim),

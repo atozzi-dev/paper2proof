@@ -127,7 +127,11 @@ def total_extraction(scores: Sequence[ExtractionScore]) -> ExtractionScore:
 
 
 def verdict_score(outcomes: Sequence[ClaimOutcome]) -> VerdictScore:
+    """Accuracy over every ground-truth claim, plus coverage and accuracy on the judged ones:
+    an unmeasured claim (INCONCLUSIVE, NOT_MEASURED) is honest, never a wrong verdict, and the
+    two numbers keep that apart from a wrong decisive verdict."""
     correct = sum(o.correct for o in outcomes)
+    judged = [o for o in outcomes if o.predicted not in (None, VerdictKind.INCONCLUSIVE)]
     return VerdictScore(
         claims=len(outcomes),
         correct=correct,
@@ -135,6 +139,10 @@ def verdict_score(outcomes: Sequence[ClaimOutcome]) -> VerdictScore:
         false_accusations=sum(o.false_accusation for o in outcomes),
         missing=sum(o.predicted is None for o in outcomes),
         inconclusive=sum(o.predicted is VerdictKind.INCONCLUSIVE for o in outcomes),
+        judged=len(judged),
+        judged_correct=(judged_correct := sum(o.correct for o in judged)),
+        coverage=len(judged) / len(outcomes) if outcomes else None,
+        judged_accuracy=judged_correct / len(judged) if judged else None,
     )
 
 

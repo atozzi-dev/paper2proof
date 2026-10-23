@@ -16,6 +16,8 @@ SET_A = f"""\
 | Metric | Result | Target |
 |---|---|---|
 | Verdict accuracy | 60.0% (3/5) | >= 80%: not met |
+| Coverage (claims with a decisive verdict) | 60.0% (3/5) | |
+| Accuracy on the judged claims | 100.0% (3/3) | |
 | False accusations | 0 | 0: met |
 | Claims without a verdict | 1 | |
 | Extraction F1 | 0.80 | |
@@ -109,6 +111,8 @@ def test_stats_json_for_api_stats() -> None:
             "papers": 3,
             "claims": 5,
             "verdict_accuracy": 0.6,
+            "coverage": 0.6,
+            "judged_accuracy": 1.0,
             "false_accusations": 0,
             "extraction_f1": 0.8,
             "median_usd_per_claim": 0.18,

@@ -125,7 +125,7 @@ run and per day.
 
 | Set | What | Result |
 |---|---|---|
-| A: canaries | Small synthetic papers we wrote, with true and deliberately falsified claims ([eval/canaries](eval/canaries)) | Verdict accuracy [PENDING]; **false accusations [PENDING]** (target 0) |
+| A: canaries | Small synthetic papers we wrote, with true and deliberately falsified claims ([eval/canaries](eval/canaries)) | Verdict accuracy [PENDING]; coverage (claims with a decisive verdict) and accuracy on those [PENDING]; **false accusations [PENDING]** (target 0) |
 | B: real papers | arXiv papers with official code and cheap experiments ([eval/set_b.yaml](eval/set_b.yaml)) | [PENDING] |
 | C: extraction | Hand-annotated claims ([eval/set_c](eval/set_c)) | Precision / recall / F1 [PENDING] |
 

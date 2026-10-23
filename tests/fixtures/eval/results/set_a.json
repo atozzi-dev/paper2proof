@@ -127,8 +127,12 @@
     "accuracy": 0.6,
     "claims": 5,
     "correct": 3,
+    "coverage": 0.6,
     "false_accusations": 0,
     "inconclusive": 1,
+    "judged": 3,
+    "judged_accuracy": 1.0,
+    "judged_correct": 3,
     "missing": 1
   }
 }

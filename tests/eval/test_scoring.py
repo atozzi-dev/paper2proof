@@ -155,8 +155,16 @@ def test_verdict_score_counts_false_accusations_and_missing_verdicts() -> None:
     assert (score.claims, score.correct, score.false_accusations) == (5, 2, 1)
     assert (score.missing, score.inconclusive) == (1, 1)
     assert score.accuracy == pytest.approx(0.4)
+    assert (score.judged, score.judged_correct) == (
+        3,
+        2,
+    )  # a decisive verdict: the inconclusive and the missing are not
+    assert score.coverage == pytest.approx(0.6)
+    assert score.judged_accuracy == pytest.approx(2 / 3)
     assert outcomes[2].false_accusation and not outcomes[3].false_accusation
     assert verdict_score([]).accuracy is None
+    assert verdict_score([]).coverage is None and verdict_score([]).judged_accuracy is None
+    assert verdict_score([_outcome(False, r, i)]).judged_accuracy is None  # nothing judged
 
 
 def test_reproduced_at_reduced_scale_is_not_a_correct_full_reproduction() -> None:
