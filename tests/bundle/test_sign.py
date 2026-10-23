@@ -197,10 +197,11 @@ async def test_cli_signs_a_bundle_that_verifies(kms_cli: FakeKms, tmp_path: Path
     from app.bundle.verify import main as verify
 
     source, out = await _unsigned_bundle(tmp_path), tmp_path / "signed.tar.gz"
-    code = await asyncio.to_thread(main, [*SIGN, str(source), "-o", str(out)])
-    assert code == 0
-    key = tmp_path / "key.pem"
+    key = tmp_path / "key.pem"  # the fake KMS key, never the published one in docs/
     key.write_text(await kms_cli.inner.public_key_pem())
+    argv = [*SIGN, str(source), "-o", str(out), "--public-key", str(key)]
+    code = await asyncio.to_thread(main, argv)
+    assert code == 0
     assert verify([str(out), "--public-key", str(key)]) == 0
 
 

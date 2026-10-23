@@ -46,8 +46,8 @@ You need nothing but a browser for the first three. Each takes under two minutes
    uv run python -m app.bundle.verify proof-bundle-RUN_ID.tar.gz
    ```
 
-   It checks the hash of every file and the KMS signature against the public key in
-   `docs/bundle-public-key.pem`. `bundle/reproduce.sh` re-runs the
+   It checks the hash of every file and the KMS signature against the published public key,
+   [`docs/bundle-public-key.pem`](docs/bundle-public-key.pem). `bundle/reproduce.sh` re-runs the
    judged experiment on any machine with Docker and an NVIDIA GPU.
 
 A negative result always reads **"Not reproduced under our conditions"**, with those conditions
