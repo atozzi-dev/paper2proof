@@ -9,8 +9,8 @@ import asyncio
 import itertools
 import logging
 import math
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -24,6 +24,9 @@ from app.observability import metrics
 from app.settings import Env
 
 log = logging.getLogger(__name__)
+# Settles running under asyncio.shield: kept referenced until they finish, even when
+# the caller that awaited them was cancelled.
+_SETTLING: set[asyncio.Task[Exception | None]] = set()
 
 EPSILON = 1e-9
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "budgets.yaml"
@@ -192,20 +195,69 @@ class Budget:
             return reservation
 
     async def commit(self, reservation: Reservation, actual: float) -> None:
-        """Record the actual spend (0 for a call that failed) and release the reservation."""
+        """Record the actual spend (0 for a call that failed) and release the reservation.
+
+        Fails closed: when the ledger write fails, the actual stays held in memory (until a
+        restart) so the caps keep counting spend that could not be written."""
         if not math.isfinite(actual) or actual < 0:
             raise ValueError(f"invalid amount: {actual}")
         async with self._lock:
-            if self._inflight.pop(reservation.id, None) is None:
+            if reservation.id not in self._inflight:
                 raise ValueError(f"reservation {reservation.id} already committed")
-            await self._store.add_ledger_entry(
-                reservation.run_id, reservation.day, reservation.kind.value, actual
-            )
+            try:
+                await self._store.add_ledger_entry(
+                    reservation.run_id, reservation.day, reservation.kind.value, actual
+                )
+            except BaseException:
+                self._inflight[reservation.id] = replace(reservation, amount=actual)
+                raise
+            del self._inflight[reservation.id]
             if reservation.kind is SpendKind.CLOUD_USD:
                 await self._trip_if_over(reservation.day)
         metrics.spend(reservation.kind.value, actual)
         if reservation.run_id is not None and reservation.kind in COST_KINDS and actual > 0:
             await self.publish_run_cost(reservation.run_id)
+
+    async def settle(
+        self, reservations: Sequence[Reservation], actual: Mapping[SpendKind, float] | None = None
+    ) -> None:
+        """Commit every reservation and release it. With `actual`, each kind's actual spend is
+        booked once and the other reservations of that kind at 0: a retried call holds one per
+        attempt. Without it, each reservation is booked in full.
+
+        Shielded, and it goes on past a failed write (whose actual `commit` keeps held), so a
+        second cancel or one bad write never leaves the other reservations in flight. The
+        first failure is raised at the end."""
+        if actual is not None:
+            missing = sorted(k.value for k in {r.kind for r in reservations} - actual.keys())
+            if missing:
+                raise ValueError(f"no actual spend for {', '.join(missing)}")
+        task = asyncio.ensure_future(self._commit_each(list(reservations), actual))
+        _SETTLING.add(task)
+        task.add_done_callback(_SETTLING.discard)
+        failure = await asyncio.shield(task)
+        if failure is not None:
+            raise failure
+
+    async def _commit_each(
+        self, reservations: list[Reservation], actual: Mapping[SpendKind, float] | None
+    ) -> Exception | None:
+        booked: set[SpendKind] = set()
+        failure: Exception | None = None
+        for reservation in reservations:
+            if actual is None:
+                amount = reservation.amount
+            else:
+                amount = 0.0 if reservation.kind in booked else actual[reservation.kind]
+            booked.add(reservation.kind)  # booked, or held by `commit` when the write failed
+            try:
+                await self.commit(reservation, amount)
+            except Exception as exc:
+                log.error(
+                    "ledger commit failed", extra={"run_id": reservation.run_id}, exc_info=True
+                )
+                failure = failure or exc
+        return failure
 
     async def publish_run_cost(self, run_id: str) -> None:
         """Emit the run's committed spend, from the ledger, as a `cost.update` event. Display

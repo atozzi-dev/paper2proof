@@ -6,7 +6,6 @@ and an SSE `model.call` event. Model IDs come only from the router (invariant 5)
 """
 
 import asyncio
-import logging
 import math
 import random
 import re
@@ -39,14 +38,10 @@ from app.models.pricing import Pricing, estimate_message_tokens, estimate_tokens
 from app.observability import metrics, tracing
 from app.orchestrator.budget import (
     Budget,
-    BudgetExceeded,
-    KillSwitchActive,
     Reservation,
     SpendKind,
 )
 from app.storage.store import Store
-
-log = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "models.yaml"
@@ -323,6 +318,7 @@ class _Tally:
 
     attempts: int = 0  # processed by the model (5xx): input billed
     timeouts: int = 0  # possibly generated in full
+    in_flight: bool = False  # a request is out with no answer yet (a cancel lands there)
 
 
 class _Failed(Exception):
@@ -335,13 +331,14 @@ class _Failed(Exception):
 
 
 class _Unfunded(Exception):
-    """The budget refused the next retry: it is never sent. `attempts`/`timeouts` count those
-    already made, as in _Exhausted; the cause is the BudgetExceeded (or KillSwitchActive)."""
+    """The next retry could not be reserved (the budget refused it, or the ledger failed): it
+    is never sent. `attempts`/`timeouts` count those already made, as in _Exhausted."""
 
-    def __init__(self, attempts: int, timeouts: int) -> None:
+    def __init__(self, attempts: int, timeouts: int, error: Exception) -> None:
         super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
         self.attempts = attempts
         self.timeouts = timeouts
+        self.error = error
 
 
 class _Exhausted(Exception):
@@ -477,36 +474,13 @@ class TokenFactoryClient:
     async def _settle(
         self, reservations: list[Reservation], tokens_in: int, tokens_out: int, cost: float
     ) -> None:
-        """Commit the actual spend once per kind (a retried call holds one reservation per
-        attempt: the others are released at 0). Shielded: a second cancel never leaves a
-        reservation in flight, which would fail later calls with a false BudgetExceeded."""
+        """Book the actual spend once per kind (Budget.settle: shielded, past a failed write)."""
         actual = {
             SpendKind.TOKENS_IN: float(tokens_in),
             SpendKind.TOKENS_OUT: float(tokens_out),
             SpendKind.INFERENCE_USD: cost,
         }
-        failure = await asyncio.shield(self._commit_all(reservations, actual))
-        if failure is not None:
-            raise failure
-
-    async def _commit_all(
-        self, reservations: list[Reservation], actual: dict[SpendKind, float]
-    ) -> Exception | None:
-        """Commit every reservation, past a failing one; return the first failure."""
-        charged: set[SpendKind] = set()
-        failure: Exception | None = None
-        for reservation in reservations:
-            amount = 0.0 if reservation.kind in charged else actual[reservation.kind]
-            try:
-                await self.budget.commit(reservation, amount)
-            except Exception as exc:  # the next reservation of this kind carries the actual
-                log.error(
-                    "ledger commit failed", extra={"run_id": reservation.run_id}, exc_info=True
-                )
-                failure = failure or exc
-            else:
-                charged.add(reservation.kind)
-        return failure
+        await self.budget.settle(reservations, actual)
 
     async def _complete_role(
         self,
@@ -543,8 +517,7 @@ class TokenFactoryClient:
             tin = (unfunded.attempts + unfunded.timeouts) * est_in
             tout = unfunded.timeouts * out_cap
             await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
-            assert unfunded.__cause__ is not None  # noqa: S101 (always raised `from refused`)
-            raise unfunded.__cause__ from None
+            raise unfunded.error from None
         except _Exhausted as exhausted:
             # Every attempt the model processed may be billed for its input (a 429 or a
             # connection error never reached it); a timed-out one possibly in full.
@@ -569,9 +542,9 @@ class TokenFactoryClient:
             raise cause from None
         except BaseException:
             # Cancelled (or an unexpected error): the attempts already counted are charged as
-            # above, plus the input of one that may be in flight.
-            tin = (tally.attempts + tally.timeouts + 1) * est_in
-            tout = tally.timeouts * out_cap
+            # above, plus a request that was out with no answer yet, in full like a timeout.
+            tin = (tally.attempts + tally.timeouts + int(tally.in_flight)) * est_in
+            tout = (tally.timeouts + int(tally.in_flight)) * out_cap
             await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -635,9 +608,10 @@ class TokenFactoryClient:
                 if attempt.retry_state.attempt_number > 1:
                     try:
                         await reserve_retry()  # outside `attempt`: never retried itself
-                    except (BudgetExceeded, KillSwitchActive) as refused:
-                        raise _Unfunded(tally.attempts, tally.timeouts) from refused
+                    except Exception as refused:  # BudgetExceeded, or the ledger failed
+                        raise _Unfunded(tally.attempts, tally.timeouts, refused) from refused
                 with attempt:
+                    tally.in_flight = True
                     try:
                         return await create(
                             model=req.model,
@@ -659,15 +633,19 @@ class TokenFactoryClient:
                             extra_body=req.extra_body or None,
                         )
                     except openai.APITimeoutError:
+                        tally.in_flight = False
                         tally.timeouts += 1  # the provider may have generated (and billed) it all
                         raise
                     except openai.APIConnectionError as err:
+                        tally.in_flight = False
                         if not isinstance(err.__cause__, httpx.ConnectError):
                             tally.timeouts += 1  # lost after sending: it may have been generated
                         raise  # a connection that never opened sent nothing: not billed
                     except openai.RateLimitError:
+                        tally.in_flight = False
                         raise  # refused before any work: nothing billed
                     except openai.APIStatusError as err:
+                        tally.in_flight = False
                         if err.status_code in _GATEWAY_TIMEOUTS:
                             tally.timeouts += 1  # the upstream timed out, possibly after generating
                         elif err.status_code >= 500:
