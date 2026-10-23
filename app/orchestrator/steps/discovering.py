@@ -9,6 +9,7 @@
 """
 
 import asyncio
+from collections.abc import Mapping
 from datetime import timedelta
 
 import httpx
@@ -44,10 +45,10 @@ class DiscoveringStep:
         models: ModelClient,
         artifacts: ArtifactStore,
         http: httpx.AsyncClient | None = None,
-        canaries: frozenset[str] = frozenset(),
+        canaries: Mapping[str, str] | None = None,
     ) -> None:
         self._hf = HfPapers(store, http)
-        self._canaries = canaries
+        self._canaries = canaries or {}
         self._arxiv = arxiv
         self._tavily = tavily
         self._models = models

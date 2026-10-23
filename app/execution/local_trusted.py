@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
 import yaml
@@ -31,16 +31,25 @@ from app.execution.smoke import (
 DockerRunner = Callable[[Sequence[str], float], Awaitable[tuple[int, str, str]]]
 PaperHash = Callable[[str], Awaitable[str | None]]
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CANARY_ID = re.compile(r"^0000\.\d{5}$")  # month 00: never a real arXiv paper
 
 
 class LocalTrustedRefused(Exception):
     """Not dev, or not a canary paper: arbitrary paper code never runs on this machine."""
 
 
-def load_canaries(path: Path) -> frozenset[str]:
+def load_canaries(path: Path) -> dict[str, str]:
+    """{e-print sha256: canary arXiv ID}. An entry without a canary ID (0000.NNNNN) and a
+    sha256 binds nothing and is ignored."""
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    papers = data.get("papers") or []
-    return frozenset(str(p).lower() for p in papers if _SHA256.fullmatch(str(p).lower()))
+    canaries: dict[str, str] = {}
+    for entry in data.get("papers") or []:
+        if not isinstance(entry, dict):
+            continue
+        digest, arxiv_id = str(entry.get("sha256", "")).lower(), str(entry.get("arxiv_id", ""))
+        if _SHA256.fullmatch(digest) and _CANARY_ID.fullmatch(arxiv_id):
+            canaries[digest] = arxiv_id
+    return canaries
 
 
 async def _tail(stream: asyncio.StreamReader | None, cap: int = 64 * 1024) -> bytes:
@@ -98,7 +107,7 @@ class LocalTrustedExecutor:
         self,
         *,
         env: str,
-        canaries: frozenset[str],
+        canaries: Mapping[str, str],
         paper_sha256: PaperHash,
         image: str,
         work_root: Path,

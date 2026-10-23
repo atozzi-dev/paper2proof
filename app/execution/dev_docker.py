@@ -23,7 +23,7 @@ import secrets
 import shutil
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -88,7 +88,7 @@ class DevDockerBackend:
         self,
         *,
         env: str,
-        canaries: frozenset[str],
+        canaries: Mapping[str, str],
         paper_sha256: PaperHash,
         root: Path,
         docker: DockerRunner = docker_cli,

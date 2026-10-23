@@ -74,7 +74,7 @@ class CanaryPapers:
 
 def load_canary_papers(root: Path, allowlist: Path) -> CanaryPapers:
     """Every `<root>/<name>/{truth.yaml,paper.tex}` whose e-print hash is allowlisted."""
-    allowed = load_canaries(allowlist) if allowlist.is_file() else frozenset()
+    allowed = load_canaries(allowlist) if allowlist.is_file() else {}
     papers: dict[str, tuple[str, bytes]] = {}
     for truth_path in sorted(root.glob("*/truth.yaml")) if root.is_dir() else []:
         paper = truth_path.with_name("paper.tex")

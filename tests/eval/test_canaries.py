@@ -191,14 +191,31 @@ def test_ingesting_hashes_the_same_bytes_and_finds_the_results_table() -> None:
         assert paper.tables, f"{canary.name}: no table parsed"
 
 
-def test_allowlist_holds_exactly_the_canary_hashes() -> None:
-    assert load_canaries(build.ALLOWLIST) == {build.source_sha256(c) for c in CANARIES}
+def test_allowlist_binds_each_canary_hash_to_its_arxiv_id() -> None:
+    assert load_canaries(build.ALLOWLIST) == {
+        build.source_sha256(c): c.truth.arxiv_id for c in CANARIES
+    }
     assert build.check() == []
+
+
+def test_allowlist_entries_without_a_valid_id_or_hash_are_ignored(tmp_path: Path) -> None:
+    allowlist = tmp_path / "canary_allowlist.yaml"
+    allowlist.write_text(
+        "papers:\n"
+        f"  - {{arxiv_id: '0000.00001', sha256: {'a' * 64}}}\n"
+        f"  - {{arxiv_id: '2106.09685', sha256: {'b' * 64}}}\n"  # a real arXiv ID: never a canary
+        "  - {arxiv_id: '0000.00002', sha256: nothex}\n"
+        f"  - {'c' * 64}\n",  # the old hash-only form binds nothing
+        encoding="utf-8",
+    )
+    assert load_canaries(allowlist) == {"a" * 64: "0000.00001"}
 
 
 def test_check_reports_a_stale_allowlist(tmp_path: Path) -> None:
     stale = tmp_path / "canary_allowlist.yaml"
-    stale.write_text("papers:\n  - " + "a" * 64 + "\n", encoding="utf-8")
+    stale.write_text(
+        f"papers:\n  - {{arxiv_id: '0000.00001', sha256: {'a' * 64}}}\n", encoding="utf-8"
+    )
     problems = build.check(stale)
     assert any("missing" in p for p in problems)
     assert any("unknown" in p for p in problems)
