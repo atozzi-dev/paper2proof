@@ -47,7 +47,11 @@ results/<attempt>/
   results.json                 # see schemas/results.schema.json
   live.log                     # flushed every 10 s by the runner
   stdout.log, stderr.log
-  env.json                     # pip freeze, nvidia-smi, driver, image digest
+  env.json                     # python, image digest, GPU name, NVIDIA driver, installed
+                               # packages (name==version, overlay first, read before
+                               # the experiment runs, cut at 128 KiB with
+                               # packages_truncated; code vendored in the repository or
+                               # the workspace is not listed)
   seeds/<seed>/metrics.json    # produced by the experiment script
 ```
 

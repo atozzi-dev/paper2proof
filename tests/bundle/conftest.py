@@ -184,7 +184,10 @@ async def make_run(store: Store, tmp_path: Path) -> Run:
     run.put("results/1/results.json", b'{"exit_reason": "completed", "per_seed": []}')
     run.put("results/1/stdout.log", b"epoch 1\nepoch 2\n")
     run.put("results/1/stderr.log", b"")
-    run.put("results/1/env.json", b'{"gpu": "L40S", "pip_freeze": ["numpy==2.1.0"]}')
+    run.put(
+        "results/1/env.json",
+        b'{"gpu": "L40S", "packages": ["numpy==2.1.0"], "packages_truncated": false}',
+    )
     await store.save_claims(RUN, [CLAIM, OTHER], selected={"c1"})
     await store.set_paper_sha256(RUN, "d" * 64)
     await store.record_model_call(

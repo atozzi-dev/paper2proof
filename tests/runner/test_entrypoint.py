@@ -655,3 +655,106 @@ def test_a_claim_measured_on_some_seeds_only_still_completes(tmp_path: Path) -> 
     c1, c2 = _results(results)["claims"]
     assert [s["ok"] for s in c1["per_seed"]] == [False, False, True]
     assert all(s["ok"] for s in c2["per_seed"])
+
+
+def _extract_with_package(archive: Path, dest: Path, sha256: str) -> None:
+    """The overlay holds one installed package, as the provisioner's pip --target leaves it."""
+    _extract(archive, dest, sha256)
+    if archive.name == "overlay.tar.zst":
+        info = dest / "demo_pkg-1.2.3.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.2.3\n")
+
+
+def test_env_json_records_the_packages_driver_and_image(tmp_path: Path) -> None:
+    """execution-contracts §3: what the experiment ran with, for the Proof Bundle."""
+    manifest, results = _setup(tmp_path)
+    code = _run(manifest, tmp_path, extract=_extract_with_package, gpu_driver=lambda: "550.54.15")
+    assert code == 0
+    env = json.loads((results / "env.json").read_text())
+    assert env["image_digest"] == "sha256:" + "0" * 64 and env["gpu"] == "NVIDIA L40S"
+    assert env["driver"] == "550.54.15"
+    assert "demo-pkg==1.2.3" in env["packages"]  # the overlay, as the script imports it
+    assert any(p.startswith("pytest==") for p in env["packages"])  # the base environment
+    assert env["packages"] == sorted(env["packages"], key=str.lower)
+    assert env["packages_truncated"] is False
+
+
+def test_the_package_list_is_read_before_any_untrusted_code_runs(tmp_path: Path) -> None:
+    """A script that plants metadata in the overlay never changes what env.json reports."""
+    plant = SCRIPT.replace(
+        "os.makedirs(a.out, exist_ok=True)\n",
+        "os.makedirs(a.out, exist_ok=True)\n"
+        "d = os.path.join(os.environ['PYTHONPATH'].split(os.pathsep)[0], 'fake-9.9.dist-info')\n"
+        "os.makedirs(d, exist_ok=True)\n"
+        "open(os.path.join(d, 'METADATA'), 'w').write('Name: fake\\nVersion: 9.9\\n')\n",
+    )
+    manifest, results = _setup(tmp_path, files={"train.py": plant})
+    assert _run(manifest, tmp_path, gpu_driver=lambda: None) == 0
+    env = json.loads((results / "env.json").read_text())
+    assert not any(p.startswith("fake==") for p in env["packages"])
+    assert env["driver"] is None
+
+
+def test_installed_packages_are_bounded(tmp_path: Path) -> None:
+    for i in range(5):
+        info = tmp_path / f"p{i}-1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(f"Name: p{i}\nVersion: 1.0\n")
+    # each entry is 7 characters plus quotes and a comma in env.json: three fit in 31 bytes
+    assert entrypoint.installed_packages([tmp_path], max_bytes=31) == (
+        ["p0==1.0", "p1==1.0", "p2==1.0"],
+        True,
+    )
+    assert entrypoint.installed_packages([tmp_path]) == (
+        [f"p{i}==1.0" for i in range(5)],
+        False,
+    )
+
+
+def test_an_inventory_failure_never_fails_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env.json is a diagnostic: a broken metadata scan leaves an empty list, nothing more."""
+
+    def broken(path: Any = None) -> Any:
+        raise RuntimeError("metadata scan failed")
+
+    monkeypatch.setattr(entrypoint.importlib.metadata, "distributions", broken)
+    manifest, results = _setup(tmp_path)
+    assert _run(manifest, tmp_path, gpu_driver=lambda: None) == 0
+    env = json.loads((results / "env.json").read_text())
+    assert env["packages"] == [] and env["packages_truncated"] is False
+
+
+def _dist_info(root: Path, dirname: str, metadata: bytes) -> None:
+    info = root / dirname
+    info.mkdir()
+    (info / "METADATA").write_bytes(metadata)
+
+
+def test_only_well_formed_names_and_versions_are_listed(tmp_path: Path) -> None:
+    """Wheel authors write these strings: env.json is signed, so control characters, folded
+    headers and markup never get in."""
+    _dist_info(tmp_path, "good-1.0.dist-info", b"Name: good\nVersion: 1.0\n")
+    _dist_info(tmp_path, "nul-1.0.dist-info", b"Name: a\x00b\nVersion: 1.0\n")
+    _dist_info(tmp_path, "fold-1.0.dist-info", b"Name: foo\n bar\nVersion: 1.0\n")
+    _dist_info(tmp_path, "tag-1.0.dist-info", b"Name: x\nVersion: <script>1\n")
+    _dist_info(tmp_path, "junk-1.0.dist-info", bytes(range(256)))
+    assert entrypoint.installed_packages([tmp_path]) == (["good==1.0"], False)
+
+
+def test_an_oversized_metadata_file_is_skipped_unread(tmp_path: Path) -> None:
+    _dist_info(tmp_path, "big-1.0.dist-info", b"Name: big\nVersion: 1.0\n" + b"x" * (2 << 20))
+    _dist_info(tmp_path, "small-1.0.dist-info", b"Name: small\nVersion: 1.0\n")
+    assert entrypoint.installed_packages([tmp_path]) == (["small==1.0"], False)
+
+
+def test_the_scan_stops_after_its_distribution_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(entrypoint, "MAX_DISTRIBUTIONS", 2)
+    for i in range(4):
+        _dist_info(tmp_path, f"p{i}-1.0.dist-info", f"Name: p{i}\nVersion: 1.0\n".encode())
+    packages, truncated = entrypoint.installed_packages([tmp_path])
+    assert len(packages) == 2 and truncated

@@ -17,7 +17,9 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import functools
 import hashlib
+import importlib.metadata
 import io
 import json
 import math
@@ -287,15 +289,95 @@ def _clear(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
+@functools.cache
+def _nvidia_query() -> tuple[str, str | None]:  # pragma: no cover - exercised in the GPU image
+    """GPU name and driver in one nvidia-smi call (each call can take seconds on a cold node)."""
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=20, check=True,
         )  # fmt: skip
-        return out.stdout.strip().splitlines()[0][:128] or "unknown"
+        name, _, driver = out.stdout.strip().splitlines()[0].rpartition(",")
+        return (name.strip()[:128] or "unknown"), (driver.strip()[:64] or None)
     except (OSError, subprocess.SubprocessError, IndexError):
-        return "cpu"
+        return "cpu", None
+
+
+def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
+    return _nvidia_query()[0]
+
+
+def nvidia_driver_version() -> str | None:  # pragma: no cover - exercised in the GPU image
+    return _nvidia_query()[1]
+
+
+MAX_PACKAGES_BYTES = 128 * 1024  # env.json must stay under the bundle's 256 KiB per-file cap
+MAX_DISTRIBUTIONS = 20_000  # an overlay could ship any number of *.dist-info directories
+MAX_METADATA_BYTES = 1 << 20
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?")  # PEP 508
+PACKAGE_VERSION = re.compile(r"[A-Za-z0-9.+!_-]{1,50}")  # PEP 440 and local versions
+
+
+def _metadata_too_big(dist: importlib.metadata.Distribution) -> bool:
+    """Path distributions only (the only kind on these paths): METADATA is never read whole
+    when it is over the cap. `_path` is the dist-info directory."""
+    base = getattr(dist, "_path", None)
+    if not isinstance(base, Path):
+        return False
+    for name in ("METADATA", "PKG-INFO"):
+        try:
+            if (base / name).stat().st_size > MAX_METADATA_BYTES:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def installed_packages(
+    paths: Sequence[Path], *, max_bytes: int = MAX_PACKAGES_BYTES
+) -> tuple[list[str], bool]:
+    """`name==version` of every distribution on `paths`, the first found winning (as for an
+    import), sorted; metadata is only read, never imported. Cut to `max_bytes` as written in
+    env.json (the flag says so). A diagnostic: any failure gives an empty list, never an
+    error (Terminated, a BaseException, still stops the job)."""
+    seen: dict[str, str] = {}
+    cut = False
+    try:
+        for index, dist in enumerate(
+            importlib.metadata.distributions(path=[str(p) for p in paths])
+        ):
+            if index >= MAX_DISTRIBUTIONS:
+                cut = True
+                break
+            if _metadata_too_big(dist):
+                continue
+            try:
+                meta = dist.metadata  # read and parsed once
+                name, version = meta["Name"], meta["Version"]
+            except (OSError, ValueError, KeyError):  # unreadable metadata: skip it
+                continue
+            # written by wheel authors and signed in the bundle: plain names and versions only
+            if not (
+                isinstance(name, str)
+                and isinstance(version, str)
+                and PACKAGE_NAME.fullmatch(name)
+                and PACKAGE_VERSION.fullmatch(version)
+            ):
+                continue
+            key = re.sub(r"[-_.]+", "-", name).lower()
+            if key not in seen:
+                seen[key] = f"{name}=={version}"
+    except Exception as err:  # the inventory must never fail the job
+        print(f"package inventory failed: {type(err).__name__}", file=sys.stderr)
+        return [], False
+    kept: list[str] = []
+    size = 0
+    for entry in sorted(seen.values(), key=str.lower):
+        size += len(json.dumps(entry)) + 1  # as written: quoted, escaped, with a separator
+        if size > max_bytes:
+            return kept, True
+        kept.append(entry)
+    return kept, cut
 
 
 class LiveLog:
@@ -492,6 +574,7 @@ def run(
     work: Path,
     extract: Callable[[Path, Path, str], None] = tar_extract,
     gpu_name: Callable[[], str] = nvidia_gpu_name,
+    gpu_driver: Callable[[], str | None] = nvidia_driver_version,
     flush_interval_s: float = 10.0,
     on_flush: Callable[[str], None] | None = None,
     on_seed: Callable[[int], None] | None = None,
@@ -576,6 +659,9 @@ def run(
                 raise ContractError(f"data archive {entry['name']} missing")
             extract(archive, data / entry["name"], entry["sha256"])
         gpu = gpu_name()  # nvidia-smi can take seconds: SIGTERM here still writes results
+        driver = gpu_driver()
+        # read before any untrusted code runs: a script could plant metadata in the overlay
+        packages, truncated = installed_packages([overlay, *(Path(p) for p in sys.path if p)])
     except (ContractError, OSError, subprocess.SubprocessError) as err:
         print(f"CONTRACT ERROR: {err}", file=sys.stderr)
         write_results(EXIT_CONTRACT)
@@ -647,7 +733,16 @@ def run(
     for name in ("stdout.log", "stderr.log"):
         shutil.copyfile(logs / name, results / name)
     (results / "env.json").write_text(
-        json.dumps({"python": sys.version, "image_digest": manifest["image_digest"], "gpu": gpu}),
+        json.dumps(
+            {
+                "python": sys.version,
+                "image_digest": manifest["image_digest"],
+                "gpu": gpu,
+                "driver": driver,
+                "packages": packages,
+                "packages_truncated": truncated,
+            }
+        ),
         encoding="utf-8",
     )
     shutil.rmtree(home, ignore_errors=True)
