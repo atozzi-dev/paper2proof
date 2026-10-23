@@ -12,6 +12,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -29,7 +30,24 @@ from app.execution.smoke import (
 )
 
 DockerRunner = Callable[[Sequence[str], float], Awaitable[tuple[int, str, str]]]
-PaperHash = Callable[[str], Awaitable[str | None]]
+
+
+@dataclass(frozen=True)
+class PaperRef:
+    """What a run's paper is: the arXiv ID it was submitted as and the sha256 INGESTING hashed."""
+
+    arxiv_id: str
+    sha256: str
+
+
+PaperLookup = Callable[[str], Awaitable[PaperRef | None]]
+
+
+def is_canary(canaries: Mapping[str, str], paper: PaperRef | None) -> bool:
+    """A canary only under the arXiv ID its hash is bound to: the hash alone is not enough."""
+    return paper is not None and canaries.get(paper.sha256.lower()) == paper.arxiv_id
+
+
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CANARY_ID = re.compile(r"^0000\.\d{5}$")  # month 00: never a real arXiv paper
 
@@ -108,7 +126,7 @@ class LocalTrustedExecutor:
         *,
         env: str,
         canaries: Mapping[str, str],
-        paper_sha256: PaperHash,
+        paper: PaperLookup,
         image: str,
         work_root: Path,
         docker: DockerRunner = docker_cli,
@@ -118,7 +136,7 @@ class LocalTrustedExecutor:
         if not re.fullmatch(DIGEST_REF, image):
             raise ValueError("the smoke image must be referenced by digest")
         self._canaries = canaries
-        self._paper_sha256 = paper_sha256
+        self._paper = paper
         self._image = image
         self._root = work_root
         self._docker = docker
@@ -126,8 +144,7 @@ class LocalTrustedExecutor:
         self._approved: set[str] = set()  # run ids whose paper passed the canary check
 
     async def prepare(self, run_id: str, files: dict[str, bytes]) -> str:
-        digest = await self._paper_sha256(run_id)
-        if digest is None or digest.lower() not in self._canaries:
+        if not is_canary(self._canaries, await self._paper(run_id)):
             raise LocalTrustedRefused("not a canary paper: its code never runs locally")
         base = self._root / run_slug(run_id)
         shutil.rmtree(base / "base", ignore_errors=True)

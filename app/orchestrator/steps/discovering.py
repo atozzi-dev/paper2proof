@@ -21,6 +21,7 @@ from app.domain.discovery import HF_DATASET_ID, Discovery, RepoRef
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import DatasetReq, StepName
+from app.execution.local_trusted import PaperRef, is_canary
 from app.ingestion.arxiv import ArxivClient, ArxivMetadata
 from app.models.client import ModelClient
 from app.orchestrator.budget import BudgetExceeded
@@ -108,7 +109,9 @@ class DiscoveringStep:
         run = await ctx.store.get_run(ctx.run_id)
         arxiv_id = run.arxiv_id if run else ""
         notes: list[str] = []
-        if run is not None and (run.paper_sha256 or "").lower() in self._canaries:
+        if run is not None and is_canary(
+            self._canaries, PaperRef(arxiv_id=run.arxiv_id, sha256=run.paper_sha256 or "")
+        ):
             note = "canary paper: no repository or dataset discovery (self-contained experiment)"
             return await self._done(ctx, Discovery(repo=None, datasets=[], notes=[note]))
         meta = await self._metadata(arxiv_id)

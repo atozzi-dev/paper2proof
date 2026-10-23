@@ -19,7 +19,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.domain.models import ClaimType, VerdictKind
-from app.execution.local_trusted import LocalTrustedExecutor, LocalTrustedRefused, load_canaries
+from app.execution.local_trusted import (
+    LocalTrustedExecutor,
+    LocalTrustedRefused,
+    PaperRef,
+    load_canaries,
+)
 from app.ingestion.archive import extract_source
 from app.ingestion.arxiv import ARXIV_ID
 from app.orchestrator.steps.ingesting import _parse
@@ -231,34 +236,41 @@ def test_write_allowlist_round_trips(tmp_path: Path) -> None:
 async def test_local_trusted_executor_accepts_a_canary_and_refuses_anything_else(
     tmp_path: Path,
 ) -> None:
-    hashes = {RUN: build.source_sha256(CANARIES[0])}
+    canary = CANARIES[0]
+    papers = {RUN: PaperRef(arxiv_id=canary.truth.arxiv_id, sha256=build.source_sha256(canary))}
 
-    async def paper_sha256(run_id: str) -> str | None:
-        return hashes.get(run_id)
+    async def lookup(run_id: str) -> PaperRef | None:
+        return papers.get(run_id)
 
     executor = LocalTrustedExecutor(
         env="dev",
         canaries=load_canaries(build.ALLOWLIST),
-        paper_sha256=paper_sha256,
+        paper=lookup,
         image=IMAGE,
         work_root=tmp_path,
     )
     assert await executor.prepare(RUN, {"train.py": b"print(1)"}) == RUN
-    hashes[RUN] = "b" * 64
+    papers[RUN] = PaperRef(arxiv_id=canary.truth.arxiv_id, sha256="b" * 64)
+    with pytest.raises(LocalTrustedRefused):
+        await executor.prepare(RUN, {"train.py": b"print(1)"})
+    other = "9999.99999"  # the canary's own bytes under another ID: refused too
+    papers[RUN] = PaperRef(arxiv_id=other, sha256=build.source_sha256(canary))
+    executor._approved.clear()
     with pytest.raises(LocalTrustedRefused):
         await executor.prepare(RUN, {"train.py": b"print(1)"})
 
 
 @pytest.mark.parametrize("env", ["prod", "test"])
 async def test_the_allowlist_never_runs_canary_code_outside_dev(tmp_path: Path, env: str) -> None:
-    async def paper_sha256(run_id: str) -> str | None:
-        return build.source_sha256(CANARIES[0])
+    async def lookup(run_id: str) -> PaperRef | None:
+        canary = CANARIES[0]
+        return PaperRef(arxiv_id=canary.truth.arxiv_id, sha256=build.source_sha256(canary))
 
     with pytest.raises(LocalTrustedRefused):
         LocalTrustedExecutor(
             env=env,
             canaries=load_canaries(build.ALLOWLIST),
-            paper_sha256=paper_sha256,
+            paper=lookup,
             image=IMAGE,
             work_root=tmp_path,
         )

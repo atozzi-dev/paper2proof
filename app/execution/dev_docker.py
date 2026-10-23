@@ -28,7 +28,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.execution.backend import CACHE_BUCKET, CACHE_MOUNT, JobHandle, JobKind, JobSpec, JobState
-from app.execution.local_trusted import DockerRunner, LocalTrustedRefused, PaperHash, docker_cli
+from app.execution.local_trusted import (
+    DockerRunner,
+    LocalTrustedRefused,
+    PaperLookup,
+    docker_cli,
+    is_canary,
+)
 from app.execution.naming import bucket_name
 from app.execution.run_storage import MAX_READ_BYTES
 
@@ -89,7 +95,7 @@ class DevDockerBackend:
         *,
         env: str,
         canaries: Mapping[str, str],
-        paper_sha256: PaperHash,
+        paper: PaperLookup,
         root: Path,
         docker: DockerRunner = docker_cli,
         host_uid: int | None = _host_uid(),
@@ -98,7 +104,7 @@ class DevDockerBackend:
         if env != "dev":
             raise LocalTrustedRefused("the local docker job backend runs only with P2P_ENV=dev")
         self._canaries = canaries
-        self._paper_sha256 = paper_sha256
+        self._paper = paper
         self._root = root.resolve()
         if any(c in str(self._root) for c in ',"\n'):
             raise ValueError(f"{self._root}: docker --mount cannot take this path")
@@ -209,8 +215,7 @@ class DevDockerBackend:
 
     async def submit(self, spec: JobSpec) -> JobHandle:
         run_id = self._checked(spec)
-        digest = await self._paper_sha256(run_id)
-        if digest is None or digest.lower() not in self._canaries:
+        if not is_canary(self._canaries, await self._paper(run_id)):
             raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
         image = local_image(spec.image_digest_ref)
         existing = await self._inspect(spec.name)

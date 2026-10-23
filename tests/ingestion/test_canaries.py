@@ -97,3 +97,15 @@ def test_the_hash_ingesting_records_is_the_allowlisted_one() -> None:
     allowed = load_canaries(ALLOWLIST)
     for canary in build.discover():
         assert hashlib.sha256(build.source_bytes(canary)).hexdigest() in allowed
+
+
+def test_a_canary_moved_to_another_id_is_never_served(tmp_path: Path) -> None:
+    """Same bytes, another arXiv ID in truth.yaml: the allowlist binds the hash to 0000.00001."""
+    shutil.copytree(CANARIES / "digits-logreg", tmp_path / "digits-logreg")
+    truth = tmp_path / "digits-logreg" / "truth.yaml"
+    truth.write_text(
+        truth.read_text(encoding="utf-8").replace('"0000.00001"', '"0000.00099"'),
+        encoding="utf-8",
+    )
+    papers = _papers(tmp_path)
+    assert "0000.00099" not in papers and "0000.00001" not in papers

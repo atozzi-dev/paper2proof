@@ -88,7 +88,7 @@ def load_canary_papers(root: Path, allowlist: Path) -> CanaryPapers:
         if not CANARY_ARXIV_ID.fullmatch(arxiv_id):
             log.warning("canary skipped: not a 0000.000NN ID", extra={"arxiv_id": arxiv_id})
             continue
-        if hashlib.sha256(data).hexdigest() not in allowed:
+        if allowed.get(hashlib.sha256(data).hexdigest()) != arxiv_id:  # bound to its ID
             log.warning("canary skipped: not in the allowlist", extra={"arxiv_id": arxiv_id})
             continue
         papers[arxiv_id] = (title, data)

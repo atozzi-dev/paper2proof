@@ -250,7 +250,7 @@ async def test_a_canary_paper_never_searches_for_code(store: Store, tmp_path: Pa
         tavily=TavilyClient(SecretStr("test-key-not-real")),
         models=fake,
         artifacts=artifacts,
-        canaries=frozenset({canary}),
+        canaries={canary: "0000.00001"},
     )
     result = await step.run(ctx)
     assert result.next is StepName.PLANNING and result.output_ref is not None

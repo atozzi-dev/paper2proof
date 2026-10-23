@@ -15,7 +15,7 @@ import pytest
 from app.execution import dev_docker
 from app.execution.backend import JobHandle, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage, local_image
-from app.execution.local_trusted import LocalTrustedRefused
+from app.execution.local_trusted import LocalTrustedRefused, PaperRef
 
 RUN = "r_01jb7z00000000000000000000"
 SLUG = RUN[2:]
@@ -89,14 +89,15 @@ def _backend(
     *,
     env: str = "dev",
     paper: str = CANARY,
+    arxiv_id: str = "0000.00001",
     host_uid: int | None = None,
     acl: Acl | None = None,
 ) -> DevDockerBackend:
-    async def paper_sha256(run_id: str) -> str | None:
-        return paper if run_id == RUN else None
+    async def lookup(run_id: str) -> PaperRef | None:
+        return PaperRef(arxiv_id=arxiv_id, sha256=paper) if run_id == RUN else None
 
     return DevDockerBackend(
-        env=env, canaries=frozenset({CANARY}), paper_sha256=paper_sha256, root=tmp_path,
+        env=env, canaries={CANARY: "0000.00001"}, paper=lookup, root=tmp_path,
         docker=docker, host_uid=host_uid, acl=acl or Acl(),
     )  # fmt: skip
 
@@ -633,3 +634,10 @@ async def test_a_junction_at_the_bucket_or_job_root_is_refused(tmp_path: Path) -
         await backend.submit(_spec())
     assert not [c for c in docker.calls if c[1] == "run"]
     assert list(elsewhere.iterdir()) == []
+
+
+async def test_a_canary_hash_under_another_arxiv_id_gets_no_job(tmp_path: Path) -> None:
+    docker = Docker()
+    with pytest.raises(LocalTrustedRefused, match="canary"):
+        await _backend(tmp_path, docker, arxiv_id="2106.09685").submit(_spec())
+    assert not [c for c in docker.calls if c[1] == "run"]

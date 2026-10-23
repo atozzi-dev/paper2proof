@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.execution.local_trusted import LocalTrustedExecutor, LocalTrustedRefused
+from app.execution.local_trusted import LocalTrustedExecutor, LocalTrustedRefused, PaperRef
 from app.execution.smoke import SmokeContractError
 
 RUN = "r_01jb7z00000000000000000000"
@@ -31,15 +31,15 @@ class FakeDocker:
         return self.exit_code, "stdout here", "stderr here"
 
 
-async def _hash(run_id: str) -> str | None:
-    return CANARY
+async def _paper(run_id: str) -> PaperRef | None:
+    return PaperRef(arxiv_id="0000.00001", sha256=CANARY)
 
 
 def _executor(tmp_path: Path, docker: FakeDocker, env: str = "dev") -> LocalTrustedExecutor:
     return LocalTrustedExecutor(
         env=env,
-        canaries=frozenset({CANARY}),
-        paper_sha256=_hash,
+        canaries={CANARY: "0000.00001"},
+        paper=_paper,
         image=IMAGE,
         work_root=tmp_path,
         docker=docker,
@@ -53,13 +53,13 @@ def test_refuses_outside_dev(tmp_path: Path, env: str) -> None:
 
 
 async def test_refuses_a_paper_that_is_not_a_canary(tmp_path: Path) -> None:
-    async def other(run_id: str) -> str | None:
-        return "b" * 64
+    async def other(run_id: str) -> PaperRef | None:
+        return PaperRef(arxiv_id="0000.00001", sha256="b" * 64)
 
     executor = LocalTrustedExecutor(
         env="dev",
-        canaries=frozenset({CANARY}),
-        paper_sha256=other,
+        canaries={CANARY: "0000.00001"},
+        paper=other,
         image=IMAGE,
         work_root=tmp_path,
         docker=FakeDocker(),
@@ -67,10 +67,10 @@ async def test_refuses_a_paper_that_is_not_a_canary(tmp_path: Path) -> None:
     with pytest.raises(LocalTrustedRefused):
         await executor.prepare(RUN, {"train.py": b"print(1)"})
 
-    async def unknown(run_id: str) -> str | None:
+    async def unknown(run_id: str) -> PaperRef | None:
         return None
 
-    executor._paper_sha256 = unknown
+    executor._paper = unknown
     with pytest.raises(LocalTrustedRefused):
         await executor.prepare(RUN, {})
 
@@ -111,8 +111,8 @@ def test_image_must_be_pinned_by_digest(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         LocalTrustedExecutor(
             env="dev",
-            canaries=frozenset({CANARY}),
-            paper_sha256=_hash,
+            canaries={CANARY: "0000.00001"},
+            paper=_paper,
             image="p2p-runner-cpu:latest",
             work_root=tmp_path,
             docker=FakeDocker(),
@@ -153,3 +153,21 @@ async def test_the_image_entrypoint_is_overridden(tmp_path: Path) -> None:
     (argv,) = docker.calls
     assert "--entrypoint=python" in argv
     assert argv[argv.index(IMAGE) + 1 :] == ["train.py"]
+
+
+async def test_refuses_a_canary_hash_under_another_arxiv_id(tmp_path: Path) -> None:
+    """The bytes of a canary submitted as a real arXiv ID never get a local job (A-38)."""
+
+    async def renamed(run_id: str) -> PaperRef | None:
+        return PaperRef(arxiv_id="2106.09685", sha256=CANARY)
+
+    executor = LocalTrustedExecutor(
+        env="dev",
+        canaries={CANARY: "0000.00001"},
+        paper=renamed,
+        image=IMAGE,
+        work_root=tmp_path,
+        docker=FakeDocker(),
+    )
+    with pytest.raises(LocalTrustedRefused):
+        await executor.prepare(RUN, {"train.py": b"print(1)"})
