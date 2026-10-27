@@ -69,7 +69,7 @@ def _error_code(err: ClientError) -> str:
     return str(err.response.get("Error", {}).get("Code", ""))
 
 
-def _check_key(key: str) -> str:
+def check_run_key(key: str) -> str:
     parts = key.split("/")
     if (
         not key
@@ -122,15 +122,17 @@ class S3RunStorage:
         self, run_id: str, key: str, *, max_bytes: int = MAX_READ_BYTES
     ) -> bytes | None:
         bucket = bucket_name(run_id)
-        return await asyncio.to_thread(self._get, bucket, _check_key(key), max_bytes)
+        return await asyncio.to_thread(self._get, bucket, check_run_key(key), max_bytes)
 
     async def put_bytes(self, run_id: str, key: str, data: bytes) -> None:
         bucket = bucket_name(run_id)
-        await asyncio.to_thread(self._s3.put_object, Bucket=bucket, Key=_check_key(key), Body=data)
+        await asyncio.to_thread(
+            self._s3.put_object, Bucket=bucket, Key=check_run_key(key), Body=data
+        )
 
     async def delete(self, run_id: str, key: str) -> None:
         bucket = bucket_name(run_id)
-        await asyncio.to_thread(self._s3.delete_object, Bucket=bucket, Key=_check_key(key))
+        await asyncio.to_thread(self._s3.delete_object, Bucket=bucket, Key=check_run_key(key))
 
 
 def _delete_batch(client: S3Client, bucket: str, keys: list[str]) -> None:
