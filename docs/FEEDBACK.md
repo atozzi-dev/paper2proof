@@ -8,10 +8,11 @@ summary comes first, ranked by impact.
 
 **What blocked or slowed us most**
 
-1. **New tenants start with 0 non-GPU vCPUs** (blocker). No CPU job and no Serverless endpoint
-   can start until a quota request is approved, while GPU jobs work. It held up our endpoint,
-   network and mount tests for more than a day. A small default CPU quota, or a line in the Serverless
-   quickstart, would fix it.
+1. **New tenants start with 0 non-GPU vCPUs** (blocker). No CPU job, no VM and no Serverless
+   endpoint can start until a quota request is approved, while GPU jobs work. Our request was never
+   answered: after six days the quota was still 0 in every region, and we redesigned the deploy
+   three days before the deadline (control plane on our own host, only GPU work on Nebius). A small
+   default CPU quota, or a timely answer to small requests, would fix it.
 2. **GitHub Actions OIDC to Nebius is undocumented** (major). The token exchange, the accepted
    audience (`sts.nebius.com`, no scheme) and the subject form with numeric IDs had to be found
    by trial, over about two hours and several CI runs. An official example or a `nebius/login`
@@ -89,6 +90,14 @@ which worked on the first call.
 - **Suggestion:** grant a default CPU quota with the account, or auto-approve small increases.
 - **Severity:** blocker
 
+### 2026-10-27 — The non-GPU vCPU quota stayed at 0 in every region for the whole hackathon
+- **Context:** H-01/H-04, deploying the control plane; the request was filed on 2026-10-21 and followed up through Devpost support.
+- **What happened:** after six days the quota `compute.instance.non-gpu.vcpu` was still 0, and it was 0 in every region we checked in the console. No answer or ETA came back. So no Serverless endpoint, no CPU job and no VM (our egress gateway) could ever start, while the L40S GPU quota (8) worked from day one.
+- **Expected:** a small default CPU quota with a new tenant, or an answer to the increase request with a time frame, within a hackathon's two weeks.
+- **Impact:** we redesigned the deploy three days before the deadline: the control plane runs on a VPS of ours, CPU work runs in local docker or Token Factory Sandboxes, and only the GPU experiments run on Nebius AI Cloud (docs/specs/hybrid-deploy.md). That cost about two days of engineering and review, and adds a host we must secure ourselves.
+- **Suggestion:** give hackathon tenants a few non-GPU vCPUs by default (the GPU quota already shows the intent), or let a request below a small threshold be approved automatically.
+- **Severity:** blocker
+
 ### 2026-10-21 — A GPU job waits ~16 minutes for capacity without any signal
 - **Context:** spike S4 (H-03), one L40S job.
 - **What happened:** the logs showed "Waiting before retrying resource provisioning" and the job started after ~16 minutes of wall time; the job state stayed in provisioning with no reason or estimate.
@@ -158,6 +167,14 @@ which worked on the first call.
 - **Impact:** the adapter is fully unit-tested with fake clients that speak the real types.
 - **Suggestion:** document this testing pattern (fake client + real messages) in the SDK README.
 - **Severity:** praise
+
+### 2026-10-27 — `nebius ai job create` creates the job, then fails on a lost operation stream
+- **Context:** spike S5 `--mode isolated` (H-03) on `gpu-l40s-a` / `1gpu-8vcpu-32gb`, nebius CLI from the VPS.
+- **What happened:** the CLI printed `Job ID: aijob-…`, then exited non-zero with `Error: can't get operation: rpc error: code = Internal desc = server closed the stream without sending trailers`. The job had been created, but any caller that trusts the exit code believes it was not, and a GPU job can then keep running (and billing) until its timeout.
+- **Expected:** `create` either retries the operation poll, or exits with a distinct code that says "created, state unknown" next to the resource ID.
+- **Impact:** a lost spike run (about 15 minutes of capacity wait). Our scripts already look the job up by its deterministic name and delete it on failure, and the orchestrator is get-by-name first for the same reason.
+- **Suggestion:** retry `Internal` / stream-reset errors on the operation poll inside the CLI and SDK, and document that create may succeed even when the operation wait fails.
+- **Severity:** major
 
 ## Nemotron models (Nano, Super, Ultra, Nano Omni)
 
