@@ -37,6 +37,7 @@ def _run(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], 
         "RUNTIME_S3_KEY_ID": "AKEXAMPLE",
         "RUNTIME_S3_SECRET": "very-secret-value",
         "P2P_LITESTREAM_CONFIG": str(ROOT / "images" / "api" / "litestream.yml"),
+        "DB_URL": "sqlite+aiosqlite:////var/lib/p2p/p2p.db",  # the image's ENV
     }
     assert SH is not None
     done = subprocess.run(  # noqa: S603 - the repo's own script with a test environment
@@ -136,3 +137,25 @@ def test_a_wildcard_or_odd_proxy_list_is_refused(tmp_path: Path, value: str) -> 
     done, calls = _run(tmp_path, P2P_FORWARDED_ALLOW_IPS=value)
     assert done.returncode != 0
     assert calls == []  # refused before the database is restored or migrated
+
+
+def test_the_hybrid_host_binds_only_to_localhost(tmp_path: Path) -> None:
+    """docs/DEPLOY.md hybrid: a TLS proxy on the same host is the only way in."""
+    done, calls = _run(tmp_path, P2P_BIND_HOST="127.0.0.1")
+    assert done.returncode == 0, done.stderr
+    assert " --host 127.0.0.1 --port 8080 " in calls[-2]
+
+
+@pytest.mark.parametrize("value", ["localhost", "0.0.0.0 --reload", "::1;x", "300.1.1.1"])
+def test_a_bind_address_that_is_not_an_ip_is_refused(tmp_path: Path, value: str) -> None:
+    done, calls = _run(tmp_path, P2P_BIND_HOST=value)
+    assert done.returncode != 0 and "P2P_BIND_HOST" in done.stderr
+    assert not calls  # before anything runs
+
+
+@pytest.mark.parametrize("url", ["", "sqlite+aiosqlite:///./var/p2p.db"])
+def test_the_app_must_use_the_database_litestream_replicates(tmp_path: Path, url: str) -> None:
+    """A host checkout without DB_URL would write an unreplicated ./var/p2p.db (infra review)."""
+    done, calls = _run(tmp_path, DB_URL=url)
+    assert done.returncode != 0 and "DB_URL" in done.stderr
+    assert not calls
