@@ -155,6 +155,65 @@ def test_links_and_fifos_are_never_followed_or_sent(tmp_path: Path, s3: Any) -> 
     }
 
 
+def test_a_same_size_file_with_new_content_is_sent_again(tmp_path: Path, s3: Any) -> None:
+    """A re-provision can rewrite a file with the same length (x==2.4.0 -> x==2.4.1)."""
+    root = _run_dir(tmp_path)
+    upload_run_dir(s3, bucket_name(RUN), root)
+    (root / "staging" / "overlay.tar.zst").write_bytes(b"OVERLAY")
+    assert upload_run_dir(s3, bucket_name(RUN), root) == 1
+    assert _keys(s3)["staging/overlay.tar.zst"] == b"OVERLAY"
+
+
+def _between_scan_and_open(monkeypatch: pytest.MonkeyPatch, change: Any) -> None:
+    """Runs `change` once, when the upload first asks the bucket about a file: after the
+    scan, before that file is opened (what a still-running job could do)."""
+    real = hybrid._remote_sha256
+    done: list[bool] = []
+
+    def hooked(client: Any, bucket: str, key: str) -> Any:
+        if not done:
+            done.append(True)
+            change()
+        return real(client, bucket, key)
+
+    monkeypatch.setattr(hybrid, "_remote_sha256", hooked)
+
+
+@POSIX
+def test_a_directory_swapped_for_a_link_after_the_scan_is_never_followed(
+    tmp_path: Path, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _run_dir(tmp_path)
+    secrets = tmp_path / "host-secrets" / "data"
+    secrets.mkdir(parents=True)
+    (secrets / "cifar.tar.zst").write_bytes(b"host secret")
+
+    def swap() -> None:
+        data = root / "staging" / "data"
+        data.rename(root / "staging" / "moved")
+        data.symlink_to(secrets)
+
+    _between_scan_and_open(monkeypatch, swap)
+    with pytest.raises(UploadRefused):
+        upload_run_dir(s3, bucket_name(RUN), root)
+    assert b"host secret" not in _keys(s3).values()
+
+
+def test_a_file_replaced_after_the_scan_is_refused(
+    tmp_path: Path, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _run_dir(tmp_path)
+    target = root / "staging" / "data" / "cifar.tar.zst"
+
+    def grow() -> None:
+        target.unlink()
+        target.write_bytes(b"x" * 10_000)  # another file, another size
+
+    _between_scan_and_open(monkeypatch, grow)
+    with pytest.raises(UploadRefused, match="changed"):
+        upload_run_dir(s3, bucket_name(RUN), root)
+
+
 def test_a_run_copy_over_its_bounds_is_refused(
     tmp_path: Path, s3: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -252,12 +311,16 @@ async def test_an_upload_that_cannot_reach_the_bucket_is_retried_at_the_next_pol
     assert await backend.status(handle) is JobState.SUCCEEDED
 
 
-async def test_a_failed_local_job_uploads_nothing(tmp_path: Path) -> None:
-    backend, local, _, uploads = _hybrid(tmp_path)
+async def test_a_failed_local_job_still_uploads_its_error_report(tmp_path: Path) -> None:
+    """The provisioner's error file tells the run why it failed: best effort, still FAILED."""
+    uploads = Uploads(OSError("connection reset"))
+    backend, local, _, _ = _hybrid(tmp_path, uploads)
     local.final_state = JobState.FAILED
     handle = await backend.submit(_job(JobKind.PROVISION))
     assert await backend.status(handle) is JobState.FAILED
-    assert uploads.calls == []
+    assert len(uploads.calls) == 1
+    assert await backend.status(handle) is JobState.FAILED
+    assert len(uploads.calls) == 1  # tried once
 
 
 async def test_remote_jobs_are_never_uploaded(tmp_path: Path) -> None:

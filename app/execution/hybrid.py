@@ -6,13 +6,15 @@ The local run directory was written by the provisioner image (our code) from unt
 regular files, and refuses a copy over its bounds before anything is sent."""
 
 import asyncio
+import hashlib
 import logging
 import os
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, BinaryIO, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -44,61 +46,163 @@ class UploadRefused(RuntimeError):
     """The local run copy cannot be uploaded as it is: the job that wrote it fails."""
 
 
-def _files(root: Path) -> list[tuple[str, Path, int]]:
-    """(key, path, size) of every regular file under `root`; links, FIFOs and devices are
-    skipped, never followed. Bounded before anything is sent."""
-    found: list[tuple[str, Path, int]] = []
+# POSIX: every component is opened relative to its parent with O_NOFOLLOW, so a directory a
+# still-running job swaps for a link between the scan and the upload is never followed. Windows
+# (dev only; the hybrid deploy is a Linux host) checks paths instead.
+_DIR_FD = os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+CHUNK = 1 << 20
+
+
+@dataclass(frozen=True)
+class _Entry:
+    key: str
+    parts: tuple[str, ...]
+    dev: int
+    ino: int
+    size: int
+
+
+def _open_dir(parent: int | None, name: str) -> int:
+    flags = os.O_RDONLY | _DIRECTORY | _NOFOLLOW
+    return os.open(name, flags, dir_fd=parent) if parent is not None else os.open(name, flags)
+
+
+def _scan(root: Path) -> list[_Entry]:
+    """Every regular file under `root`; links, FIFOs and devices are skipped, never followed.
+    Bounded before anything is sent."""
+    found: list[_Entry] = []
     total = 0
-    pending = [(root, "")]
-    while pending:
-        folder, prefix = pending.pop()
+
+    def add(parts: tuple[str, ...], info: os.stat_result) -> None:
+        nonlocal total
+        key = "/".join(parts)
+        try:
+            check_run_key(key)
+        except ValueError:
+            raise UploadRefused(f"not a safe object key: {key!r}") from None
+        found.append(_Entry(key, parts, info.st_dev, info.st_ino, info.st_size))
+        total += info.st_size
+        if len(found) > MAX_UPLOAD_FILES:
+            raise UploadRefused(f"the run copy has more than {MAX_UPLOAD_FILES} files")
+        if total > MAX_UPLOAD_BYTES:
+            raise UploadRefused(f"the run copy has more than {MAX_UPLOAD_BYTES} bytes")
+
+    def walk_fd(fd: int, prefix: tuple[str, ...]) -> None:
+        for name in sorted(os.listdir(fd)):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = _open_dir(fd, name)
+                try:
+                    walk_fd(child, (*prefix, name))
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                add((*prefix, name), info)
+
+    def walk_path(folder: Path, prefix: tuple[str, ...]) -> None:
         with os.scandir(folder) as entries:
-            for entry in entries:
-                key = f"{prefix}{entry.name}"
+            for entry in sorted(entries, key=lambda e: e.name):
                 if entry.is_symlink() or entry.is_junction():
                     continue
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append((Path(entry.path), key + "/"))
-                    continue
-                if not entry.is_file(follow_symlinks=False):
-                    continue  # a FIFO, a socket, a device
-                try:
-                    check_run_key(key)
-                except ValueError:
-                    raise UploadRefused(f"not a safe object key: {key!r}") from None
-                size = entry.stat(follow_symlinks=False).st_size
-                found.append((key, Path(entry.path), size))
-                total += size
-                if len(found) > MAX_UPLOAD_FILES:
-                    raise UploadRefused(f"the run copy has more than {MAX_UPLOAD_FILES} files")
-                if total > MAX_UPLOAD_BYTES:
-                    raise UploadRefused(f"the run copy has more than {MAX_UPLOAD_BYTES} bytes")
-    return sorted(found)
+                info = Path(entry.path).lstat()  # with the inode (scandir has none on Windows)
+                if stat.S_ISDIR(info.st_mode):
+                    walk_path(Path(entry.path), (*prefix, entry.name))
+                elif stat.S_ISREG(info.st_mode):
+                    add((*prefix, entry.name), info)
+
+    if _DIR_FD:
+        fd = _open_dir(None, str(root))
+        try:
+            walk_fd(fd, ())
+        finally:
+            os.close(fd)
+    else:
+        walk_path(root, ())
+    return found
 
 
-def _remote_size(client: S3Client, bucket: str, key: str) -> int | None:
+def _open(root: Path, entry: _Entry) -> int:
+    """The scanned file, reached without following any link; refused if it is not the file
+    the scan saw (another inode, another size: something rewrote it in between)."""
+    flags = os.O_RDONLY | _NOFOLLOW | _NONBLOCK | _BINARY
+    if _DIR_FD:
+        fd = _open_dir(None, str(root))
+        try:
+            for part in entry.parts[:-1]:
+                child = _open_dir(fd, part)
+                os.close(fd)
+                fd = child
+            file = os.open(entry.parts[-1], flags, dir_fd=fd)
+        finally:
+            os.close(fd)
+    else:
+        path = root.joinpath(*entry.parts)
+        if any(p.is_symlink() for p in [path, *path.parents] if p != root and root in p.parents):
+            raise UploadRefused(f"{entry.key} changed after the scan (a link)")
+        file = os.open(path, flags)
+    info = os.fstat(file)
+    if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino, info.st_size) != (
+        entry.dev,
+        entry.ino,
+        entry.size,
+    ):
+        os.close(file)
+        raise UploadRefused(f"{entry.key} changed after the scan")
+    return file
+
+
+class _Bounded:
+    """Reads at most `size` bytes: a file that grows after the check is sent as checked."""
+
+    def __init__(self, handle: BinaryIO, size: int) -> None:
+        self._handle = handle
+        self._left = size
+
+    def read(self, n: int = -1) -> bytes:
+        want = self._left if n is None or n < 0 else min(n, self._left)
+        data = self._handle.read(want) if want > 0 else b""
+        self._left -= len(data)
+        return data
+
+
+def _sha256(handle: BinaryIO, size: int) -> str:
+    digest = hashlib.sha256()
+    reader = _Bounded(handle, size)
+    while chunk := reader.read(CHUNK):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _remote_sha256(client: S3Client, bucket: str, key: str) -> str | None:
+    """The sha256 we stored with the object, None when it is not there."""
     try:
-        return int(client.head_object(Bucket=bucket, Key=key)["ContentLength"])
+        head = client.head_object(Bucket=bucket, Key=key)
     except ClientError as err:
         if err.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
             return None
         raise
+    value = head.get("Metadata", {}).get("sha256")
+    return str(value) if value else None
 
 
 def upload_run_dir(client: S3Client, bucket: str, root: Path) -> int:
-    """Upload the local run copy to `bucket` under the same keys; a key already there with the
-    same size is skipped (a resumed step, a poll after success). Returns the files sent.
+    """Upload the local run copy to `bucket` under the same keys; an object already there with
+    the same sha256 is skipped (a resumed step, a poll after success). Returns the files sent.
     Blocking: call it in a thread."""
     sent = 0
-    for key, path, size in _files(root):
-        if _remote_size(client, bucket, key) == size:
-            continue
-        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _NONBLOCK | _BINARY)
-        with os.fdopen(fd, "rb") as handle:  # the file checked above, never a swapped link
-            info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise UploadRefused(f"{key} is no longer a regular file")
-            client.upload_fileobj(handle, bucket, key)  # multipart for large files
+    for entry in _scan(root):
+        remote = _remote_sha256(client, bucket, entry.key)
+        fd = _open(root, entry)
+        with os.fdopen(fd, "rb") as handle:
+            local = _sha256(handle, entry.size)
+            if remote == local:
+                continue
+            handle.seek(0)
+            client.upload_fileobj(
+                cast("IO[bytes]", _Bounded(handle, entry.size)), bucket, entry.key,
+                ExtraArgs={"Metadata": {"sha256": local}},
+            )  # fmt: skip
         sent += 1
     return sent
 
@@ -147,7 +251,12 @@ class HybridJobBackend:
 
     async def status(self, handle: JobHandle) -> JobState:
         state = await self._for(handle.name).status(handle)
-        if state is not JobState.SUCCEEDED or _kind(handle.name) not in LOCAL_KINDS:
+        if _kind(handle.name) not in LOCAL_KINDS:
+            return state
+        if state is JobState.FAILED:  # its error report says why: best effort, once
+            await self._report_failure(handle)
+            return state
+        if state is not JobState.SUCCEEDED:
             return state
         lock = self._locks.setdefault(handle.name, asyncio.Lock())
         async with lock:  # two polls never upload the same copy at once
@@ -164,6 +273,16 @@ class HybridJobBackend:
             self._uploaded.add(handle.name)
             log.info("run copy uploaded", extra={"job": handle.name, "files": sent})
         return state
+
+    async def _report_failure(self, handle: JobHandle) -> None:
+        if handle.name in self._uploaded:
+            return
+        self._uploaded.add(handle.name)
+        bucket = bucket_name("r_" + handle.name.split("-")[2])
+        try:
+            await asyncio.to_thread(self._upload, bucket, self._buckets / bucket)
+        except (UploadRefused, OSError, ClientError, BotoCoreError) as err:
+            log.warning("failed job's copy not uploaded: %s", type(err).__name__)
 
     async def cancel(self, handle: JobHandle) -> None:
         await self._for(handle.name).cancel(handle)
