@@ -176,11 +176,13 @@ class _Bounded:
     def __init__(self, handle: BinaryIO, size: int) -> None:
         self._handle = handle
         self._left = size
+        self.digest = hashlib.sha256()  # of what was actually read (and sent)
 
     def read(self, n: int = -1) -> bytes:
         want = self._left if n is None or n < 0 else min(n, self._left)
         data = self._handle.read(want) if want > 0 else b""
         self._left -= len(data)
+        self.digest.update(data)
         return data
 
 
@@ -212,15 +214,19 @@ def upload_run_dir(client: S3Client, bucket: str, root: Path) -> int:
     for entry in _scan(root):
         remote = _remote_sha256(client, bucket, entry.key)
         fd = _open(root, entry)
-        with os.fdopen(fd, "rb") as handle:
+        with os.fdopen(fd, "rb", buffering=0) as handle:  # every read reaches the file
             local = _sha256(handle, entry.size)
             if remote == local:
                 continue
             handle.seek(0)
+            reader = _Bounded(handle, entry.size)
             client.upload_fileobj(
-                cast("IO[bytes]", _Bounded(handle, entry.size)), bucket, entry.key,
+                cast("IO[bytes]", reader), bucket, entry.key,
                 ExtraArgs={"Metadata": {"sha256": local}},
             )  # fmt: skip
+            if reader.digest.hexdigest() != local:  # rewritten in place between hash and send
+                client.delete_object(Bucket=bucket, Key=entry.key)
+                raise UploadRefused(f"{entry.key} changed during the upload")
         sent += 1
     return sent
 

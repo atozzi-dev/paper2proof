@@ -3,6 +3,7 @@ provision and fetch jobs (our provisioner image) in local docker, for any paper;
 paper code never runs here (invariant 1)."""
 
 import errno
+import hashlib
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -451,3 +452,25 @@ async def test_a_delete_removes_the_key_from_both_copies(tmp_path: Path) -> None
     await storage.put_bytes(RUN, "results/1/results.json", b"{}")  # reads and writes: Nebius
     assert await storage.get_bytes(RUN, "results/1/results.json") == b"{}"
     assert await local.get_bytes(RUN, "results/1/results.json") is None
+
+
+def test_a_file_rewritten_in_place_during_the_upload_is_refused_and_removed(
+    tmp_path: Path, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same inode, same size, new bytes between the hash and the upload: the object would carry
+    a wrong sha256, so it is deleted and the copy refused (security re-review N5)."""
+    root = _run_dir(tmp_path)
+    target = root / "staging" / "overlay.tar.zst"
+    real = hybrid._sha256
+
+    def rewrite_after_hashing(handle: Any, size: int) -> str:
+        digest = real(handle, size)
+        if digest == hashlib.sha256(b"overlay").hexdigest():  # right after hashing that file
+            with target.open("r+b") as again:  # in place: same inode and size
+                again.write(b"OVERLAY")
+        return digest
+
+    monkeypatch.setattr(hybrid, "_sha256", rewrite_after_hashing)
+    with pytest.raises(UploadRefused, match="changed during the upload"):
+        upload_run_dir(s3, bucket_name(RUN), root)
+    assert "staging/overlay.tar.zst" not in _keys(s3)
