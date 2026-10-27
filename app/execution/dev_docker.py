@@ -3,12 +3,15 @@ local docker, with per-run "buckets" as directories under `root`.
 
 Like LocalTrustedExecutor, this is the one exception to invariant 1: it refuses to exist unless
 `P2P_ENV=dev`, and refuses every job of a run unless `config/canary_allowlist.yaml` binds its
-paper's sha256 to the run's arXiv ID. Containers keep the job's isolation: non-root (10001), no
-capabilities, no new privileges, a read-only root with private scratch space, capped memory and
-logs, a host-side kill at the watchdog, no network except for the provision and fetch jobs
-(the provisioner image, our code; locally their egress is not allowlisted as the gateway does
-in the cloud), and only the run's own directory and the cache mounted: the cache read-only
-except for the provision job, never for the fetch job.
+paper's sha256 to the run's arXiv ID. With `provisioner_only` (the hybrid deploy,
+docs/specs/hybrid-deploy.md) it serves the prod control-plane host instead: only provision and
+fetch jobs, only the configured provisioner image (our code, by its registry digest), for any
+paper, since no model or paper code ever runs in them. Containers keep the job's isolation:
+non-root (10001), no capabilities, no new privileges, a read-only root with private scratch
+space, capped memory and logs, a host-side kill at the watchdog, no network except for the
+provision and fetch jobs (the provisioner image, our code; locally their egress is not
+allowlisted as the gateway does in the cloud), and only the run's own directory and the cache
+mounted: the cache read-only except for the provision job, never for the fetch job.
 """
 
 import asyncio
@@ -28,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.execution.backend import CACHE_BUCKET, CACHE_MOUNT, JobHandle, JobKind, JobSpec, JobState
+from app.execution.config import DIGEST_REF
 from app.execution.local_trusted import (
     DockerRunner,
     LocalTrustedRefused,
@@ -35,12 +39,17 @@ from app.execution.local_trusted import (
     docker_cli,
     is_canary,
 )
-from app.execution.naming import bucket_name
+from app.execution.naming import bucket_name, run_slug
 from app.execution.run_storage import MAX_READ_BYTES
 
 _DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})$")
 _JOB_NAME = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
 _MOUNT_PATH = re.compile(r"^/mnt/[a-z]{1,32}$")
+_NETWORK = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}$")
+_BUILTIN_NETWORKS = frozenset({"host", "bridge", "none", "default"})
+_TRASH = re.compile(
+    r"^\.trash-(p2p-(?:prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4})-[0-9a-f]{8}$"
+)
 _INJECT_PATH = re.compile(r"^/etc/p2p/(?!\.\.?$)[a-z0-9._-]{1,64}$")
 _STATES = {
     "created": JobState.PENDING,
@@ -100,9 +109,21 @@ class DevDockerBackend:
         docker: DockerRunner = docker_cli,
         host_uid: int | None = _host_uid(),
         acl: DockerRunner = docker_cli,
+        provisioner_only: str | None = None,
+        network: str | None = None,
     ) -> None:
-        if env != "dev":
+        if provisioner_only is not None and not re.fullmatch(DIGEST_REF, provisioner_only):
+            raise ValueError("the provisioner image is referenced by digest (invariant 8)")
+        if network is not None and (
+            not _NETWORK.fullmatch(network) or network in _BUILTIN_NETWORKS
+        ):  # host would hand the jobs this host's network; the firewall restricts ours only
+            raise ValueError(f"not a dedicated docker network: {network!r}")
+        self._network = network  # provision and fetch only: the host firewall restricts it
+        if provisioner_only is not None and env != "prod":
+            raise LocalTrustedRefused("provisioner-only local jobs are for the hybrid prod deploy")
+        if provisioner_only is None and env != "dev":
             raise LocalTrustedRefused("the local docker job backend runs only with P2P_ENV=dev")
+        self._provisioner = provisioner_only
         self._canaries = canaries
         self._paper = paper
         self._root = root.resolve()
@@ -158,7 +179,25 @@ class DevDockerBackend:
         return name
 
     async def delete_run_bucket(self, run_id: str) -> None:
-        shutil.rmtree(self._bucket(bucket_name(run_id)), ignore_errors=True)
+        """The run's directory, and its jobs' containers and directories: nothing of a run
+        stays on this host's disk (thread: up to tens of GiB of files)."""
+        await asyncio.to_thread(shutil.rmtree, self._bucket(bucket_name(run_id)), True)
+        jobs = self._root / "jobs"
+        if not jobs.is_dir():
+            return
+        slug = run_slug(run_id)
+        for job in sorted(jobs.iterdir()):
+            trash = _TRASH.fullmatch(job.name)  # moved aside by a resubmit: no container
+            if trash is not None and trash.group(2) == slug:
+                await asyncio.to_thread(shutil.rmtree, job, True)
+                continue
+            match = _JOB_NAME.fullmatch(job.name)
+            if match is None or match.group(2) != slug:
+                continue
+            info = await self._inspect(job.name)
+            if info is not None and self._ours(info):
+                await self._cli("rm", "-f", job.name)
+            await asyncio.to_thread(shutil.rmtree, job, True)
 
     async def list_run_buckets(self) -> list[tuple[str, datetime]]:
         folder = self._root / "buckets"
@@ -213,19 +252,37 @@ class DevDockerBackend:
                 raise ValueError(f"invalid inject path: {path!r}")
         return run_id
 
+    async def _image(self, spec: JobSpec, run_id: str) -> str:
+        """What the container runs, after the gate of this backend's mode."""
+        if self._provisioner is None:
+            if not is_canary(self._canaries, await self._paper(run_id)):
+                raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
+            return local_image(spec.image_digest_ref)
+        if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):
+            raise LocalTrustedRefused("this host runs only provision and fetch jobs")
+        if spec.image_digest_ref != self._provisioner:
+            raise LocalTrustedRefused("this host runs only the configured provisioner image")
+        return self._provisioner  # pulled and run by its registry digest (invariant 8)
+
+    def _runs(self, info: dict[str, object], image: str) -> bool:
+        """Whether a container runs `image`: a local build by its image id, a registry image
+        by the digest reference it was started with."""
+        if self._provisioner is None:
+            return info.get("Image") == image
+        config = info.get("Config")
+        return isinstance(config, dict) and config.get("Image") == image
+
     async def submit(self, spec: JobSpec) -> JobHandle:
         run_id = self._checked(spec)
-        if not is_canary(self._canaries, await self._paper(run_id)):
-            raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
-        image = local_image(spec.image_digest_ref)
+        image = await self._image(spec, run_id)
         existing = await self._inspect(spec.name)
         if existing is not None:  # get-by-name: a resumed step finds its container
-            if not self._ours(existing) or existing.get("Image") != image:
+            if not self._ours(existing) or not self._runs(existing, image):
                 raise RuntimeError(f"{spec.name} exists but was not created by this backend")
             return JobHandle(name=spec.name, nebius_id=str(existing.get("Id", "")))
         await self._share_job_dirs()
         job = self._root / "jobs" / spec.name
-        shutil.rmtree(job, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, job, True)
         if _lstat(job, str(job)) is not None:  # a job can lock its own files (a 0700 mkdir)
             # Ours to move even when a subdirectory is not ours to empty: a resubmit (a smoke
             # iteration after a prune) always starts from nothing, never from old code's files.
@@ -250,6 +307,8 @@ class DevDockerBackend:
         mounts = [(job / "work", "/work", "rw"), (job / "home", "/home/p2p", "rw")]
         if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):  # they download (PyPI, repo, HF)
             argv.append("--network=none")
+        elif self._network is not None:
+            argv.append(f"--network={self._network}")
         for volume in spec.volumes:
             cache = volume.source == CACHE_BUCKET
             source = _plain_dir(self._root / "cache" if cache else self._bucket(volume.source))

@@ -37,6 +37,19 @@ for part in sys.argv[1].split(";"):
 fi
 config="${P2P_LITESTREAM_CONFIG:-/opt/p2p/litestream.yml}"
 db=/var/lib/p2p/p2p.db
+# The app must open the very file litestream restores and replicates: anything else would keep
+# the ledger, the daily caps and the kill switch in an unreplicated file (a host checkout).
+if [ "${DB_URL:-}" != "sqlite+aiosqlite:///$db" ]; then
+  echo "DB_URL must be sqlite+aiosqlite:///$db (the database litestream replicates)" >&2
+  exit 1
+fi
+# 0.0.0.0 behind the managed endpoint; 127.0.0.1 on a host of ours behind its TLS proxy (the
+# hybrid deploy). An IP literal only, so nothing else reaches uvicorn's command line.
+bind="${P2P_BIND_HOST:-0.0.0.0}"
+python -I -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$bind" 2> /dev/null || {
+  echo "P2P_BIND_HOST must be an IP address" >&2
+  exit 1
+}
 
 # litestream reads its credentials from these (never from the config file or the command line)
 export LITESTREAM_ACCESS_KEY_ID="$RUNTIME_S3_KEY_ID"
@@ -55,4 +68,4 @@ export P2P_REPLICATION=litestream  # with the parent process check, what /readyz
 # A bounded graceful shutdown: open SSE streams must not hold litestream's final sync past the
 # platform's kill.
 exec litestream replicate -config "$config" -exec \
-  "uvicorn app.main:app --host 0.0.0.0 --port 8080 --workers 1 --no-server-header --timeout-graceful-shutdown 10$proxy"
+  "uvicorn app.main:app --host $bind --port 8080 --workers 1 --no-server-header --timeout-graceful-shutdown 10$proxy"

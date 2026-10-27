@@ -144,7 +144,7 @@ subject pins repository, environment and branch.
     retry their first egress for about 120 s.
   - *Recovery.* A failed first boot (for example an apt mirror outage after five retries) leaves
     the gateway fail-closed and dead. Replace it:
-    `terraform apply -replace=module.egress_gateway.nebius_compute_v1_instance.gateway`.
+    `terraform apply -replace='module.egress_gateway[0].nebius_compute_v1_instance.gateway'`.
 - **Lifecycle (§10.3).** `p2p-state`: versioning, noncurrent versions expire after 7 days.
   `p2p-bundles`: versioning, objects expire on 2027-01-31, noncurrent versions 30 days later.
   `p2p-cache`: objects expire 30 days after upload (Nebius expiration counts from upload; "days since

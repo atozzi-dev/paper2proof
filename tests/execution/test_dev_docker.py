@@ -45,7 +45,7 @@ class Docker:
                 "Name": "/" + name,
                 "Created": "2026-10-20T10:00:00.123456789Z",
                 "Image": argv[-1],
-                "Config": {"Labels": labels},
+                "Config": {"Labels": labels, "Image": argv[-1]},  # the reference as given
                 "State": {"Status": "running", "ExitCode": 0, "StartedAt": _now()},
             }
             return 0, "cid-" + name + "\n", ""

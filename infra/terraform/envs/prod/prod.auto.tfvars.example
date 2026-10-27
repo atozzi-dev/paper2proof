@@ -14,4 +14,7 @@ sandbox_project_id = "project-..." # p2p-sandbox
 # exec_cidr      = "10.1.1.0/24"
 # gateway_cidr   = "10.1.2.0/27"
 
+# false for the hybrid deploy (no non-GPU vCPU quota): no gateway VM, exec jobs have no
+# internet (docs/specs/hybrid-deploy.md).
+enable_gateway    = true
 enable_managed_pg = false

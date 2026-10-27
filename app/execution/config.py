@@ -14,3 +14,6 @@ class ExecutionConfig(BaseModel):
     subnet_provision: str = Field(min_length=1)
     subnet_exec: str = Field(min_length=1)
     preemptible_gpu: bool  # P2P_GPU_PREEMPTIBLE: explicit, never defaulted (no for demos)
+    # where smoke jobs run: a CPU platform, or the GPU one in the hybrid deploy (no CPU quota)
+    smoke_platform: str = Field(default="cpu-d3", min_length=1)
+    smoke_preset: str = Field(default="4vcpu-16gb", min_length=1)

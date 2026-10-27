@@ -224,6 +224,19 @@ async def test_the_settled_charge_reaches_the_run_page_once(world: World) -> Non
     assert updates[0].total_usd == pytest.approx(RATES["exec"] * 0.5)
 
 
+async def test_a_smoke_job_on_a_gpu_platform_counts_gpu_minutes(world: World) -> None:
+    """Hybrid deploy: smoke jobs run on the GPU platform, so their time is GPU time too."""
+    await world.run(RUN, RunStatus.FAILED)
+    started = NOW - timedelta(minutes=12)
+    handle = add_job(world.backend, JobKind.SMOKE, RUN, JobState.SUCCEEDED, started)
+    await world.store.record_job(
+        RUN, "smoke", handle.name, handle.nebius_id, bucket_name(RUN),
+        deadline=started + timedelta(minutes=20), at=started, platform="gpu-l40s-a",
+    )  # fmt: skip
+    await world.reaper.tick()
+    assert await world.budget.run_spend(RUN, SpendKind.GPU_MINUTES) == pytest.approx(12)
+
+
 async def test_ledger_gap_is_capped_at_the_platform_timeout(world: World) -> None:
     await world.run(RUN, RunStatus.FAILED)
     started = NOW - timedelta(hours=5)
@@ -494,6 +507,13 @@ def test_rates_cover_every_job_kind() -> None:
     assert set(rates) == {kind.value for kind in JobKind}
     assert rates["exec"] > rates["prov"] > 0
     assert rates["fetch"] == rates["prov"]  # same image, platform and preset
+
+
+def test_smoke_jobs_are_charged_at_the_configured_smoke_platform() -> None:
+    """Hybrid deploy: smoke jobs run on the GPU platform, so the reaper charges that rate."""
+    rates = reaper_rates(CLOUD, smoke=("gpu-l40s-a", "1gpu-8vcpu-32gb"))
+    assert rates["smoke"] == CLOUD.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    assert reaper_rates(CLOUD)["smoke"] == CLOUD.hourly("cpu-d3", "4vcpu-16gb")
 
 
 def test_an_exec_job_of_unknown_platform_is_charged_at_the_dearer_gpu_platform() -> None:

@@ -10,6 +10,7 @@ to start without them.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import multiprocessing
@@ -42,6 +43,7 @@ from app.execution.backend import JobBackend
 from app.execution.config import ExecutionConfig
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.hybrid import HybridJobBackend, HybridRunStorage, upload_run_dir
 from app.execution.local_trusted import load_canaries, store_paper_lookup
 from app.execution.nebius_backend import build_nebius_execution
 from app.execution.package_policy import (
@@ -51,7 +53,7 @@ from app.execution.package_policy import (
     load_policy_config,
 )
 from app.execution.run_storage import FakeRunStorage, RunStorage
-from app.execution.s3 import S3ArtifactStore
+from app.execution.s3 import S3ArtifactStore, S3Client
 from app.execution.smoke_factory import SmokeOptions, build_smoke_executor
 from app.ingestion.arxiv import ArxivClient
 from app.ingestion.canaries import PaperRouter, load_canary_papers
@@ -65,6 +67,7 @@ from app.models.client import (
 from app.models.pricing import Pricing, load_cloud_prices
 from app.models.router import RouterError, fetch_models, resolve_roles
 from app.orchestrator.budget import Budget, BudgetLimits, load_budget_limits
+from app.orchestrator.cost_estimate import EXEC_PLATFORM, EXEC_PRESET
 from app.orchestrator.fsm import Orchestrator, Step
 from app.orchestrator.reaper import Reaper, reaper_rates
 from app.orchestrator.steps.analyzing import AnalyzingStep
@@ -209,6 +212,9 @@ def prod_adapters(settings: Settings) -> Adapters:
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise ConfigError(f"P2P_ENV=prod needs {', '.join(missing)}")
+    hybrid = settings.p2p_execution == "hybrid"
+    if hybrid:
+        _check_hybrid(settings)
     keys = settings.p2p_var_dir / "keys"  # written only once everything else is in place
     launcher_key = key_file(settings.job_launcher_auth_key, None, keys / "launcher.json")
     runtime_key = key_file(settings.runtime_auth_key, None, keys / "runtime.json")
@@ -232,13 +238,57 @@ def prod_adapters(settings: Settings) -> Adapters:
         key_id=_secret(settings.runtime_s3_key_id),
         secret=settings.runtime_s3_secret,
     )
+    jobs: JobBackend = execution.backend
+    storage: RunStorage = execution.storage
+    if hybrid:
+        assert settings.p2p_local_jobs_dir  # noqa: S101 (checked in _check_hybrid)
+        jobs = _hybrid_jobs(settings, execution.backend, execution.s3)
+        storage = HybridRunStorage(execution.storage, LocalRunStorage(settings.p2p_local_jobs_dir))
     return Adapters(
-        execution.backend,
-        execution.storage,
+        jobs,
+        storage,
         artifacts,
         ArtifactBundleStore(artifacts),
         signer=kms_signer(runtime_key, settings.p2p_bundle_key_id),
         reap=True,
+    )
+
+
+def _check_hybrid(settings: Settings) -> None:
+    """The hybrid deploy has no gateway and no CPU jobs (docs/specs/hybrid-deploy.md)."""
+    if settings.gateway_instance_id:
+        raise ConfigError("P2P_EXECUTION=hybrid has no gateway: unset GATEWAY_INSTANCE_ID")
+    if settings.p2p_local_jobs_dir is None:
+        raise ConfigError("P2P_EXECUTION=hybrid needs P2P_LOCAL_JOBS_DIR")
+    if settings.smoke_executor != "sandboxes":
+        raise ConfigError("P2P_EXECUTION=hybrid needs SMOKE_EXECUTOR=sandboxes (no CPU jobs)")
+    if not settings.p2p_provisioner_image:
+        raise ConfigError("P2P_EXECUTION=hybrid needs P2P_PROVISIONER_IMAGE")
+    if not settings.p2p_local_jobs_network:  # never docker's default bridge (docs/DEPLOY.md)
+        raise ConfigError("P2P_EXECUTION=hybrid needs P2P_LOCAL_JOBS_NETWORK")
+
+
+async def _no_paper(run_id: str) -> None:
+    return None  # provisioner-only local jobs never ask which paper a run is
+
+
+def _hybrid_jobs(settings: Settings, remote: JobBackend, s3: S3Client) -> JobBackend:
+    """Provision and fetch jobs in local docker on this host, everything else on Nebius."""
+    assert settings.p2p_local_jobs_dir and settings.p2p_provisioner_image  # noqa: S101
+    root = settings.p2p_local_jobs_dir
+    local = DevDockerBackend(
+        env=settings.p2p_env,
+        canaries={},
+        paper=_no_paper,
+        root=root,
+        provisioner_only=settings.p2p_provisioner_image,
+        network=settings.p2p_local_jobs_network,
+    )
+    return HybridJobBackend(
+        local=local,
+        remote=remote,
+        local_buckets=root.resolve() / "buckets",
+        upload=functools.partial(upload_run_dir, s3),
     )
 
 
@@ -277,6 +327,9 @@ def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
         "subnet_exec": ("P2P_SUBNET_EXEC", settings.p2p_subnet_exec),
         "preemptible_gpu": ("P2P_GPU_PREEMPTIBLE", settings.p2p_gpu_preemptible),
     }
+    hybrid = settings.p2p_execution == "hybrid"
+    if hybrid:  # provision and fetch jobs run on this host: no provision subnet
+        values.pop("subnet_provision")
     missing = [env for env, value in values.values() if value is None]
     if prod and missing:
         raise ConfigError(f"P2P_ENV=prod needs {', '.join(missing)}")
@@ -288,9 +341,14 @@ def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
         "subnet_exec": "local-exec",
         "preemptible_gpu": True,
     }
-    return ExecutionConfig.model_validate(
-        {k: defaults[k] if v is None else v for k, (_, v) in values.items()}
-    )
+    config = {k: defaults[k] if v is None else v for k, (_, v) in values.items()}
+    if hybrid:  # no CPU quota: smoke jobs (the Sandboxes fallback) run on the GPU platform
+        config.update(
+            subnet_provision=defaults["subnet_provision"],
+            smoke_platform=EXEC_PLATFORM,
+            smoke_preset=EXEC_PRESET,
+        )
+    return ExecutionConfig.model_validate(config)
 
 
 def _parent_name() -> str | None:
@@ -436,6 +494,8 @@ def build_runtime(
     cpu_pool: ProcessPoolExecutor | None = None,
 ) -> Runtime:
     prod = settings.p2p_env == "prod"
+    if not prod and settings.p2p_execution == "hybrid":
+        raise ConfigError("P2P_EXECUTION=hybrid is a prod deploy (docs/specs/hybrid-deploy.md)")
     if prod and settings.p2p_job_backend != "fake":
         raise ConfigError("P2P_JOB_BACKEND=docker is for dev canaries only, never in prod")
     built = (adapters or (prod_adapters if prod else dev_adapters))(settings)
@@ -555,7 +615,10 @@ def build_runtime(
     return Runtime(
         settings, store, budget, limits, built, lm, steps, orchestrator, state, http, cpu_pool,
         late,
-        Reaper(store, built.jobs, built.bundles, budget, rates=reaper_rates(cloud), cloud=cloud)
+        Reaper(
+            store, built.jobs, built.bundles, budget, cloud=cloud,
+            rates=reaper_rates(cloud, smoke=(execution.smoke_platform, execution.smoke_preset)),
+        )
         if built.reap
         else None,
         public_key,

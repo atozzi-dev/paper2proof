@@ -22,6 +22,7 @@ from app.bundle.sign import FakeSigner
 from app.domain.models import StepName
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.hybrid import HybridJobBackend, HybridRunStorage
 from app.execution.local_trusted import LocalTrustedRefused
 from app.execution.run_storage import FakeRunStorage
 from app.models.client import Role
@@ -473,3 +474,75 @@ async def test_canary_papers_are_ingested_from_the_repository(runtime: main.Runt
     step = runtime.steps[StepName.INGESTING]
     canary = build.discover()[0]
     assert await step._papers.source(canary.truth.arxiv_id) == build.source_bytes(canary)  # type: ignore[attr-defined]
+
+
+# --- hybrid deploy (docs/specs/hybrid-deploy.md) -------------------------------------------
+
+HYBRID: dict[str, object] = {
+    **PROD_STORAGE,
+    "gateway_instance_id": None,
+    "p2p_execution": "hybrid",
+    "smoke_executor": "sandboxes",
+    "p2p_local_jobs_network": "p2p-local-jobs",
+}
+
+
+def _nebius(seen: dict[str, object]) -> object:
+    def execution(**kwargs: object) -> object:
+        seen.update(kwargs)
+        remote = SimpleNamespace(backend=FakeJobBackend(), storage=FakeRunStorage(), s3=object())
+        seen["remote"] = remote
+        return remote
+
+    return execution
+
+
+def test_hybrid_runs_provisioning_here_and_jobs_on_nebius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius(seen))
+    monkeypatch.setattr(main.S3ArtifactStore, "connect", lambda **_: LocalArtifactStore(tmp_path))
+    monkeypatch.setattr(main, "kms_signer", lambda *_: FakeSigner())
+    settings = _prod(tmp_path, monkeypatch, **HYBRID, p2p_local_jobs_dir=tmp_path / "jobs")
+    adapters = main.prod_adapters(settings)
+    assert isinstance(adapters.jobs, HybridJobBackend)
+    assert isinstance(adapters.storage, HybridRunStorage)  # reads the bucket the jobs mount
+    assert seen["gateway_instance_id"] is None
+    assert adapters.reap
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"gateway_instance_id": "computeinstance-gw"}, "GATEWAY_INSTANCE_ID"),
+        ({"p2p_local_jobs_dir": None}, "P2P_LOCAL_JOBS_DIR"),
+        ({"smoke_executor": "job"}, "SMOKE_EXECUTOR"),
+        ({"p2p_local_jobs_network": None}, "P2P_LOCAL_JOBS_NETWORK"),
+    ],
+)
+def test_hybrid_refuses_a_gateway_no_local_dir_or_cpu_smoke_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], error: str
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    values = {**HYBRID, "p2p_local_jobs_dir": tmp_path / "jobs", **change}
+    settings = _prod(tmp_path, monkeypatch, **values)
+    with pytest.raises(main.ConfigError, match=error):
+        main.prod_adapters(settings)
+
+
+def test_hybrid_is_for_prod_only(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, p2p_execution="hybrid")
+    with pytest.raises(main.ConfigError, match="P2P_EXECUTION=hybrid"):
+        main.build_runtime(settings, adapters=main.dev_adapters)
+
+
+def test_hybrid_smoke_jobs_run_on_the_gpu_platform_and_need_no_provision_subnet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _prod(tmp_path, monkeypatch, **HYBRID, p2p_subnet_provision=None)
+    config = main.execution_config(settings, prod=True)
+    assert (config.smoke_platform, config.smoke_preset) == ("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    assert config.subnet_exec == "vpcsubnet-exec"
+    with pytest.raises(main.ConfigError, match="P2P_SUBNET_PROVISION"):
+        main.execution_config(_prod(tmp_path, monkeypatch, p2p_subnet_provision=None), prod=True)
