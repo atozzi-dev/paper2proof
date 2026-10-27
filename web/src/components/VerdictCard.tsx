@@ -37,7 +37,7 @@ function figures(claim: Claim | null, v: Verdict): { label: string; value: strin
 
 export function VerdictCard({ claim, claimId, verdict, explanationMd, ...inputs }: Props) {
   const headingId = useId()
-  const conditions = verdictConditions(verdict, inputs)
+  const conditions = verdictConditions(verdict, { ...inputs, claimId: claim?.id ?? claimId })
   const kind = verdict.kind.toLowerCase()
   const numbers = figures(claim, verdict)
   return (

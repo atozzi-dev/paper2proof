@@ -26,10 +26,16 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from app.domain.contracts import ArchiveDigests, ExecManifest, ManifestPaths, ScaleSpec
+from app.domain.contracts import (
+    ArchiveDigests,
+    ClaimSpec,
+    ExecManifest,
+    ManifestPaths,
+    ScaleSpec,
+)
 from app.domain.errors import P2PError
 from app.domain.events import MAX_LINES, EventType
-from app.domain.models import ClaimType, ErrorCode, Plan, RunStatus, Scale, StepName
+from app.domain.models import Claim, ClaimType, ErrorCode, Plan, RunStatus, Scale, StepName
 from app.execution.backend import CapacityError, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -44,7 +50,7 @@ from app.orchestrator.cost_estimate import (
     EXEC_PRESET,
 )
 from app.orchestrator.fsm import StepResult
-from app.orchestrator.steps.common import output_of, selected_claim
+from app.orchestrator.steps.common import output_of, planned_claims
 from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
 from app.verdict.results import MAX_RESULTS_BYTES
@@ -93,6 +99,38 @@ def _printable(ch: str) -> bool:
 def printable(text: str) -> str:
     """Text without control or format characters (ANSI, bidi, CR), tabs kept."""
     return "".join(ch for ch in text if _printable(ch))
+
+
+def _claim_specs(planned: list[tuple[Claim, ClaimType]], smoke: Any) -> list[ClaimSpec]:
+    """The manifest's claims: every planned claim the Coder measured, in the plan's order, with
+    the metrics.json keys it declared at finish (validated there against the smoke run)."""
+    measures = smoke.get("measures") if isinstance(smoke, dict) else None
+    if not isinstance(measures, list):
+        raise P2PError(ErrorCode.INTERNAL_ERROR, "the smoke result declares no measures")
+    by_claim = {m["claim_id"]: m for m in measures}
+    specs = []
+    for claim, kind in planned:
+        measure = by_claim.get(claim.id)
+        if measure is None:
+            continue  # declared unmeasured: VERDICT decides it without seeds
+        relative = kind is ClaimType.RELATIVE
+        specs.append(
+            ClaimSpec(
+                claim_ref=claim.id,
+                claim_type=kind,
+                metric=claim.metric,
+                higher_is_better=claim.higher_is_better,
+                metric_key=measure["key"],
+                # the name is only echoed back: a RELATIVE claim without one still runs
+                baseline_name=((claim.baseline_name or "")[:128] or "baseline")
+                if relative
+                else None,
+                baseline_key=measure.get("baseline_key") if relative else None,
+            )
+        )
+    if not specs:
+        raise P2PError(ErrorCode.INTERNAL_ERROR, "no planned claim is measured")
+    return specs
 
 
 def _workspace_digest(smoke: Any) -> str:
@@ -230,11 +268,11 @@ class ExecutingStep:
         budget = await self._budget_seconds(ctx, plan)
         if budget is None:
             return None
-        claim, kind = await selected_claim(ctx, plan)
         smoke = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
+        claims = _claim_specs(await planned_claims(ctx, plan), smoke)
         archives = await self._archives(ctx, plan)
         manifest = ExecManifest(
-            schema_="p2p.manifest/v1",
+            schema_="p2p.manifest/v2",
             run_id=ctx.run_id,
             attempt=attempt,
             image_digest=self._config.runner_image.rsplit("@", 1)[1],
@@ -250,13 +288,7 @@ class ExecutingStep:
                 cache="/mnt/cache",
                 results=f"/mnt/run/results/{attempt}",
             ),
-            claim_ref=claim.id,
-            metric=claim.metric,
-            higher_is_better=claim.higher_is_better,
-            claim_type=kind,
-            baseline_name=(
-                (claim.baseline_name or "")[:128] or None if kind is ClaimType.RELATIVE else None
-            ),
+            claims=claims,
             scale=ScaleSpec(full=plan.scale is Scale.FULL),
             archives=archives,
             workspace_sha256=_workspace_digest(smoke),

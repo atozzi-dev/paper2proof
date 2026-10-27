@@ -47,7 +47,11 @@ results/<attempt>/
   results.json                 # see schemas/results.schema.json
   live.log                     # flushed every 10 s by the runner
   stdout.log, stderr.log
-  env.json                     # pip freeze, nvidia-smi, driver, image digest
+  env.json                     # python, image digest, GPU name, NVIDIA driver, installed
+                               # packages (name==version, overlay first, read before
+                               # the experiment runs, cut at 128 KiB with
+                               # packages_truncated; code vendored in the repository or
+                               # the workspace is not listed)
   seeds/<seed>/metrics.json    # produced by the experiment script
 ```
 
@@ -163,7 +167,13 @@ doesn't match, and never glob `staging/data`. `argv` is
 `--seed`, `--out` or `--smoke` (also `-s`, `-o`, clusters and `@file`), here and in the exec
 manifest. A result counts only when the job SUCCEEDED and `result.json` echoes the nonce.
 
-The exec manifest is in `schemas/manifest.schema.json` (injected with `--inject-file`, ≤ 64 KiB).
+The exec manifest is in `schemas/manifest.schema.json` (`p2p.manifest/v2`, injected with
+`--inject-file`, ≤ 64 KiB). One job measures every claim of the plan that the Coder could
+measure: `claims` lists 1 to 5 of them, each with its `claim_ref`, `claim_type`, `metric`
+(the claim's metric name, for the tolerances), `higher_is_better`, `metric_key` (where the value
+is in `metrics.json`) and, for a RELATIVE claim, `baseline_name` and `baseline_key` (both null
+for an ABSOLUTE one). `claim_ref` is unique; several claims may read the same key (an ABSOLUTE
+claim and a RELATIVE one about the same method).
 
 ## 6. Experiment script contract (produced by the Coder)
 
@@ -171,28 +181,42 @@ The exec manifest is in `schemas/manifest.schema.json` (injected with `--inject-
 python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 ```
 
-- Writes `<dir>/metrics.json`: `{"<metric>": <float>, "baseline/<metric>": <float>?}`. Values must be finite.
+- Writes `<dir>/metrics.json`: a flat object of finite numbers, one key per measured value,
+  named by the Coder (e.g. `{"forest/accuracy": 0.97, "logreg/accuracy": 0.91}`). Keys match
+  `^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$`.
 - `--smoke` uses `data/smoke` and finishes in ≤ 120 s on CPU.
 - No network. No writes outside `<dir>` and `/tmp`.
 - Exit code 0 on success.
 
-`finish(entrypoint, args, expected_outputs)` validates: the entrypoint file exists in the workspace, the last smoke run passed with `--smoke`, and `metrics.json` contains the claim's metric (and its baseline for RELATIVE claims).
+`finish(entrypoint, args, expected_outputs, measures, unmeasured)` validates:
+- the entrypoint file exists in the workspace and the last smoke run passed with `--smoke` and
+  the same args, on the same workspace;
+- every claim of the plan appears exactly once, either in `measures`
+  (`{claim_id, key, baseline_key, unit}`: `baseline_key` for RELATIVE claims only, `unit` one
+  of `fraction`, `percent`, `raw`) or in `unmeasured` (`{claim_id, reason}`, reason ≤ 200
+  characters, model text shown as such); at least one claim is measured;
+- the smoke `metrics.json` has every declared key, and each value fits its declared unit.
+
+The control plane turns `measures` into the manifest's `claims` and keeps the units and the
+unmeasured claims in `smoke_result.json`. An unmeasured claim gets an INCONCLUSIVE verdict with
+reason `NOT_MEASURED`, decided by code.
 
 ## 7. Runner entrypoint (`images/runner/entrypoint.py`)
 
 1. Read `/etc/p2p/manifest.json`; validate against the schema; exit 30 on failure.
 2. Extract the workspace archive (`paths.workspace`, checked against `workspace_sha256`), `overlay.tar.zst`, `repo.tar.zst` and exactly the `archives.data` entries to local disk under `/work` (not on the mount), hashing the bytes read; nothing else from the bucket is executed or imported.
-3. For each seed in `manifest.seeds`, run the script from the extracted workspace in its own process group within the remaining budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); `seeds/<seed>/` is emptied first, then the script writes `seeds/<seed>/metrics.json`. Until the last seed, `results.json` reports `budget_timeout` (a job stopped from outside never looks completed).
-4. Aggregate into `results.json` (`per_seed`, `baseline.per_seed`, `scale`, `wall_clock_s`, `gpu`, `exit_reason`). `higher_is_better` and `baseline.name` are copied from the manifest. Both `per_seed` lists hold `{seed, value}` objects so the control plane can align them by seed; a failed seed has `ok: false` and `value: null`.
+3. For each seed in `manifest.seeds`, run the script once from the extracted workspace in its own process group within the remaining budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); `seeds/<seed>/` is emptied first, then the script writes `seeds/<seed>/metrics.json`, which is read once for every claim. Until the last seed, `results.json` reports `budget_timeout` (a job stopped from outside never looks completed).
+4. Aggregate into `results.json` (`p2p.results/v2`): `scale`, `wall_clock_s`, `gpu`, `exit_reason` and one entry per manifest claim, in the manifest's order, with its identifying fields copied from the manifest, `per_seed` and, for a RELATIVE claim, `baseline: {name, key, per_seed}`. Every `per_seed` list holds `{seed, value}` objects so the control plane can align them by seed. A seed whose script failed has `ok: false` and `value: null` for every claim; a seed that ran but wrote no usable value under a claim's key has `ok: false` and `value: null` for that claim only.
 5. Flush `live.log` every 10 s, mirroring the last 200 lines of stdout/stderr.
-6. Exit codes: `0` completed · `10` experiment error (at least one seed failed) · `20` budget timeout · `30` contract error.
+6. Exit codes: `0` completed · `10` experiment error (a seed's script failed, or wrote no claim's value) · `20` budget timeout · `30` contract error. A claim missing from some seeds of a completed job is that claim's problem only: its verdict sees fewer seeds.
 
 ### 7.1 Trusting `results.json`
 
 `results.json` is written by the same job that runs untrusted code, so the control plane treats it as untrusted input:
 
-- `run_id`, `attempt`, `claim_ref`, `claim_type`, `metric`, `higher_is_better`, `scale` and `baseline.name` must equal the stored manifest; any mismatch → `exit_reason` is overridden to `contract_error` (FSM `CONTRACT_ERROR`).
-- `per_seed[].seed` values must be unique and a subset of `manifest.seeds`; the same holds for `baseline.per_seed`. `value: null` is allowed only with `ok: false`.
+- `run_id`, `attempt` and `scale` must equal the stored manifest, and `claims` must list exactly the manifest's claims in the same order, each with the same `claim_ref`, `claim_type`, `metric`, `metric_key`, `higher_is_better` and baseline `name` and `key`; any mismatch → `exit_reason` is overridden to `contract_error` (FSM `CONTRACT_ERROR`).
+- In every claim, `per_seed[].seed` values must be unique and a subset of `manifest.seeds`; the same holds for `baseline.per_seed`. `value: null` is allowed only with `ok: false`. A number too large for a float (a JSON integer of hundreds of digits) is a contract error.
+- The analysis is per claim: `{exit_reason, claims: {claim_ref: {measurements, used_seeds}}, wall_clock_s, gpu}`. A RELATIVE claim uses only the seeds where both values are present.
 - `Measurements.scale` and `higher_is_better` come from the manifest and the stored `Claim`, never from `results.json`.
 
 ## 8. Job specs

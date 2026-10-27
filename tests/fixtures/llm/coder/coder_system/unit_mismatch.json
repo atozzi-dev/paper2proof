@@ -31,7 +31,7 @@
    {
     "id": "call_4",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"metric_unit\": \"fraction\"}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"baseline/top1_accuracy\", \"unit\": \"fraction\"}]}"
    }
   ]
  },
@@ -40,7 +40,7 @@
    {
     "id": "call_5",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"metric_unit\": \"percent\"}"
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"baseline/top1_accuracy\", \"unit\": \"percent\"}]}"
    }
   ]
  }

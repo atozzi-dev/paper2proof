@@ -826,6 +826,8 @@ async def test_leftover_fetch_jobs_are_stopped_before_the_provision_job(
     order: list[str] = []
     jobs = FakeJobBackend(JobState.RUNNING)
     await jobs.submit(JobSpec(**{**_spec_fields(), "kind": JobKind.FETCH, "name": FETCH}))
+    handle, state, _, spec = jobs.jobs[FETCH]
+    jobs.jobs[FETCH] = (handle, state, NOW, spec)  # on the step's clock, not the wall clock
     original = jobs.cancel
 
     async def cancel(handle: JobHandle) -> None:

@@ -76,6 +76,7 @@ def exec_manifest(workspace_sha256: str) -> dict[str, Any]:
     path = ROOT / "tests" / "fixtures" / "contracts" / "manifest_valid.json"
     data: dict[str, Any] = json.loads(path.read_text())
     data["workspace_sha256"] = workspace_sha256
+    data["claims"] = data["claims"][:1]  # c1, RELATIVE: the claim of the plan
     return data
 
 
@@ -113,7 +114,16 @@ async def make_run(store: Store, tmp_path: Path) -> Run:
         {
             "entrypoint": "workspace/train.py",
             "args": ["--epochs", "5"],
-            "smoke_metrics": {"top1_accuracy": 0.5},
+            "measures": [
+                {
+                    "claim_id": "c1",
+                    "key": "method/top1_accuracy",
+                    "baseline_key": "resnet18/top1_accuracy",
+                    "unit": "fraction",
+                }
+            ],
+            "unmeasured": [],
+            "smoke_metrics": {"method/top1_accuracy": 0.5, "resnet18/top1_accuracy": 0.4},
             "files": sorted(WORKSPACE),
             "workspace_sha256": digest,
             "smoke_runs": 2,
@@ -129,8 +139,9 @@ async def make_run(store: Store, tmp_path: Path) -> Run:
     artifacts.put_json(
         f"{prefix}/analysis_1.json",
         {
-            "analysis": {"exit_reason": "completed", "measurements": measurements,
-                         "used_seeds": [0, 1], "wall_clock_s": 12.0, "gpu": "L40S"},
+            "analysis": {"exit_reason": "completed",
+                         "claims": {"c1": {"measurements": measurements, "used_seeds": [0, 1]}},
+                         "wall_clock_s": 12.0, "gpu": "L40S"},
             "manifest": manifest,
             "log_summary": "Two seeds finished.",
         },
@@ -138,16 +149,24 @@ async def make_run(store: Store, tmp_path: Path) -> Run:
     artifacts.put_json(
         f"{prefix}/verdict.json",
         {
-            "claim": CLAIM.model_dump(mode="json"),
+            "schema": "p2p.verdicts/v1",
             "attempt": 1,
-            "verdict": {"kind": "REPRODUCED_AT_REDUCED_SCALE", "reason": None, "n_seeds": 2,
-                        "mean": 0.055, "std": 0.007, "ci_low": 0.0, "ci_high": 0.1,
-                        "tolerance": {"tol_rel": 0.02}},
-            "measurements": measurements,
             "config": {"tol_rel": 0.02},
             "config_sha256": "c" * 64,
-            "explanation_md": "It held up.\n\n### Limitations\n\n- Reduced scale.",
-            "limitations": "- Reduced scale.",
+            "verdicts": [
+                {
+                    "claim": CLAIM.model_dump(mode="json"),
+                    "verdict": {"kind": "REPRODUCED_AT_REDUCED_SCALE", "reason": None,
+                                "n_seeds": 2, "mean": 0.055, "std": 0.007, "ci_low": 0.0,
+                                "ci_high": 0.1, "tolerance": {"tol_rel": 0.02}},
+                    "measurements": measurements,
+                    "measured": measurements,
+                    "scale_factor": 1.0,
+                    "unit": "fraction",
+                    "explanation_md": "It held up.\n\n### Limitations\n\n- Reduced scale.",
+                    "limitations": "- Reduced scale.",
+                }
+            ],
         },
     )  # fmt: skip
     storage = FakeRunStorage()
@@ -165,7 +184,10 @@ async def make_run(store: Store, tmp_path: Path) -> Run:
     run.put("results/1/results.json", b'{"exit_reason": "completed", "per_seed": []}')
     run.put("results/1/stdout.log", b"epoch 1\nepoch 2\n")
     run.put("results/1/stderr.log", b"")
-    run.put("results/1/env.json", b'{"gpu": "L40S", "pip_freeze": ["numpy==2.1.0"]}')
+    run.put(
+        "results/1/env.json",
+        b'{"gpu": "L40S", "packages": ["numpy==2.1.0"], "packages_truncated": false}',
+    )
     await store.save_claims(RUN, [CLAIM, OTHER], selected={"c1"})
     await store.set_paper_sha256(RUN, "d" * 64)
     await store.record_model_call(

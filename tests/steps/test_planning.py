@@ -1,10 +1,14 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
+from pydantic import BaseModel
 
+from app.discovery.hf_datasets import DatasetProblem, DatasetReport, RunCpu
 from app.domain.discovery import Discovery, RepoRef
+from app.domain.errors import P2PError
 from app.domain.events import ApprovalRequiredPayload, PlanReadyPayload, WarningPayload
 from app.domain.models import (
     Claim,
@@ -17,16 +21,19 @@ from app.domain.models import (
     Scale,
     StepName,
 )
+from app.models.client import Message, Role
 from app.models.fake import FakeModelClient
 from app.models.pricing import load_cloud_prices
+from app.orchestrator.budget import BudgetExceeded
 from app.orchestrator.cost_estimate import estimate_plan_cost
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
-from app.orchestrator.steps.planning import PlanningStep, correct_plan
+from app.orchestrator.steps.planning import DatasetCheck, PlanningStep, correct_plan
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
 
 DISCOVERY = f"runs/{RUN}/discovery.json"
+T = TypeVar("T", bound=BaseModel)
 CLOUD = load_cloud_prices(ROOT / "config" / "pricing.yaml")
 
 
@@ -46,7 +53,13 @@ def _claim(cid: str, kind: ClaimType) -> Claim:
 
 
 async def _plan(
-    store: Store, tmp_path: Path, case: str, *, preemptible: bool = True
+    store: Store,
+    tmp_path: Path,
+    case: str,
+    *,
+    preemptible: bool = True,
+    dataset_check: DatasetCheck | None = None,
+    models: FakeModelClient | None = None,
 ) -> tuple[Plan, StepName | RunStatus, list[object]]:
     artifacts = LocalArtifactStore(tmp_path)
     discovery = Discovery(repo=RepoRef(url="https://github.com/a/b", source="paper", official=True))
@@ -63,7 +76,11 @@ async def _plan(
     claims = [_claim("c1", ClaimType.RELATIVE), _claim("c2", ClaimType.ABSOLUTE)]
     await store.save_claims(RUN, claims, selected={"c1", "c2"})
     step = PlanningStep(
-        FakeModelClient(LLM_FIXTURES, case=case), artifacts, CLOUD, preemptible=preemptible
+        models or FakeModelClient(LLM_FIXTURES, case=case),
+        artifacts,
+        CLOUD,
+        preemptible=preemptible,
+        dataset_check=dataset_check,
     )
     result = await step.run(ctx)
     assert result.output_ref is not None
@@ -193,3 +210,134 @@ def test_plan_datasets_are_validated_and_capped() -> None:
     corrected, notes = correct_plan(plan, selected={"c1"}, gpu_cap=30)
     assert [d.id for d in corrected.datasets] == ["org/d0", "org/d1"]  # a third breaks 20 GiB
     assert any("dataset" in n for n in notes)
+
+
+ON_HF = {"uoft-cs/cifar10", "scikit-learn/iris"}
+
+
+async def _on_hf(datasets: list[DatasetReq], run_cpu: RunCpu) -> DatasetReport:
+    """Stands in for HfDatasets.check: only the ids in ON_HF exist."""
+    return DatasetReport(
+        kept=[d for d in datasets if d.id in ON_HF],
+        dropped=[
+            DatasetProblem(id=d.id, split=d.split, reason="not found on Hugging Face (or private)")
+            for d in datasets
+            if d.id not in ON_HF
+        ],
+        unchecked=[],
+    )
+
+
+async def test_a_made_up_dataset_gets_the_planner_one_more_try(
+    store: Store, tmp_path: Path
+) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="made_up_dataset")
+    plan, _, events = await _plan(
+        store, tmp_path, "made_up_dataset", dataset_check=_on_hf, models=models
+    )
+    assert [d.id for d in plan.datasets] == ["uoft-cs/cifar10", "scikit-learn/iris"]
+    assert [name for _, name, _ in models.calls] == [
+        "planner_experiment_plan",
+        "planner_dataset_feedback",
+    ]
+    feedback = models.requests[1][1][-1].content
+    assert isinstance(feedback, str)
+    assert "mstz/wine_quality" in feedback and "not found on Hugging Face" in feedback
+    assert models.requests[1][1][-2].role == "assistant"  # the first plan, as it was proposed
+    assert any("mstz/wine_quality" in n for n in plan.notes)
+    assert not [p for p in events if isinstance(p, WarningPayload)]  # fixed: nothing to warn
+
+
+async def test_a_dataset_still_missing_after_the_retry_is_dropped_with_a_warning(
+    store: Store, tmp_path: Path
+) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="still_made_up")
+    plan, _, events = await _plan(
+        store, tmp_path, "still_made_up", dataset_check=_on_hf, models=models
+    )
+    assert plan.datasets == []
+    assert len(models.calls) == 2  # one retry, never a loop
+    warnings = [p for p in events if isinstance(p, WarningPayload)]
+    assert [w.code for w in warnings] == ["DATASET_UNAVAILABLE"]
+    assert "mstz/wine_quality_v2" in warnings[0].message
+    assert any("mstz/wine_quality_v2" in n and "not found" in n for n in plan.notes)
+
+
+async def test_datasets_hugging_face_could_not_check_are_kept_and_noted(
+    store: Store, tmp_path: Path
+) -> None:
+    async def down(datasets: list[DatasetReq], run_cpu: RunCpu) -> DatasetReport:
+        return DatasetReport(kept=datasets, dropped=[], unchecked=[d.id for d in datasets])
+
+    models = FakeModelClient(LLM_FIXTURES, case="made_up_dataset")
+    plan, _, _ = await _plan(store, tmp_path, "made_up_dataset", dataset_check=down, models=models)
+    assert [d.id for d in plan.datasets] == ["mstz/wine_quality", "uoft-cs/cifar10"]
+    assert len(models.calls) == 1
+    assert any("could not be checked" in n for n in plan.notes)
+
+
+async def test_a_dataset_the_retry_kept_is_noted_as_dropped_not_replaced(
+    store: Store, tmp_path: Path
+) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="kept_made_up")
+    plan, _, _ = await _plan(store, tmp_path, "kept_made_up", dataset_check=_on_hf, models=models)
+    about = [n for n in plan.notes if "mstz/wine_quality" in n]
+    assert len(about) == 1 and "dropped" in about[0]  # the conditions never claim a fix
+
+
+class _RetryFails(FakeModelClient):
+    """The Planner's second answer is unusable (a P2PError after repair)."""
+
+    async def structured(
+        self,
+        role: Role,
+        messages: list[Message],
+        schema: type[T],
+        *,
+        run_id: str | None = None,
+        step: str | None = None,
+        prompt: str | None = None,
+    ) -> T:
+        if prompt == "planner_dataset_feedback":
+            raise P2PError(ErrorCode.SCHEMA_ERROR, "unusable plan")
+        return await super().structured(
+            role, messages, schema, run_id=run_id, step=step, prompt=prompt
+        )
+
+
+async def test_an_unusable_retry_keeps_the_first_plan_without_the_missing_dataset(
+    store: Store, tmp_path: Path
+) -> None:
+    models = _RetryFails(LLM_FIXTURES, case="made_up_dataset")
+    plan, _, events = await _plan(
+        store, tmp_path, "made_up_dataset", dataset_check=_on_hf, models=models
+    )
+    assert [d.id for d in plan.datasets] == ["uoft-cs/cifar10"]
+    warnings = [p for p in events if isinstance(p, WarningPayload)]
+    assert [w.code for w in warnings] == ["DATASET_UNAVAILABLE"]
+
+
+class _RetryOverBudget(FakeModelClient):
+    async def structured(
+        self,
+        role: Role,
+        messages: list[Message],
+        schema: type[T],
+        *,
+        run_id: str | None = None,
+        step: str | None = None,
+        prompt: str | None = None,
+    ) -> T:
+        if prompt == "planner_dataset_feedback":
+            raise BudgetExceeded("inference_usd")
+        return await super().structured(
+            role, messages, schema, run_id=run_id, step=step, prompt=prompt
+        )
+
+
+async def test_the_budget_running_out_on_the_retry_fails_the_step(
+    store: Store, tmp_path: Path
+) -> None:
+    models = _RetryOverBudget(LLM_FIXTURES, case="made_up_dataset")
+    with pytest.raises(BudgetExceeded):  # never swallowed like an unusable answer
+        await _plan(store, tmp_path, "made_up_dataset", dataset_check=_on_hf, models=models)

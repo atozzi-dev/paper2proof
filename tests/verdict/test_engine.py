@@ -16,7 +16,7 @@ from app.domain.models import (
     VerdictKind,
 )
 from app.verdict.config import config_sha256, load_verdict_config
-from app.verdict.engine import decide
+from app.verdict.engine import MAX_METRIC_ABS, decide
 
 ROOT = Path(__file__).resolve().parents[2]
 CFG = VerdictConfig()
@@ -178,6 +178,15 @@ def test_relative_positive_but_below_rho_delta_is_high_variance() -> None:
 def test_infinite_baseline_is_a_runtime_error() -> None:
     meas = m(Scale.FULL, METHOD, [0.9, math.inf, 0.9])
     assert decide(relative(0.017), meas, CFG).reason is ReasonCode.RUNTIME_ERROR
+
+
+def test_values_too_large_to_be_a_metric_are_a_runtime_error() -> None:
+    """Finite but absurd: 1e200 would overflow the variance; no real metric gets near it."""
+    meas = m(Scale.FULL, [1e200, -1e200, 1e200])
+    assert decide(absolute(0.941), meas, CFG).reason is ReasonCode.RUNTIME_ERROR
+    assert decide(absolute(0.941), m(Scale.FULL, [MAX_METRIC_ABS] * 3), CFG).reason is not (
+        ReasonCode.RUNTIME_ERROR
+    )
 
 
 def test_numbers_are_reported_in_the_original_direction() -> None:

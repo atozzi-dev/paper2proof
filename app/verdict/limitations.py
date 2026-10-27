@@ -29,6 +29,7 @@ def limitations(
     exit_reason: str,
     deviations: list[str],
     scale_note: ScaleNote | None = None,
+    unmeasured_reason: str | None = None,
 ) -> str:
     lines: list[str] = []
     if scale.full:
@@ -42,6 +43,12 @@ def limitations(
             parts.append(f"{scale.epochs}{of} epochs")
         detail = f": {', '.join(parts)}" if parts else ""
         lines.append(f"Run at reduced scale{detail}.")
+    if unmeasured_reason is not None:  # the Coder's reason is model text: plain, bounded
+        why = _plain(unmeasured_reason)
+        lines.append(
+            "Not measured: the experiment does not measure this claim"
+            + (f" (the Coder's reason, model text: {why})." if why else ".")
+        )
     lines.append(f"{len(used_seeds)} of {len(planned_seeds)} planned seeds produced usable values.")
     lines.append(f"Hardware: {gpu or 'unknown'}, one GPU.")
     problem = _EXIT.get(exit_reason)

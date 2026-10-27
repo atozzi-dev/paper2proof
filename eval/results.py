@@ -59,6 +59,10 @@ class VerdictScore(_Result):
     false_accusations: int = Field(ge=0)
     missing: int = Field(ge=0)  # claims with no verdict at all
     inconclusive: int = Field(ge=0)
+    judged: int = Field(ge=0)  # claims with a decisive verdict (not INCONCLUSIVE, not missing)
+    judged_correct: int = Field(ge=0)
+    coverage: float | None  # judged / claims: how much of the paper the pipeline could test
+    judged_accuracy: float | None  # correct among the judged: None when nothing was judged
 
 
 class CostSummary(_Result):

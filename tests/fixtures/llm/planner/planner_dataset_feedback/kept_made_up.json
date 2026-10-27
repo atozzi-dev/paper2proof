@@ -1,0 +1,12 @@
+[
+ {
+  "content": null,
+  "tool_calls": [
+   {
+    "id": "p1",
+    "name": "emit_result",
+    "arguments": "{\"mode\": \"FROM_SCRATCH\", \"claim_ids\": [\"c1\"], \"claim_types\": {\"c1\": \"RELATIVE\"}, \"scale\": \"REDUCED\", \"seeds\": [0, 1, 2], \"packages\": [], \"datasets\": [{\"kind\": \"hf\", \"id\": \"mstz/wine_quality\", \"split\": \"train\"}], \"entrypoint_hint\": \"train.py\", \"gpu_minutes_est\": 10, \"notes\": []}"
+   }
+  ]
+ }
+]

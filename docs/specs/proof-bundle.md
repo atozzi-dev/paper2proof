@@ -33,8 +33,8 @@ bundle/
 ├── results/<attempt>/{stdout.log, stderr.log, env.json}
 ├── results/<attempt>/execution.json # how the job ended (control plane)
 ├── results/<attempt>/analysis.json  # measurements built from results.json (control plane)
-├── verdict.json                     # the verdict, the claim, the tolerance config and its sha256
-├── explanation.md                   # the explanation shown in the UI (Limitations written by code)
+├── verdict.json                     # one entry per tested claim: claim, verdict, measurements; the config and its sha256
+├── explanation.md                   # the explanations shown in the UI, one section per claim (Limitations written by code)
 ├── cost_receipt.json                # tokens and cost per role, jobs, ledger totals for the run
 └── reproduce.sh                     # re-runs the judged attempt locally with docker --gpus all (§6)
 ```
@@ -46,14 +46,13 @@ the bundle is still built.
 
 ```json
 {
-  "schema": "p2p.bundle/v1",
+  "schema": "p2p.bundle/v2",
   "run_id": "r_01jb7z...",
   "arxiv_id": "2106.09685",
   "paper_sha256": "<hex>",
   "built_at": "2026-10-25T10:00:00Z",
   "paper2proof": {"version": "0.1.0", "commit": "<git sha or null>"},
-  "claim_id": "c1",
-  "verdict": "REPRODUCED",
+  "verdicts": {"c1": "REPRODUCED", "c2": "NOT_REPRODUCED"},
   "judged_attempt": 1,
   "config_sha256": "<sha256 of config/verdict.yaml used by decide()>",
   "models": {"planner": ["<model id>"], "judge": ["<model id>"]},
@@ -65,6 +64,11 @@ the bundle is still built.
 }
 ```
 
+- `verdicts` maps every claim the run decided to its verdict kind, in the plan's order
+  (`p2p.bundle/v1` had a single `claim_id` and `verdict`).
+- `verdict.json` is `{schema: "p2p.verdicts/v1", attempt, config, config_sha256,
+  verdicts: [{claim, verdict, measurements, measured, scale_factor, unit, limitations}]}`;
+  an unmeasured claim has `measurements: null` and an INCONCLUSIVE/`NOT_MEASURED` verdict.
 - `models` comes from the run's recorded model calls (what was actually used); `prompts` lists
   every prompt file of the Paper2Proof build that made the bundle (with `paper2proof.commit`).
 - `origin` is `control_plane` (written by our code from validated data), `run_bucket` (read

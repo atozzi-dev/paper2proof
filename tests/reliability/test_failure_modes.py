@@ -184,7 +184,7 @@ async def _judge_verdict(
         RunContext(**{**ctx.__dict__, "step": StepName.VERDICT})
     )
     assert result.next is RunStatus.COMPLETED
-    explanation = artifacts.get_json(f"runs/{RUN}/verdict.json")["explanation_md"]
+    explanation = artifacts.get_json(f"runs/{RUN}/verdict.json")["verdicts"][0]["explanation_md"]
     return await store.get_verdict(RUN, "c1"), str(explanation)
 
 
@@ -378,7 +378,7 @@ async def test_no_capacity_anywhere_ends_inconclusive_capacity(
     assert backend.created == 0
     stored = artifacts.get_json(f"runs/{RUN}/execution_1.json")
     assert (stored["results_key"], stored["exit_reason"]) == (None, "capacity")
-    explanation = artifacts.get_json(f"runs/{RUN}/verdict.json")["explanation_md"]
+    explanation = artifacts.get_json(f"runs/{RUN}/verdict.json")["verdicts"][0]["explanation_md"]
     assert explanation.startswith("Inconclusive (capacity)")
     assert "no GPU capacity" in explanation  # the Limitations say why
 
@@ -798,25 +798,37 @@ async def test_the_kill_switch_refuses_the_gpu_job_of_a_run_in_flight(
 def _results_for(spec: JobSpec, values: list[float], baseline: list[float]) -> bytes:
     """A results.json that honours the manifest the job received."""
     m = _manifest_of(spec)
-    return json.dumps(
+    claims = [
         {
-            "schema": "p2p.results/v1",
-            "run_id": m.run_id,
-            "attempt": m.attempt,
-            "claim_ref": m.claim_ref,
-            "claim_type": m.claim_type.value,
-            "metric": m.metric,
-            "higher_is_better": m.higher_is_better,
-            "scale": m.scale.model_dump(exclude_none=True),
+            "claim_ref": c.claim_ref,
+            "claim_type": c.claim_type.value,
+            "metric": c.metric,
+            "metric_key": c.metric_key,
+            "higher_is_better": c.higher_is_better,
             "per_seed": [
                 {"seed": s, "value": v, "ok": True} for s, v in zip(m.seeds, values, strict=True)
             ],
-            "baseline": {
-                "name": m.baseline_name,
-                "per_seed": [
-                    {"seed": s, "value": v} for s, v in zip(m.seeds, baseline, strict=True)
-                ],
-            },
+            "baseline": (
+                {
+                    "name": c.baseline_name,
+                    "key": c.baseline_key,
+                    "per_seed": [
+                        {"seed": s, "value": v} for s, v in zip(m.seeds, baseline, strict=True)
+                    ],
+                }
+                if c.baseline_key is not None
+                else None
+            ),
+        }
+        for c in m.claims
+    ]
+    return json.dumps(
+        {
+            "schema": "p2p.results/v2",
+            "run_id": m.run_id,
+            "attempt": m.attempt,
+            "scale": m.scale.model_dump(exclude_none=True),
+            "claims": claims,
             "wall_clock_s": 590.0,
             "gpu": "NVIDIA L40S",
             "exit_reason": "completed",

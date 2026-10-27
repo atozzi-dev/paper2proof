@@ -19,10 +19,14 @@ async def output_of(ctx: RunContext, step: StepName) -> str:
     return latest.output_ref
 
 
-async def selected_claim(ctx: RunContext, plan: Plan) -> tuple[Claim, ClaimType]:
-    """The claim the plan tests (the first stored one) and its type as planned."""
+async def planned_claims(ctx: RunContext, plan: Plan) -> list[tuple[Claim, ClaimType]]:
+    """Every claim the plan tests, in the plan's order, each with its type as planned."""
     claims = {c.id: c for c, _ in await ctx.store.get_claims(ctx.run_id)}
-    for claim_id in plan.claim_ids:
-        if claim_id in claims:
-            return claims[claim_id], plan.claim_types.get(claim_id, claims[claim_id].claim_type)
-    raise P2PError(ErrorCode.INTERNAL_ERROR, "the plan has no stored claim")
+    planned = [
+        (claims[i], plan.claim_types.get(i, claims[i].claim_type))
+        for i in plan.claim_ids
+        if i in claims
+    ]
+    if not planned:
+        raise P2PError(ErrorCode.INTERNAL_ERROR, "the plan has no stored claim")
+    return planned

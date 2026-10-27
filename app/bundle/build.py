@@ -42,7 +42,7 @@ from app.verdict.results import MAX_RESULTS_BYTES
 
 log = logging.getLogger(__name__)
 
-BUNDLE_SCHEMA = "p2p.bundle/v1"
+BUNDLE_SCHEMA = "p2p.bundle/v2"
 MAX_ATTEMPTS = 2  # the first GPU job and one on-demand retry (EXECUTING)
 MAX_JSON_BYTES = MAX_RESULTS_BYTES  # results.json and env.json
 MAX_LOG_BYTES = 4 * 1024 * 1024
@@ -413,7 +413,10 @@ class Bundler:
         run_id, prefix = ctx.run_id, f"runs/{ctx.run_id}"
         verdict = await self._artifact(f"{prefix}/verdict.json")
         run = await ctx.store.get_run(run_id)
-        if not isinstance(verdict, dict) or run is None:
+        decided = verdict.get("verdicts") if isinstance(verdict, dict) else None
+        if not isinstance(verdict, dict) or not isinstance(decided, list) or not decided:
+            raise BundleUnavailable("the run has no verdict to bundle")
+        if run is None:
             raise BundleUnavailable("the run has no verdict to bundle")
         attempt = int(verdict["attempt"])
         out = _Collector()
@@ -455,8 +458,19 @@ class Bundler:
                 render_reproduce, judged, self._runner_image, run_id=run_id
             )
             out.files.append(BundleFile("reproduce.sh", script, Origin.CONTROL_PLANE))
-        out.add_json("verdict.json", {k: v for k, v in verdict.items() if k != "explanation_md"})
-        explanation = str(verdict.get("explanation_md") or "")
+        out.add_json(
+            "verdict.json",
+            {
+                **verdict,
+                "verdicts": [
+                    {k: v for k, v in d.items() if k != "explanation_md"} for d in decided
+                ],
+            },
+        )
+        explanation = "\n\n".join(
+            f"## Claim {d['claim']['id']}\n\n{str(d.get('explanation_md') or '').strip()}"
+            for d in decided
+        )
         out.files.append(BundleFile("explanation.md", explanation.encode(), Origin.MODEL))
         receipt, models = await self._receipt(ctx)
         out.add_json("cost_receipt.json", receipt)
@@ -466,8 +480,7 @@ class Bundler:
             "paper_sha256": run.paper_sha256,
             "built_at": self._clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "paper2proof": {"version": await asyncio.to_thread(_version), "commit": self._commit},
-            "claim_id": verdict["claim"]["id"],
-            "verdict": verdict["verdict"]["kind"],
+            "verdicts": {d["claim"]["id"]: d["verdict"]["kind"] for d in decided},
             "judged_attempt": attempt,
             "config_sha256": verdict.get("config_sha256"),
             "models": models,

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from app.domain.errors import P2PError
-from app.domain.events import VerdictReadyPayload
+from app.domain.events import VerdictReadyPayload, WarningPayload
 from app.domain.models import (
     Claim,
     ClaimType,
@@ -53,8 +53,10 @@ CLAIM = Claim(
 FULL = {"full": True}
 
 
-def _manifest(full: bool = False) -> dict[str, Any]:
+def _manifest(full: bool = False, two: bool = False) -> dict[str, Any]:
     data: dict[str, Any] = json.loads((FIXTURES / "manifest_valid.json").read_text())
+    if not two:
+        data["claims"] = data["claims"][:1]  # c1, RELATIVE
     if full:
         data["scale"] = FULL
     return data
@@ -62,8 +64,10 @@ def _manifest(full: bool = False) -> dict[str, Any]:
 
 def _results(values: list[float], baseline: list[float], **changes: Any) -> bytes:
     data: dict[str, Any] = json.loads((FIXTURES / "results_valid.json").read_text())
-    data["per_seed"] = [{"seed": i, "value": v, "ok": True} for i, v in enumerate(values)]
-    data["baseline"]["per_seed"] = [{"seed": i, "value": v} for i, v in enumerate(baseline)]
+    claim = data["claims"][0]
+    claim["per_seed"] = [{"seed": i, "value": v, "ok": True} for i, v in enumerate(values)]
+    claim["baseline"]["per_seed"] = [{"seed": i, "value": v} for i, v in enumerate(baseline)]
+    data["claims"] = [claim]
     data["exit_reason"] = "completed"
     data.update(changes)
     return json.dumps(data).encode()
@@ -80,7 +84,13 @@ async def _setup(
 ) -> tuple[RunContext, LocalArtifactStore, FakeRunStorage]:
     artifacts = LocalArtifactStore(tmp_path)
     smoke: dict[str, Any] = {"entrypoint": "workspace/train.py", "args": []}
-    artifacts.put_json(SMOKE_KEY, smoke if unit is None else {**smoke, "metric_unit": unit})
+    measure = {
+        "claim_id": "c1",
+        "key": "method/top1_accuracy",
+        "baseline_key": "resnet18/top1_accuracy",
+        "unit": unit,
+    }
+    artifacts.put_json(SMOKE_KEY, smoke if unit is None else {**smoke, "measures": [measure]})
     plan = Plan(
         mode=PlanMode.FROM_SCRATCH, claim_ids=["c1"], claim_types={"c1": ClaimType.RELATIVE},
         scale=Scale.REDUCED, seeds=[0, 1, 2], gpu_minutes_est=10,
@@ -361,7 +371,9 @@ async def test_fractions_against_a_points_claim_are_aligned_and_noted(
     assert (
         f"- {ScaleNote.TO_PERCENT}" in ready.explanation_md
     )  # its own line, not a model "Deviation"
-    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))[
+        "verdicts"
+    ][0]
     assert record["scale_factor"] == 100
     assert record["measured"]["per_seed"] == [0.950, 0.951, 0.949]
     assert record["measurements"]["per_seed"] == pytest.approx([95.0, 95.1, 94.9])
@@ -378,6 +390,130 @@ async def test_without_a_declared_fraction_nothing_is_scaled(
     assert verdict is not None and verdict.kind is not VerdictKind.REPRODUCED
     ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
     assert "Scale:" not in ready.explanation_md
-    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))[
+        "verdicts"
+    ][0]
     assert record["scale_factor"] == 1
     assert record["measurements"] == record["measured"]
+
+
+ABSOLUTE_C2 = Claim(
+    id="c2",
+    text="Ours reaches 94.1% top-1 on CIFAR-10",
+    claim_type=ClaimType.ABSOLUTE,
+    metric="top1_accuracy",
+    higher_is_better=True,
+    dataset="CIFAR-10",
+    setting="200 epochs",
+    reported_value=0.941,
+    source_ref="Table 2",
+)
+UNMEASURED_C3 = ABSOLUTE_C2.model_copy(
+    update={"id": "c3", "text": "Ours reaches 81% on CIFAR-100", "reported_value": 0.81}
+)
+
+
+async def _two_claims_and_one_unmeasured(store: Store, tmp_path: Path) -> tuple[Any, Any]:
+    """c1 (RELATIVE) and c2 (ABSOLUTE) measured in one job at full scale, c3 declared
+    unmeasured by the Coder: three verdicts from one run."""
+    artifacts = LocalArtifactStore(tmp_path)
+    artifacts.put_json(
+        SMOKE_KEY,
+        {
+            "entrypoint": "workspace/train.py",
+            "args": [],
+            "measures": [
+                {"claim_id": "c1", "key": "method/top1_accuracy",
+                 "baseline_key": "resnet18/top1_accuracy", "unit": "raw"},
+                {"claim_id": "c2", "key": "method/top1_accuracy", "baseline_key": None,
+                 "unit": "fraction"},
+            ],
+            "unmeasured": [
+                {
+                    "claim_id": "c3",
+                    "reason": "CIFAR-100 is not in the plan [see](https://x.example) **now**",
+                }
+            ],
+        },
+    )  # fmt: skip
+    plan = Plan(
+        mode=PlanMode.FROM_SCRATCH, claim_ids=["c1", "c2", "c3"],
+        claim_types={"c1": ClaimType.RELATIVE, "c2": ClaimType.ABSOLUTE, "c3": ClaimType.ABSOLUTE},
+        scale=Scale.FULL, seeds=[0, 1, 2], gpu_minutes_est=10,
+    )  # fmt: skip
+    artifacts.put_json(PLAN_KEY, {"plan": plan.model_dump(mode="json"), "est_cost_usd": 0.1})
+    data: dict[str, Any] = json.loads((FIXTURES / "results_valid.json").read_text())
+    for claim in data["claims"]:
+        claim["per_seed"] = [
+            {"seed": i, "value": v, "ok": True} for i, v in enumerate([0.940, 0.941, 0.942])
+        ]
+    data["claims"][0]["baseline"]["per_seed"] = [
+        {"seed": i, "value": v} for i, v in enumerate([0.920, 0.925, 0.921])
+    ]
+    data["scale"] = FULL
+    data["exit_reason"] = "completed"
+    artifacts.put_json(
+        EXECUTION_KEY,
+        {
+            "manifest": _manifest(full=True, two=True),
+            "results_key": "results/1/results.json",
+            "exit_reason": None,
+            "job_state": "SUCCEEDED",
+        },
+    )
+    storage = FakeRunStorage()
+    storage.objects[(RUN, "results/1/results.json")] = json.dumps(data).encode()
+    previous: list[tuple[StepName, str | None]] = [
+        (StepName.INGESTING, "i"), (StepName.EXTRACTING_CLAIMS, "c"),
+        (StepName.DISCOVERING, "d"), (StepName.PLANNING, PLAN_KEY),
+        (StepName.PROVISIONING, "p"), (StepName.SMOKE_TESTING, SMOKE_KEY),
+        (StepName.EXECUTING, EXECUTION_KEY),
+    ]  # fmt: skip
+    ctx = await ctx_at(store, StepName.ANALYZING, previous=previous)
+    relative = CLAIM.model_copy(update={"claimed_delta": 0.017})
+    await store.save_claims(
+        RUN, [relative, ABSOLUTE_C2, UNMEASURED_C3], selected={"c1", "c2", "c3"}
+    )
+    analyzed = await AnalyzingStep(artifacts, storage).run(ctx)
+    assert analyzed.output_ref is not None
+    await store.transition(
+        RUN, StepName.ANALYZING, 1, "SUCCEEDED", output_ref=analyzed.output_ref,
+        next_step=(StepName.VERDICT, 1),
+    )  # fmt: skip
+    vctx = RunContext(**{**ctx.__dict__, "step": StepName.VERDICT})
+    models = FakeModelClient(LLM_FIXTURES, case="honest_twice")  # c1 and c2 are explained
+    result = await VerdictStep(models, artifacts).run(vctx)
+    assert result.next is RunStatus.COMPLETED
+    return artifacts, models
+
+
+async def test_one_run_decides_every_planned_claim(store: Store, tmp_path: Path) -> None:
+    await _two_claims_and_one_unmeasured(store, tmp_path)
+    relative = await store.get_verdict(RUN, "c1")
+    absolute = await store.get_verdict(RUN, "c2")
+    unmeasured = await store.get_verdict(RUN, "c3")
+    assert relative is not None and relative.kind is VerdictKind.REPRODUCED
+    assert absolute is not None and absolute.kind is VerdictKind.REPRODUCED
+    assert unmeasured is not None and unmeasured.kind is VerdictKind.INCONCLUSIVE
+    assert unmeasured.reason is ReasonCode.NOT_MEASURED
+    events = [e.payload for e in await store.events_after(RUN, 0)]
+    ready = {p.claim_id: p for p in events if isinstance(p, VerdictReadyPayload)}
+    assert list(ready) == ["c1", "c2", "c3"]
+    assert "Not measured" in ready["c3"].explanation_md
+    assert "CIFAR-100 is not in the plan" in ready["c3"].explanation_md  # the Coder's reason
+    assert "](" not in ready["c3"].explanation_md and "**now" not in ready["c3"].explanation_md
+    warned = [p for p in events if isinstance(p, WarningPayload)]
+    assert [(w.code, w.message) for w in warned] == [
+        ("CLAIM_NOT_MEASURED", "claim c3 was not measured by the experiment")  # code-written
+    ]
+    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    assert record["schema"] == "p2p.verdicts/v1"
+    assert [d["claim"]["id"] for d in record["verdicts"]] == ["c1", "c2", "c3"]
+    assert record["verdicts"][2]["measurements"] is None
+    assert record["verdicts"][1]["unit"] == "fraction"
+
+
+async def test_an_unmeasured_claim_costs_no_judge_call(store: Store, tmp_path: Path) -> None:
+    _, models = await _two_claims_and_one_unmeasured(store, tmp_path)
+    judged = [r for r, _ in models.requests if r is Role.JUDGE]
+    assert len(judged) == 2  # c1 and c2; c3's explanation is the code's template

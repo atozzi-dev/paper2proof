@@ -477,7 +477,7 @@ export interface components {
          * ReasonCode
          * @enum {string}
          */
-        ReasonCode: "BUDGET" | "CAPACITY" | "MISSING_DATA" | "RUNTIME_ERROR" | "UNDERSPECIFIED_CLAIM" | "INSUFFICIENT_SEEDS" | "HIGH_VARIANCE" | "REDUCED_SCALE_ABSOLUTE" | "REDUCED_SCALE_CONTRADICTS";
+        ReasonCode: "BUDGET" | "CAPACITY" | "MISSING_DATA" | "RUNTIME_ERROR" | "UNDERSPECIFIED_CLAIM" | "INSUFFICIENT_SEEDS" | "HIGH_VARIANCE" | "REDUCED_SCALE_ABSOLUTE" | "REDUCED_SCALE_CONTRADICTS" | "NOT_MEASURED";
         /** RunCard */
         RunCard: {
             /** Arxiv Id */
@@ -511,6 +511,10 @@ export interface components {
             seeds_planned: number[];
             /** Seeds Used */
             seeds_used: number[];
+            /** Seeds Used By Claim */
+            seeds_used_by_claim: {
+                [key: string]: number[];
+            };
         };
         /**
          * RunStatus

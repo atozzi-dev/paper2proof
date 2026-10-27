@@ -119,7 +119,7 @@ def _spec(kind: JobKind = JobKind.EXEC, **changes: object) -> JobSpec:
                 mode="rw" if kind is JobKind.PROVISION else "ro",
             ),
         ],
-        "inject_files": {"/etc/p2p/manifest.json": b'{"schema": "p2p.manifest/v1"}'},
+        "inject_files": {"/etc/p2p/manifest.json": b'{"schema": "p2p.manifest/v2"}'},
         "env": {"PYTHONUNBUFFERED": "1"},
         "preemptible": False,
         "watchdog_s": 600,

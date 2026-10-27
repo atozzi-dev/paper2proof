@@ -41,6 +41,13 @@ describe('VerdictCard', () => {
     expect(screen.getByRole('list', { name: 'Conditions' })).toHaveTextContent('Reduced scale')
   })
 
+  it('shows the seeds that gave this claim a value, not every seed of the run', () => {
+    const v: Verdict = { ...reproduced, n_seeds: 1 }
+    render(<VerdictCard claim={claimRel} verdict={v} explanationMd="" {...conditions} conditions={runConditions} />)
+    const list = screen.getByRole('list', { name: 'Conditions' })
+    expect(list).toHaveTextContent('Seeds: 1 seeds (seeds 0 of the planned 0, 1, 2)')
+  })
+
   it('lists the recorded conditions: scale factor, seeds used and the hardware', () => {
     render(
       <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={runConditions} />,

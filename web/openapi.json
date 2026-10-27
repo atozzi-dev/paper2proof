@@ -774,7 +774,8 @@
           "INSUFFICIENT_SEEDS",
           "HIGH_VARIANCE",
           "REDUCED_SCALE_ABSOLUTE",
-          "REDUCED_SCALE_CONTRADICTS"
+          "REDUCED_SCALE_CONTRADICTS",
+          "NOT_MEASURED"
         ],
         "title": "ReasonCode",
         "type": "string"
@@ -872,6 +873,16 @@
             },
             "title": "Seeds Used",
             "type": "array"
+          },
+          "seeds_used_by_claim": {
+            "additionalProperties": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "title": "Seeds Used By Claim",
+            "type": "object"
           }
         },
         "required": [
@@ -879,6 +890,7 @@
           "scale",
           "seeds_planned",
           "seeds_used",
+          "seeds_used_by_claim",
           "hardware",
           "code",
           "deviations",

@@ -40,6 +40,7 @@ class ReasonCode(StrEnum):
     HIGH_VARIANCE = "HIGH_VARIANCE"
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
+    NOT_MEASURED = "NOT_MEASURED"  # the experiment does not measure this claim (code-set)
 
 
 class Claim(_Strict):

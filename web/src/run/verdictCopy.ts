@@ -23,6 +23,7 @@ export const REASON_TEXT: Record<ReasonCode, string> = {
   MISSING_DATA: 'Data the experiment needs was not available.',
   RUNTIME_ERROR: 'The experiment failed while running.',
   UNDERSPECIFIED_CLAIM: 'The claim does not state a value we can test.',
+  NOT_MEASURED: 'The experiment could not measure this claim.',
   INSUFFICIENT_SEEDS: 'Fewer seeds finished than the minimum needed for a decision.',
   HIGH_VARIANCE: 'The confidence interval is too wide to decide either way.',
   REDUCED_SCALE_ABSOLUTE:
@@ -35,6 +36,8 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   DISCOVERY_DEGRADED: 'Search partly unavailable',
   ABSOLUTE_AT_REDUCED_SCALE: 'Absolute value at reduced scale',
   PACKAGE_REJECTED: 'Package rejected',
+  DATASET_UNAVAILABLE: 'Dataset unavailable',
+  CLAIM_NOT_MEASURED: 'Claim not measured',
   PACKAGES_REQUESTED: 'Packages requested',
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
   VISION_PAGE_SKIPPED: 'A page could not be read',
@@ -53,6 +56,7 @@ export function warningTitle(code: string): string {
 const DEVIATION_WARNINGS = new Set([
   'ABSOLUTE_AT_REDUCED_SCALE',
   'PACKAGE_REJECTED',
+  'DATASET_UNAVAILABLE',
   'REPO_SNAPSHOT_UNAVAILABLE',
   'JOB_PREEMPTED',
   'DISCOVERY_DEGRADED',
@@ -69,6 +73,8 @@ export interface ConditionInputs {
   jobs: Readonly<Record<string, EventPayloads['job.status']>>
   /** Recorded by the server once the results are analyzed (RunView.conditions); preferred. */
   conditions?: RunConditions | null
+  /** The claim the verdict is about: its own seeds when the run measured several claims. */
+  claimId?: string
 }
 
 const NO_SCALE_FACTOR = 'Reduced scale (smaller than the paper; the scale factor is not reported for this run)'
@@ -109,14 +115,14 @@ function hardwareText(
 /** The conditions a verdict was reached under: scale, seeds, hardware, code, deviations. */
 export function verdictConditions(
   verdict: Verdict,
-  { plan, warnings, jobs, conditions = null }: ConditionInputs,
+  { plan, warnings, jobs, conditions = null, claimId }: ConditionInputs,
 ): Condition[] {
   const p = plan?.plan
   const c = conditions
   const out: Condition[] = []
   const scale = c?.scale.scale ?? p?.scale
   out.push({ label: 'Scale', value: scale ? scaleText(scale, c?.scale ?? null) : 'not reported yet' })
-  const used = c?.seeds_used ?? p?.seeds
+  const used = (claimId !== undefined ? c?.seeds_used_by_claim[claimId] : undefined) ?? c?.seeds_used ?? p?.seeds
   const planned = c?.seeds_planned ?? p?.seeds
   let seeds = ''
   if (used && planned && used.join() !== planned.join()) {
