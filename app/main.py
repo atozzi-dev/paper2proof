@@ -261,6 +261,8 @@ def _check_hybrid(settings: Settings) -> None:
         raise ConfigError("P2P_EXECUTION=hybrid needs SMOKE_EXECUTOR=sandboxes (no CPU jobs)")
     if not settings.p2p_provisioner_image:
         raise ConfigError("P2P_EXECUTION=hybrid needs P2P_PROVISIONER_IMAGE")
+    if not settings.p2p_local_jobs_network:  # never docker's default bridge (docs/DEPLOY.md)
+        raise ConfigError("P2P_EXECUTION=hybrid needs P2P_LOCAL_JOBS_NETWORK")
 
 
 async def _no_paper(run_id: str) -> None:
@@ -277,6 +279,7 @@ def _hybrid_jobs(settings: Settings, remote: JobBackend, s3: S3Client) -> JobBac
         paper=_no_paper,
         root=root,
         provisioner_only=settings.p2p_provisioner_image,
+        network=settings.p2p_local_jobs_network,
     )
     return HybridJobBackend(
         local=local,

@@ -349,3 +349,44 @@ async def test_the_reaper_sees_local_and_remote_jobs_and_there_is_no_gateway(
     assert names == {f"p2p-prov-{SLUG}-1", f"p2p-exec-{SLUG}-1"}
     await backend.ensure_gateway_up()  # nothing to start: exec isolation is the route
     assert await backend.gateway_idle_check() is False
+
+
+# --- review fixes: own network, digest-only image, cleanup ---------------------------------
+
+
+def _local_net(tmp_path: Path, docker: Docker) -> DevDockerBackend:
+    return DevDockerBackend(
+        env="prod", canaries={}, paper=_no_paper, root=tmp_path, docker=docker,
+        host_uid=None, acl=Acl(), provisioner_only=PROVISIONER, network="p2p-local-jobs",
+    )  # fmt: skip
+
+
+async def test_local_jobs_run_on_their_own_docker_network(tmp_path: Path) -> None:
+    """The default bridge reaches the host and the VPS metadata service; the dedicated
+    network is the one the host's firewall rules restrict (docs/DEPLOY.md)."""
+    docker = Docker()
+    await _local_net(tmp_path, docker).submit(_prov())
+    assert "--network=p2p-local-jobs" in _run_argv(docker)
+
+
+@pytest.mark.parametrize("image", ["cr.example/p2p-provisioner:latest", "p2p-provisioner"])
+def test_the_provisioner_is_referenced_by_digest(tmp_path: Path, image: str) -> None:
+    with pytest.raises(ValueError, match="digest"):
+        DevDockerBackend(
+            env="prod", canaries={}, paper=_no_paper, root=tmp_path, docker=Docker(),
+            host_uid=None, acl=Acl(), provisioner_only=image,
+        )  # fmt: skip
+
+
+async def test_deleting_a_run_removes_its_job_dirs_and_containers(tmp_path: Path) -> None:
+    docker = Docker()
+    backend = _local_net(tmp_path, docker)
+    await backend.ensure_run_bucket(RUN)
+    await backend.submit(_prov())
+    other = "r_01jb7z00000000000000000001"
+    (tmp_path / "jobs" / f"p2p-prov-{other[2:]}-1").mkdir(parents=True)
+    await backend.delete_run_bucket(RUN)
+    assert not (tmp_path / "buckets" / bucket_name(RUN)).exists()
+    assert not (tmp_path / "jobs" / f"p2p-prov-{SLUG}-1").exists()
+    assert (tmp_path / "jobs" / f"p2p-prov-{other[2:]}-1").exists()  # another run's
+    assert ["docker", "rm", "-f", f"p2p-prov-{SLUG}-1"] in docker.calls

@@ -483,6 +483,7 @@ HYBRID: dict[str, object] = {
     "gateway_instance_id": None,
     "p2p_execution": "hybrid",
     "smoke_executor": "sandboxes",
+    "p2p_local_jobs_network": "p2p-local-jobs",
 }
 
 
@@ -518,6 +519,7 @@ def test_hybrid_runs_provisioning_here_and_jobs_on_nebius(
         ({"gateway_instance_id": "computeinstance-gw"}, "GATEWAY_INSTANCE_ID"),
         ({"p2p_local_jobs_dir": None}, "P2P_LOCAL_JOBS_DIR"),
         ({"smoke_executor": "job"}, "SMOKE_EXECUTOR"),
+        ({"p2p_local_jobs_network": None}, "P2P_LOCAL_JOBS_NETWORK"),
     ],
 )
 def test_hybrid_refuses_a_gateway_no_local_dir_or_cpu_smoke_jobs(

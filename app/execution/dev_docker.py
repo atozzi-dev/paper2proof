@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.execution.backend import CACHE_BUCKET, CACHE_MOUNT, JobHandle, JobKind, JobSpec, JobState
+from app.execution.config import DIGEST_REF
 from app.execution.local_trusted import (
     DockerRunner,
     LocalTrustedRefused,
@@ -44,6 +45,7 @@ from app.execution.run_storage import MAX_READ_BYTES
 _DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})$")
 _JOB_NAME = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
 _MOUNT_PATH = re.compile(r"^/mnt/[a-z]{1,32}$")
+_NETWORK = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}$")
 _INJECT_PATH = re.compile(r"^/etc/p2p/(?!\.\.?$)[a-z0-9._-]{1,64}$")
 _STATES = {
     "created": JobState.PENDING,
@@ -104,7 +106,13 @@ class DevDockerBackend:
         host_uid: int | None = _host_uid(),
         acl: DockerRunner = docker_cli,
         provisioner_only: str | None = None,
+        network: str | None = None,
     ) -> None:
+        if provisioner_only is not None and not re.fullmatch(DIGEST_REF, provisioner_only):
+            raise ValueError("the provisioner image is referenced by digest (invariant 8)")
+        if network is not None and not _NETWORK.fullmatch(network):
+            raise ValueError(f"invalid docker network name: {network!r}")
+        self._network = network  # provision and fetch only: the host firewall restricts it
         if provisioner_only is not None and env != "prod":
             raise LocalTrustedRefused("provisioner-only local jobs are for the hybrid prod deploy")
         if provisioner_only is None and env != "dev":
@@ -165,7 +173,21 @@ class DevDockerBackend:
         return name
 
     async def delete_run_bucket(self, run_id: str) -> None:
-        shutil.rmtree(self._bucket(bucket_name(run_id)), ignore_errors=True)
+        """The run's directory, and its jobs' containers and directories: nothing of a run
+        stays on this host's disk (thread: up to tens of GiB of files)."""
+        await asyncio.to_thread(shutil.rmtree, self._bucket(bucket_name(run_id)), True)
+        jobs = self._root / "jobs"
+        if not jobs.is_dir():
+            return
+        slug = run_id.removeprefix("r_")
+        for job in sorted(jobs.iterdir()):
+            match = _JOB_NAME.fullmatch(job.name)
+            if match is None or match.group(2) != slug:
+                continue
+            info = await self._inspect(job.name)
+            if info is not None and self._ours(info):
+                await self._cli("rm", "-f", job.name)
+            await asyncio.to_thread(shutil.rmtree, job, True)
 
     async def list_run_buckets(self) -> list[tuple[str, datetime]]:
         folder = self._root / "buckets"
@@ -250,7 +272,7 @@ class DevDockerBackend:
             return JobHandle(name=spec.name, nebius_id=str(existing.get("Id", "")))
         await self._share_job_dirs()
         job = self._root / "jobs" / spec.name
-        shutil.rmtree(job, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, job, True)
         if _lstat(job, str(job)) is not None:  # a job can lock its own files (a 0700 mkdir)
             # Ours to move even when a subdirectory is not ours to empty: a resubmit (a smoke
             # iteration after a prune) always starts from nothing, never from old code's files.
@@ -275,6 +297,8 @@ class DevDockerBackend:
         mounts = [(job / "work", "/work", "rw"), (job / "home", "/home/p2p", "rw")]
         if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):  # they download (PyPI, repo, HF)
             argv.append("--network=none")
+        elif self._network is not None:
+            argv.append(f"--network={self._network}")
         for volume in spec.volumes:
             cache = volume.source == CACHE_BUCKET
             source = _plain_dir(self._root / "cache" if cache else self._bucket(volume.source))
