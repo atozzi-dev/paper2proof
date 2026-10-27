@@ -104,8 +104,10 @@ spikes/s4_gpu_job.sh                              # SUBNET_ID=... if the project
 
 ### S5 — Job networking, baseline (day 1)
 ```bash
-nebius storage bucket create --name "p2p-spike-s5-$(date +%s)"   # note the name
-S5_BUCKET=<that name> spikes/s5_job_gateway.sh --mode baseline
+nebius storage bucket create --name "p2p-spike-s5-$(date +%s)"   # note its ID (S5 facts)
+S5_BUCKET=<bucket ID> spikes/s5_job_gateway.sh --mode baseline
+# non-GPU vCPU quota at 0: run it on the L40S platform (about $0.10-0.15)
+S5_BUCKET=<bucket ID> PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb spikes/s5_job_gateway.sh --mode baseline
 ```
 **PASS:** image pulled, `MOUNT_OK`, and open internet reachable (this is the reference without the
 gateway). The probe writes `probe-*.txt` files into the bucket: empty it before deleting it
