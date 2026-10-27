@@ -6,6 +6,7 @@ The local run directory was written by the provisioner image (our code) from unt
 regular files, and refuses a copy over its bounds before anything is sent."""
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -27,6 +28,7 @@ from app.execution.backend import (
     JobStatusUnavailable,
 )
 from app.execution.naming import bucket_name
+from app.execution.run_storage import MAX_READ_BYTES, RunStorage
 from app.execution.s3 import check_run_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -51,6 +53,8 @@ class UploadRefused(RuntimeError):
 # (dev only; the hybrid deploy is a Linux host) checks paths instead.
 _DIR_FD = os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# what a link, or a file or directory swapped or removed under the walk, raises
+_SWAPPED = frozenset({errno.ELOOP, errno.ENOTDIR, errno.ENOENT, errno.EMLINK})
 CHUNK = 1 << 20
 
 
@@ -111,20 +115,34 @@ def _scan(root: Path) -> list[_Entry]:
                 elif stat.S_ISREG(info.st_mode):
                     add((*prefix, entry.name), info)
 
-    if _DIR_FD:
-        fd = _open_dir(None, str(root))
-        try:
-            walk_fd(fd, ())
-        finally:
-            os.close(fd)
-    else:
-        walk_path(root, ())
+    try:
+        if _DIR_FD:
+            fd = _open_dir(None, str(root))
+            try:
+                walk_fd(fd, ())
+            finally:
+                os.close(fd)
+        else:
+            walk_path(root, ())
+    except OSError as err:
+        if err.errno in _SWAPPED:  # the copy changed under the scan: refused, never retried
+            raise UploadRefused("the run copy changed while it was scanned") from None
+        raise
     return found
 
 
 def _open(root: Path, entry: _Entry) -> int:
     """The scanned file, reached without following any link; refused if it is not the file
     the scan saw (another inode, another size: something rewrote it in between)."""
+    try:
+        return _open_checked(root, entry)
+    except OSError as err:
+        if err.errno in _SWAPPED:  # a link where the scan saw a directory or a file
+            raise UploadRefused(f"{entry.key} changed after the scan") from None
+        raise
+
+
+def _open_checked(root: Path, entry: _Entry) -> int:
     flags = os.O_RDONLY | _NOFOLLOW | _NONBLOCK | _BINARY
     if _DIR_FD:
         fd = _open_dir(None, str(root))
@@ -305,3 +323,24 @@ class HybridJobBackend:
         ]:
             merged[name] = min(created, merged.get(name, created))
         return sorted(merged.items())
+
+
+class HybridRunStorage:
+    """The Nebius run bucket for every read and write (what the GPU jobs mount); a delete also
+    removes the key from the local copy, or the next upload would bring the old file back."""
+
+    def __init__(self, remote: RunStorage, local: RunStorage) -> None:
+        self._remote = remote
+        self._local = local
+
+    async def get_bytes(
+        self, run_id: str, key: str, *, max_bytes: int = MAX_READ_BYTES
+    ) -> bytes | None:
+        return await self._remote.get_bytes(run_id, key, max_bytes=max_bytes)
+
+    async def put_bytes(self, run_id: str, key: str, data: bytes) -> None:
+        await self._remote.put_bytes(run_id, key, data)
+
+    async def delete(self, run_id: str, key: str) -> None:
+        await self._local.delete(run_id, key)
+        await self._remote.delete(run_id, key)

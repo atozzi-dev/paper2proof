@@ -39,13 +39,17 @@ from app.execution.local_trusted import (
     docker_cli,
     is_canary,
 )
-from app.execution.naming import bucket_name
+from app.execution.naming import bucket_name, run_slug
 from app.execution.run_storage import MAX_READ_BYTES
 
 _DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})$")
 _JOB_NAME = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
 _MOUNT_PATH = re.compile(r"^/mnt/[a-z]{1,32}$")
 _NETWORK = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}$")
+_BUILTIN_NETWORKS = frozenset({"host", "bridge", "none", "default"})
+_TRASH = re.compile(
+    r"^\.trash-(p2p-(?:prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4})-[0-9a-f]{8}$"
+)
 _INJECT_PATH = re.compile(r"^/etc/p2p/(?!\.\.?$)[a-z0-9._-]{1,64}$")
 _STATES = {
     "created": JobState.PENDING,
@@ -110,8 +114,10 @@ class DevDockerBackend:
     ) -> None:
         if provisioner_only is not None and not re.fullmatch(DIGEST_REF, provisioner_only):
             raise ValueError("the provisioner image is referenced by digest (invariant 8)")
-        if network is not None and not _NETWORK.fullmatch(network):
-            raise ValueError(f"invalid docker network name: {network!r}")
+        if network is not None and (
+            not _NETWORK.fullmatch(network) or network in _BUILTIN_NETWORKS
+        ):  # host would hand the jobs this host's network; the firewall restricts ours only
+            raise ValueError(f"not a dedicated docker network: {network!r}")
         self._network = network  # provision and fetch only: the host firewall restricts it
         if provisioner_only is not None and env != "prod":
             raise LocalTrustedRefused("provisioner-only local jobs are for the hybrid prod deploy")
@@ -179,8 +185,12 @@ class DevDockerBackend:
         jobs = self._root / "jobs"
         if not jobs.is_dir():
             return
-        slug = run_id.removeprefix("r_")
+        slug = run_slug(run_id)
         for job in sorted(jobs.iterdir()):
+            trash = _TRASH.fullmatch(job.name)  # moved aside by a resubmit: no container
+            if trash is not None and trash.group(2) == slug:
+                await asyncio.to_thread(shutil.rmtree, job, True)
+                continue
             match = _JOB_NAME.fullmatch(job.name)
             if match is None or match.group(2) != slug:
                 continue

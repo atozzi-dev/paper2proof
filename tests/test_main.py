@@ -22,7 +22,7 @@ from app.bundle.sign import FakeSigner
 from app.domain.models import StepName
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
-from app.execution.hybrid import HybridJobBackend
+from app.execution.hybrid import HybridJobBackend, HybridRunStorage
 from app.execution.local_trusted import LocalTrustedRefused
 from app.execution.run_storage import FakeRunStorage
 from app.models.client import Role
@@ -507,8 +507,7 @@ def test_hybrid_runs_provisioning_here_and_jobs_on_nebius(
     settings = _prod(tmp_path, monkeypatch, **HYBRID, p2p_local_jobs_dir=tmp_path / "jobs")
     adapters = main.prod_adapters(settings)
     assert isinstance(adapters.jobs, HybridJobBackend)
-    remote = seen["remote"]
-    assert adapters.storage is remote.storage  # type: ignore[attr-defined]  # what jobs mount
+    assert isinstance(adapters.storage, HybridRunStorage)  # reads the bucket the jobs mount
     assert seen["gateway_instance_id"] is None
     assert adapters.reap
 

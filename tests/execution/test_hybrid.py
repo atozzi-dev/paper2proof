@@ -2,6 +2,7 @@
 provision and fetch jobs (our provisioner image) in local docker, for any paper; model and
 paper code never runs here (invariant 1)."""
 
+import errno
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,11 +14,17 @@ from pydantic import SecretStr
 
 from app.execution import hybrid
 from app.execution.backend import JobKind, JobState, JobStatusUnavailable
-from app.execution.dev_docker import DevDockerBackend
+from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
-from app.execution.hybrid import HybridJobBackend, UploadRefused, upload_run_dir
+from app.execution.hybrid import (
+    HybridJobBackend,
+    HybridRunStorage,
+    UploadRefused,
+    upload_run_dir,
+)
 from app.execution.local_trusted import LocalTrustedRefused
 from app.execution.naming import bucket_name
+from app.execution.run_storage import FakeRunStorage
 from app.execution.s3 import make_s3_client
 from tests.execution.test_dev_docker import RUN, SLUG, Acl, Docker, _run_argv, _spec
 
@@ -390,3 +397,57 @@ async def test_deleting_a_run_removes_its_job_dirs_and_containers(tmp_path: Path
     assert not (tmp_path / "jobs" / f"p2p-prov-{SLUG}-1").exists()
     assert (tmp_path / "jobs" / f"p2p-prov-{other[2:]}-1").exists()  # another run's
     assert ["docker", "rm", "-f", f"p2p-prov-{SLUG}-1"] in docker.calls
+
+
+@pytest.mark.parametrize("network", ["host", "bridge", "none", "default"])
+def test_the_local_jobs_never_get_a_builtin_network(tmp_path: Path, network: str) -> None:
+    """host would hand them the host's network; bridge and none are not what the firewall
+    rules restrict (security re-review N2)."""
+    with pytest.raises(ValueError, match="network"):
+        DevDockerBackend(
+            env="prod", canaries={}, paper=_no_paper, root=tmp_path, docker=Docker(),
+            host_uid=None, acl=Acl(), provisioner_only=PROVISIONER, network=network,
+        )  # fmt: skip
+
+
+async def test_moved_aside_job_dirs_go_with_the_run(tmp_path: Path) -> None:
+    docker = Docker()
+    backend = _local_net(tmp_path, docker)
+    trash = tmp_path / "jobs" / f".trash-p2p-prov-{SLUG}-1-0a1b2c3d"
+    trash.mkdir(parents=True)
+    await backend.delete_run_bucket(RUN)
+    assert not trash.exists()
+
+
+def test_a_scanned_entry_that_became_a_link_fails_as_refused(
+    tmp_path: Path, s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ELOOP/ENOTDIR on the re-open is a refused copy (the job FAILS), never a retry
+    (security re-review N1)."""
+    root = _run_dir(tmp_path)
+
+    def loop(*args: Any, **kwargs: Any) -> int:
+        raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+
+    monkeypatch.setattr(hybrid, "_open_dir", loop)
+    monkeypatch.setattr(
+        hybrid, "_scan", lambda root: [hybrid._Entry("staging/x", ("staging", "x"), 0, 0, 1)]
+    )
+    with pytest.raises(UploadRefused, match="changed"):
+        upload_run_dir(s3, bucket_name(RUN), root)
+
+
+async def test_a_delete_removes_the_key_from_both_copies(tmp_path: Path) -> None:
+    """A fresh provision job clears the last attempt's report: in the bucket and in the local
+    copy, or the next upload would bring the stale one back (security re-review N6)."""
+    remote = FakeRunStorage()
+    local = LocalRunStorage(tmp_path)
+    storage = HybridRunStorage(remote, local)
+    await storage.put_bytes(RUN, "staging/provision_error.json", b"old")
+    await local.put_bytes(RUN, "staging/provision_error.json", b"old")
+    await storage.delete(RUN, "staging/provision_error.json")
+    assert await remote.get_bytes(RUN, "staging/provision_error.json") is None
+    assert await local.get_bytes(RUN, "staging/provision_error.json") is None
+    await storage.put_bytes(RUN, "results/1/results.json", b"{}")  # reads and writes: Nebius
+    assert await storage.get_bytes(RUN, "results/1/results.json") == b"{}"
+    assert await local.get_bytes(RUN, "results/1/results.json") is None

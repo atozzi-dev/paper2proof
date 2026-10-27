@@ -43,7 +43,7 @@ from app.execution.backend import JobBackend
 from app.execution.config import ExecutionConfig
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
-from app.execution.hybrid import HybridJobBackend, upload_run_dir
+from app.execution.hybrid import HybridJobBackend, HybridRunStorage, upload_run_dir
 from app.execution.local_trusted import load_canaries, store_paper_lookup
 from app.execution.nebius_backend import build_nebius_execution
 from app.execution.package_policy import (
@@ -239,11 +239,14 @@ def prod_adapters(settings: Settings) -> Adapters:
         secret=settings.runtime_s3_secret,
     )
     jobs: JobBackend = execution.backend
+    storage: RunStorage = execution.storage
     if hybrid:
+        assert settings.p2p_local_jobs_dir  # noqa: S101 (checked in _check_hybrid)
         jobs = _hybrid_jobs(settings, execution.backend, execution.s3)
+        storage = HybridRunStorage(execution.storage, LocalRunStorage(settings.p2p_local_jobs_dir))
     return Adapters(
         jobs,
-        execution.storage,
+        storage,
         artifacts,
         ArtifactBundleStore(artifacts),
         signer=kms_signer(runtime_key, settings.p2p_bundle_key_id),
