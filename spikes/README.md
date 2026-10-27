@@ -109,6 +109,20 @@ S5_BUCKET=<bucket ID> spikes/s5_job_gateway.sh --mode baseline
 # non-GPU vCPU quota at 0: run it on the L40S platform (about $0.10-0.15)
 S5_BUCKET=<bucket ID> PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb spikes/s5_job_gateway.sh --mode baseline
 ```
+
+### S5 isolated: the exec subnet with no gateway VM (hybrid deploy)
+Run it after `terraform apply -target=module.network_sandbox`, which creates no VM.
+**PASS** needs all of these:
+- the image is pulled and the bucket is mounted;
+- the output ends with `PROBE_END`;
+- every internet target (IPv4, IPv6, TLS) gives TIMEOUT or ERROR;
+- the metadata service gives no token;
+- the job has no public IP.
+
+A `PROBE_IMAGE` from the Nebius registry also tests the prod pull path.
+```bash
+S5_BUCKET=<bucket ID> SUBNET_EXEC_ID=<exec subnet ID> PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb spikes/s5_job_gateway.sh --mode isolated
+```
 **PASS:** image pulled, `MOUNT_OK`, and open internet reachable (this is the reference without the
 gateway). The probe writes `probe-*.txt` files into the bucket: empty it before deleting it
 (console, or `aws s3 rm s3://<bucket> --recursive --endpoint-url https://$NEBIUS_STORAGE_HOST`),

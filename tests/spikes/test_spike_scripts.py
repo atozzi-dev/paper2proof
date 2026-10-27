@@ -1,9 +1,11 @@
 """Static checks on the day-1 spike kit: no network, no credentials, nothing executed remotely."""
 
+import importlib.util
 import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,6 +28,7 @@ EXPECTED = [
 ]
 EXECUTABLE = [name for name in EXPECTED if not name.endswith(".yml")]
 PYTHON = [name for name in EXPECTED if name.endswith(".py")]
+ESAC = chr(10) + "esac" + chr(10)  # the end of the mode case
 VERDICT_RE = re.compile(r"VERDICT: (\{|\$|PASS|FAIL|PARTIAL)")
 
 
@@ -198,6 +201,44 @@ def test_s5_isolated_mode_needs_no_gateway_and_fails_on_open_egress() -> None:
     holds. `--mode isolated` checks that pull and mount still work there and egress does not."""
     text = _text("s5_job_gateway.sh")
     assert "baseline|gateway-on|gateway-off|isolated" in text
-    isolated = text.split("  isolated)", 1)[1].split(";;", 1)[0]
+    isolated = text.split("  isolated)", 1)[1].split(ESAC, 1)[0]
     assert "GATEWAY_INSTANCE_ID" not in isolated
-    assert 'fail "egress NOT blocked' in isolated
+    assert "every_target_blocked" in isolated and 'fail "egress NOT blocked' in text
+
+
+def _probe() -> Any:
+    spec = importlib.util.spec_from_file_location("net_probe", SPIKES / "net_probe.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_probe_reports_dns_and_metadata_without_printing_secrets(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe = _probe()
+    monkeypatch.setattr(
+        probe.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+    assert probe.dns("example.com") == "RESOLVED(1)"
+
+    def no_dns(*a: Any, **k: Any) -> Any:
+        raise OSError("no resolver")
+
+    monkeypatch.setattr(probe.socket, "getaddrinfo", no_dns)
+    assert probe.dns("example.com").startswith("FAILED")
+    body = b'{"access_token": "secret-value", "expires_in": 3600}'
+    assert probe.metadata_verdict(200, body) == "OPEN(200, token=yes)"
+    assert "secret-value" not in probe.metadata_verdict(200, body)
+
+
+def test_s5_isolated_needs_complete_probe_output_and_a_gpu_platform() -> None:
+    """infra review: no output must never read as 'egress blocked'."""
+    text = _text("s5_job_gateway.sh")
+    isolated = text.split("  isolated)", 1)[1].split(ESAC, 1)[0]
+    assert "PROBE_END" in isolated  # truncated logs fail
+    assert "every_target_blocked" in isolated  # one TIMEOUT/ERROR line per target
+    assert "gpu-*" in text and "isolated mode runs on the exec GPU platform" in text
+    assert '[ "$REPORT_OUTCOME" = "PASS" ]' in isolated  # the success fact only on PASS
+    assert "META" in isolated and "public IP" in isolated
