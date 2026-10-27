@@ -74,7 +74,7 @@ class JobSmokeExecutor:
         self._archives = archives  # what the smoke runner may extract, with digests
         self._storage = storage
         self._config = config
-        self._usd_per_hour = cloud.hourly(SMOKE_PLATFORM, SMOKE_PRESET)
+        self.usd_per_hour = cloud.hourly(config.smoke_platform, config.smoke_preset)
         self._poll_s = poll_s
         self._clock = clock
         self._sleep = sleep
@@ -143,8 +143,8 @@ class JobSmokeExecutor:
             name=job_name(JobKind.SMOKE, env_id, iteration),
             kind=JobKind.SMOKE,
             image_digest_ref=self._config.runner_cpu_image,
-            platform=SMOKE_PLATFORM,
-            preset=SMOKE_PRESET,
+            platform=self._config.smoke_platform,
+            preset=self._config.smoke_preset,
             disk_gib=30,
             subnet_id=self._config.subnet_exec,
             volumes=[
@@ -160,7 +160,7 @@ class JobSmokeExecutor:
         outcome = await run_job(
             ctx,
             spec,
-            usd_per_hour=self._usd_per_hour,
+            usd_per_hour=self.usd_per_hour,
             poll_s=self._poll_s,
             clock=self._clock,
             sleep=self._sleep,

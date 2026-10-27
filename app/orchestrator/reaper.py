@@ -45,9 +45,12 @@ _OUR_JOB = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$"
 _RUN_BUCKET = re.compile(r"^p2p-run-([0-9a-z]{26})$")
 
 
-def reaper_rates(cloud: CloudPrices) -> dict[str, float]:
+def reaper_rates(
+    cloud: CloudPrices, *, smoke: tuple[str, str] = (SMOKE_PLATFORM, SMOKE_PRESET)
+) -> dict[str, float]:
     """On-demand USD/hour per job kind: an upper bound for time nobody measured, used when the
-    job's platform is not recorded (an exec job may be on either GPU platform)."""
+    job's platform is not recorded (an exec job may be on either GPU platform). `smoke` is the
+    configured smoke platform and preset (the GPU one in the hybrid deploy)."""
     return {
         JobKind.PROVISION.value: cloud.hourly(PROVISION_PLATFORM, PROVISION_PRESET),
         JobKind.FETCH.value: cloud.hourly(PROVISION_PLATFORM, PROVISION_PRESET),
@@ -55,7 +58,7 @@ def reaper_rates(cloud: CloudPrices) -> dict[str, float]:
             cloud.hourly(EXEC_PLATFORM, EXEC_PRESET),
             cloud.hourly(EXEC_FALLBACK_PLATFORM, EXEC_FALLBACK_PRESET),
         ),
-        JobKind.SMOKE.value: cloud.hourly(SMOKE_PLATFORM, SMOKE_PRESET),
+        JobKind.SMOKE.value: cloud.hourly(*smoke),
     }
 
 

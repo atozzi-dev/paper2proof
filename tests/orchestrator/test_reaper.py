@@ -496,6 +496,13 @@ def test_rates_cover_every_job_kind() -> None:
     assert rates["fetch"] == rates["prov"]  # same image, platform and preset
 
 
+def test_smoke_jobs_are_charged_at_the_configured_smoke_platform() -> None:
+    """Hybrid deploy: smoke jobs run on the GPU platform, so the reaper charges that rate."""
+    rates = reaper_rates(CLOUD, smoke=("gpu-l40s-a", "1gpu-8vcpu-32gb"))
+    assert rates["smoke"] == CLOUD.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    assert reaper_rates(CLOUD)["smoke"] == CLOUD.hourly("cpu-d3", "4vcpu-16gb")
+
+
 def test_an_exec_job_of_unknown_platform_is_charged_at_the_dearer_gpu_platform() -> None:
     """A job the reaper records itself (submitted before a crash) may be on the fallback."""
     rates = reaper_rates(CLOUD)
