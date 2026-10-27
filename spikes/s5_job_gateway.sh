@@ -52,6 +52,10 @@ if [ "$MODE" = "baseline" ]; then
   [ -n "${SUBNET_ID:-}" ] && ARGS+=(--subnet-id "$SUBNET_ID")
 elif [ "$MODE" = "isolated" ]; then
   need_env SUBNET_EXEC_ID
+  case "$PLATFORM" in
+    gpu-*) ;;
+    *) die "isolated mode runs on the exec GPU platform: PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb" ;;
+  esac
   IMAGE="${PROBE_IMAGE:-$PUBLIC_IMAGE}"
   ARGS+=(--subnet-id "$SUBNET_EXEC_ID")
   if [ -n "${NEBIUS_STORAGE_HOST:-}" ]; then
@@ -66,7 +70,8 @@ fi
 
 SPEC_FILE="$(mktemp)"
 cat >"$SPEC_FILE" <<EOF
-{"mount": "/mnt/run", "tcp": [["1.1.1.1", 443], ["8.8.8.8", 53]], "tls": [$TLS_TARGETS]}
+{"mount": "/mnt/run", "tcp": [["1.1.1.1", 443], ["8.8.8.8", 53], ["2606:4700:4700::1111", 443]],
+ "tls": [$TLS_TARGETS], "dns": ["example.com"], "meta": true}
 EOF
 ARGS+=(--inject-file "$SPEC_FILE:/etc/p2p/probe.json")
 
@@ -75,7 +80,7 @@ HELP="$(nebius ai job create --help 2>&1 || true)"
 require_flags "$HELP" --inject-file --volume --subnet-id --args
 # what the CLI offers to control a job's network (public IP, subnet...): decides how the hybrid
 # deploy isolates exec jobs when there is no gateway
-NET_FLAGS="$(grep -oE -- '--[a-z0-9-]*(public|network|subnet|ip|egress)[a-z0-9-]*' <<<"$HELP" | sort -u | tr '\n' ' ')"
+NET_FLAGS="$( (grep -oE -- '--([a-z0-9-]*-)?(public|network|subnet|ip|egress)(-[a-z0-9-]*)?' <<<"$HELP" || true) | sort -u | tr '\n' ' ')"
 fact "network flags: ${NET_FLAGS:-none}"
 fact "platform: $PLATFORM/$PRESET"
 
@@ -111,17 +116,31 @@ job_wait "$JOB_ID" 900
 fact "final state: $JOB_FINAL_STATE (RUNNING after ${JOB_RUNNING_AFTER_S:-never}s, total ${JOB_TOTAL_S}s)"
 LOGS="$(job_logs "$JOB_ID")"
 echo "== probe output"
-grep -E '^(PROBE|MOUNT|TCP|TLS)' <<<"$LOGS" || echo "(no probe output)"
-while read -r line; do fact "$line"; done < <(grep -E '^(MOUNT|TCP|TLS)' <<<"$LOGS" || true)
+grep -E '^(PROBE|MOUNT|TCP|TLS|DNS|META)' <<<"$LOGS" || echo "(no probe output)"
+while read -r line; do fact "$line"; done < <(grep -E '^(MOUNT|TCP|TLS|DNS|META)' <<<"$LOGS" || true)
 
 PULLED=0; grep -q '^PROBE_START' <<<"$LOGS" && PULLED=1
 fact "image pulled and started: $([ "$PULLED" = 1 ] && echo yes || echo no)"
 opened() { grep -E "^(TLS|TCP) $1:$2 (OK|OPEN)" <<<"$LOGS" >/dev/null; }
+# every target printed a line, and every one says it could not connect (TIMEOUT or ERROR);
+# a missing line is not "blocked" (truncated logs, a dead probe), a REFUSED is a live host
+every_target_blocked() {
+  local target line ok=0
+  for target in 1.1.1.1:443 8.8.8.8:53 2606:4700:4700::1111:443 example.com:443 pypi.org:443; do
+    line="$(grep -E "^(TCP|TLS) $target " <<<"$LOGS" | head -1 || true)"
+    case "$line" in
+      "") fail "no probe result for $target (incomplete output)"; ok=1 ;;
+      *" OK"*|*" OPEN") fail "egress NOT blocked: $line"; ok=1 ;;
+      *" REFUSED") partial "a host answered (RST) for $target: something is reachable"; ok=1 ;;
+    esac
+  done
+  return "$ok"
+}
 
 case "$MODE" in
   baseline)
     [ "$PULLED" = 1 ] || fail "job never started (see state above)"
-    grep -q '^MOUNT_OK' <<<"$LOGS" || fail "bucket mount by name failed"
+    grep -q '^MOUNT_OK' <<<"$LOGS" || fail "bucket mount by ID failed"
     if opened example.com 443 || opened 1.1.1.1 443 || opened 8.8.8.8 53; then
       fact "baseline: open internet reachable from this subnet (no isolation without a gateway)"
     else
@@ -140,11 +159,41 @@ case "$MODE" in
     [ "$PULLED" = 1 ] || partial "with the gateway off the image cannot be pulled (jobs fail; expected fail-closed)" ;;
   isolated)
     [ "$PULLED" = 1 ] || fail "no gateway: the image could not be pulled in the exec subnet ($IMAGE)"
+    grep -q '^PROBE_END' <<<"$LOGS" || fail "the probe output is incomplete (no PROBE_END)"
     grep -q '^MOUNT_OK' <<<"$LOGS" || fail "no gateway: the run bucket could not be mounted"
-    if opened example.com 443 || opened pypi.org 443 || opened 1.1.1.1 443 || opened 8.8.8.8 53; then
-      fail "egress NOT blocked from the exec subnet without a gateway"
-    fi
-    fact "isolated: pull and mount work, egress blocked: exec jobs need no gateway" ;;
+    every_target_blocked || true
+    case "$(grep -E '^META ' <<<"$LOGS" | head -1)" in
+      "") fail "no metadata-service result (incomplete output)" ;;
+      *"token=yes"*) fail "the metadata service hands out a token to the job" ;;
+      *"OPEN("*) partial "the metadata service answers the job (no token seen)" ;;
+    esac
+    grep -qE '^DNS example.com RESOLVED' <<<"$LOGS" && partial "public names resolve: DNS is a possible tunnel"
+    case "$IMAGE" in
+      cr.*@sha256:*) ;;
+      *) partial "pulled $IMAGE, not from the Nebius registry: the prod pull path is untested" ;;
+    esac
+    # a public IP would win over the exec route (provider docs): there must be none
+    PUBLIC="$(job_json "$JOB_ID" | "$PY" -c '
+import json, sys
+def walk(value, path=""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from walk(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk(child, path)
+    elif "public" in path.lower() and value not in (None, "", False, [], {}):
+        yield f"{path}={value}"
+print(" ".join(walk(json.load(sys.stdin))))
+' 2>/dev/null || echo "unreadable")"
+    case "$PUBLIC" in
+      "") ;;
+      unreadable) partial "could not read the job's network from nebius ai job get" ;;
+      *) fail "the job has a public IP setting: $PUBLIC" ;;
+    esac
+    if [ "$REPORT_OUTCOME" = "PASS" ]; then
+      fact "isolated: pull and mount work, egress blocked: exec jobs need no gateway"
+    fi ;;
 esac
 
 print_facts
