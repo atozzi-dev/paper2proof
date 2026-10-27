@@ -775,3 +775,45 @@ async def test_a_queued_retry_that_stopped_still_never_lets_attempt_1_be_read(
     assert result.output_ref is not None
     stored = artifacts.get_json(result.output_ref)
     assert (stored["results_key"], stored["exit_reason"]) == (None, "budget_timeout")
+
+
+# --- plan B: the exec job in Sandboxes (docs/specs/hybrid-deploy.md) -----------------------
+
+
+async def test_an_exec_job_in_sandboxes_runs_runner_cpu_and_never_falls_back_to_a_gpu(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    config = _config(preemptible=False).model_copy(
+        update={
+            "runner_image": DIGEST.format("p2p-runner-cpu"),
+            "exec_platform": "sandbox",
+            "exec_preset": "4vcpu-16gb",
+            "exec_fallback": None,
+        }
+    )
+
+    def finish(name: str, n: int) -> None:
+        storage.objects[(RUN, "results/1/results.json")] = b"{}"
+
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]}, on_status=finish)
+    backend.no_capacity = {"sandbox": 3}  # the instance limit, three times
+    clock = FakeClock()
+    step = ExecutingStep(
+        artifacts=artifacts, storage=storage, config=config,
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"), poll_s=30, clock=clock,
+        sleep=clock.sleep,
+    )  # fmt: skip
+    result = await step.run(_with(ctx, backend))
+    assert [(s.platform, s.preset) for s in backend.specs] == [("sandbox", "4vcpu-16gb")] * 4
+    assert {s.image_digest_ref for s in backend.specs} == {DIGEST.format("p2p-runner-cpu")}
+    assert result.output_ref is not None
+    stored = artifacts.get_json(result.output_ref)
+    assert stored["hardware"] == {
+        "platform": "sandbox",
+        "preset": "4vcpu-16gb",
+        "preemptible": False,
+    }
+    assert stored["manifest"]["image_digest"] == DIGEST.format("p2p-runner-cpu").rsplit("@", 1)[1]
+    messages = [p.message for p in await _events(store) if isinstance(p, WarningPayload)]
+    assert messages and all("GPU" not in m for m in messages)

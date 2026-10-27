@@ -147,18 +147,26 @@ stdout.
 ## Hybrid deploy (no non-GPU quota)
 
 The design is in `docs/specs/hybrid-deploy.md`. The control plane runs on a host of ours (the
-VPS) instead of the Serverless endpoint. Experiments still run in Nebius GPU jobs, and smoke
-tests run in Sandboxes. Do these steps in order. Each step that changes the cloud or spends
-money is the human's.
+VPS) instead of the Serverless endpoint. Smoke tests and experiments run in Token Factory
+Sandboxes, on CPU and without network (`P2P_EXEC_BACKEND=sandboxes`, the default). Nebius GPU
+jobs are the alternative once their gate passes (`P2P_EXEC_BACKEND=gpu`). Do these steps in order.
+Each step that changes the cloud or spends money is the human's.
 
-**Gate, before anything else.** Spike S5 `--mode isolated` must PASS on the exec subnet, and
-its facts go in `docs/spikes/RESULTS.md`. PASS means:
+**Gate for Sandboxes.** Spike S14 (`spikes/s14_sandbox_exec.py --image <imported UUID>`) must
+PASS, after the import of cloud step 4 and before the commit to deploy is chosen. Its facts go
+in `docs/spikes/RESULTS.md`: uploads, mounted files, `setpriv`, the harvest size, the cancel,
+the cold start, and the backend's own job command on the canary (exit 0, and exit 20 with
+partial results at the watchdog). When its `NPROC` and `MEM_KB` differ from `4vcpu-16gb`, set
+`SANDBOX_PRESET` (`app/execution/sandbox_jobs.py`) in the same commit as the image mapping.
+
+**Gate for GPU jobs (`P2P_EXEC_BACKEND=gpu` only).** Spike S5 `--mode isolated` must PASS on the
+exec subnet, and its facts go in `docs/spikes/RESULTS.md`. PASS means:
 - the image is pulled and the bucket is mounted;
 - the output is complete;
 - every internet target times out;
 - the job gets no metadata token and has no public IP.
 
-Without that PASS, exec jobs could reach the internet, and the hybrid deploy must not start.
+Without that PASS, GPU exec jobs could reach the internet: keep `P2P_EXEC_BACKEND=sandboxes`.
 Public names resolving is recorded as a fact and does not block: the VPC resolver answers by
 design (architecture §8.3).
 
@@ -185,11 +193,29 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
    false`, `terraform output -json env` prints `GATEWAY_INSTANCE_ID: null`: leave that variable
    out, never write `null`.
 2. Load the secrets with `deploy/secrets.sh` (H-04 step 4.7).
-3. Push `p2p-runner`, `p2p-runner-cpu` and `p2p-provisioner` to the `p2p-sandbox` registry, and
-   note their digests. The `p2p-api` image is not used on this host.
-4. Import `p2p-runner-cpu@sha256:…` into Sandboxes and record its UUID in
-   `config/sandbox_images.yaml`. Without it, every smoke test falls back to a GPU smoke job,
-   which is billed as GPU time.
+3. Push `p2p-runner-cpu` and `p2p-provisioner` to the `p2p-sandbox` registry, and note their
+   digests. `p2p-runner` (the GPU image) is needed with `P2P_EXEC_BACKEND=gpu` only. The
+   `p2p-api` image is not used on this host.
+4. Import `p2p-runner-cpu@sha256:…` into Sandboxes, on a machine with the repository checked out
+   and the nebius CLI configured, from the repository root (not the deployed checkout, which
+   must stay clean). The registry password is the access token of a service account that may
+   only pull from that registry (the viewer of host step 5), never your own account's token:
+   Sandboxes receives it.
+   ```
+   read -rs NEBIUS_API_KEY && export NEBIUS_API_KEY
+   export TF_PROJECT_ID=<Token Factory project>
+   P2P_REGISTRY_PASSWORD="$(nebius iam get-access-token --profile <registry-viewer>)" \
+     uv run python scripts/sandbox_import.py --username iam --image <registry>/p2p-runner-cpu@sha256:…
+   ```
+   That machine also needs `zstd` for the S14 gate (`apt install zstd`; on Windows, use WSL).
+   The script checks the imported image offline, as the job runs (root, then uid 10001:
+   runner files, `setpriv`, `setsid`, `timeout`, a writable `/root`, torch), and writes the
+   UUID to `config/sandbox_images.yaml`. Then run spike S14 with `--image <that UUID>` (the
+   gate above). Commit the mapping (and `SANDBOX_PRESET` if S14 changed it) on a branch,
+   merge it to `develop` and `main`, and deploy that commit (host step 2). With
+   `P2P_EXEC_BACKEND=sandboxes` the control plane refuses to start without the mapping for its
+   `P2P_RUNNER_CPU_IMAGE`; with `gpu`, every smoke test falls back to a GPU smoke job, billed
+   as GPU time.
 
 **Host (the VPS), as root:**
 1. Install:
@@ -252,9 +278,11 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
 6. Environment file `/etc/p2p/p2p.env`, owned by root:root, mode 0600. systemd reads it as PID 1,
    and it is the only loader: never `source` it. It holds:
    - the prod variables of `deploy/prod.env`;
-   - the hybrid values from the spec's table: `P2P_EXECUTION=hybrid`, `SMOKE_EXECUTOR=sandboxes`,
-     `P2P_SUBNET_EXEC`, `P2P_LOCAL_JOBS_DIR=/var/lib/p2p/jobs`,
-     `P2P_LOCAL_JOBS_NETWORK=p2p-local-jobs`, and no `GATEWAY_INSTANCE_ID`;
+   - the hybrid values from the spec's table: `P2P_EXECUTION=hybrid`,
+     `P2P_LOCAL_JOBS_DIR=/var/lib/p2p/jobs`, `P2P_LOCAL_JOBS_NETWORK=p2p-local-jobs`, no
+     `GATEWAY_INSTANCE_ID`, and either `SMOKE_EXECUTOR=job` with `TF_PROJECT_ID` (Sandboxes, the
+     default; `P2P_RUNNER_CPU_IMAGE` must be the digest mapped in `config/sandbox_images.yaml`)
+     or `P2P_EXEC_BACKEND=gpu`, `SMOKE_EXECUTOR=sandboxes` and `P2P_SUBNET_EXEC`;
    - `P2P_ENV=prod`, `DB_URL=sqlite+aiosqlite:////var/lib/p2p/p2p.db`, `P2P_VAR_DIR=/var/lib/p2p`,
      `P2P_BUILD_COMMIT=<git rev-parse HEAD>`, `P2P_BIND_HOST=127.0.0.1`,
      `P2P_FORWARDED_ALLOW_IPS=127.0.0.1/32`, `PYTHONDONTWRITEBYTECODE=1`;
@@ -309,4 +337,5 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
      prints `OPEN`. The same with `('169.254.169.254', 80)` and with the host's own address must
      time out.
    - One canary paper runs end to end before anything else. Its provision job must appear in
-     `docker ps -a` on the host, and its exec job in `nebius ai job list`.
+     `docker ps -a` on the host, and its smoke and exec jobs in
+     `/var/lib/p2p/jobs/sandbox-jobs/` (Sandboxes) or in `nebius ai job list` (GPU).

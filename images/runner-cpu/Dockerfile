@@ -33,12 +33,13 @@ RUN apt-get update \
  && install -d -o 10001 -g 10001 -m 0750 /home/p2p \
  && install -d -o 10001 -g 10001 /work \
  && install -d -m 0755 /opt/p2p \
+ && command -v setpriv setsid timeout tail >/dev/null \
  && find / -xdev -perm /6000 -type f -exec chmod a-s {} +  # no setuid path to root
 COPY --from=build /opt/venv /opt/venv
 # uv leaves a world-writable lock file in the venv: nothing in it may be writable by p2p
 RUN rm -f /opt/venv/.lock
 COPY --from=build --chmod=0444 /tmp/build/runner-constraints.txt /opt/p2p/runner-constraints.txt
-COPY --chmod=0444 images/runner/entrypoint.py images/runner/smoke.py /opt/p2p/
+COPY --chmod=0444 images/runner/entrypoint.py images/runner/smoke.py images/runner/harvest.py /opt/p2p/
 USER 10001:10001
 WORKDIR /work
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/venv/bin/python", "-I", "/opt/p2p/entrypoint.py"]

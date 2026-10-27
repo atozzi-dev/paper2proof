@@ -54,7 +54,8 @@ from app.execution.package_policy import (
 )
 from app.execution.run_storage import FakeRunStorage, RunStorage
 from app.execution.s3 import S3ArtifactStore, S3Client
-from app.execution.smoke_factory import SmokeOptions, build_smoke_executor
+from app.execution.sandbox_jobs import SANDBOX_PLATFORM, SANDBOX_PRESET, SandboxesJobBackend
+from app.execution.smoke_factory import SmokeOptions, build_smoke_executor, load_sandbox_image
 from app.ingestion.arxiv import ArxivClient
 from app.ingestion.canaries import PaperRouter, load_canary_papers
 from app.models.client import (
@@ -76,7 +77,7 @@ from app.orchestrator.steps.discovering import DiscoveringStep
 from app.orchestrator.steps.executing import ExecutingStep
 from app.orchestrator.steps.extracting_claims import ExtractingClaimsStep
 from app.orchestrator.steps.ingesting import IngestingStep
-from app.orchestrator.steps.planning import PlanningStep
+from app.orchestrator.steps.planning import CPU_HARDWARE, GPU_HARDWARE, PlanningStep
 from app.orchestrator.steps.provisioning import ProvisioningStep
 from app.orchestrator.steps.smoke_testing import SmokeTestingStep
 from app.orchestrator.steps.verdict import VerdictStep
@@ -242,7 +243,7 @@ def prod_adapters(settings: Settings) -> Adapters:
     storage: RunStorage = execution.storage
     if hybrid:
         assert settings.p2p_local_jobs_dir  # noqa: S101 (checked in _check_hybrid)
-        jobs = _hybrid_jobs(settings, execution.backend, execution.s3)
+        jobs = _hybrid_jobs(settings, execution.backend, execution.s3, execution.storage)
         storage = HybridRunStorage(execution.storage, LocalRunStorage(settings.p2p_local_jobs_dir))
     return Adapters(
         jobs,
@@ -254,13 +255,44 @@ def prod_adapters(settings: Settings) -> Adapters:
     )
 
 
+def exec_backend(settings: Settings) -> str:
+    """Where smoke and exec jobs run: Sandboxes by default in the hybrid deploy, else the GPU
+    jobs as designed (docs/specs/hybrid-deploy.md)."""
+    if settings.p2p_exec_backend is not None:
+        return settings.p2p_exec_backend
+    return "sandboxes" if settings.p2p_execution == "hybrid" else "gpu"
+
+
+def _sandbox_image(settings: Settings) -> str | None:
+    """The Sandboxes image UUID imported for the configured runner-cpu digest."""
+    if not settings.p2p_runner_cpu_image:
+        return None
+    return load_sandbox_image(
+        settings.config_dir / "sandbox_images.yaml", settings.p2p_runner_cpu_image
+    )
+
+
 def _check_hybrid(settings: Settings) -> None:
     """The hybrid deploy has no gateway and no CPU jobs (docs/specs/hybrid-deploy.md)."""
     if settings.gateway_instance_id:
         raise ConfigError("P2P_EXECUTION=hybrid has no gateway: unset GATEWAY_INSTANCE_ID")
     if settings.p2p_local_jobs_dir is None:
         raise ConfigError("P2P_EXECUTION=hybrid needs P2P_LOCAL_JOBS_DIR")
-    if settings.smoke_executor != "sandboxes":
+    if exec_backend(settings) == "sandboxes":
+        if settings.smoke_executor != "job":  # smoke jobs, in Sandboxes, with the overlay
+            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs SMOKE_EXECUTOR=job")
+        if not settings.tf_project_id:
+            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs TF_PROJECT_ID")
+        if settings.nebius_api_key is None or not settings.nebius_api_key.get_secret_value():
+            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs NEBIUS_API_KEY")
+        if not settings.p2p_runner_cpu_image:
+            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs P2P_RUNNER_CPU_IMAGE")
+        if _sandbox_image(settings) is None:
+            raise ConfigError(
+                "P2P_EXEC_BACKEND=sandboxes: P2P_RUNNER_CPU_IMAGE is not imported into "
+                "Sandboxes (config/sandbox_images.yaml)"
+            )
+    elif settings.smoke_executor != "sandboxes":
         raise ConfigError("P2P_EXECUTION=hybrid needs SMOKE_EXECUTOR=sandboxes (no CPU jobs)")
     if not settings.p2p_provisioner_image:
         raise ConfigError("P2P_EXECUTION=hybrid needs P2P_PROVISIONER_IMAGE")
@@ -272,10 +304,28 @@ async def _no_paper(run_id: str) -> None:
     return None  # provisioner-only local jobs never ask which paper a run is
 
 
-def _hybrid_jobs(settings: Settings, remote: JobBackend, s3: S3Client) -> JobBackend:
-    """Provision and fetch jobs in local docker on this host, everything else on Nebius."""
+def _hybrid_jobs(
+    settings: Settings, remote: JobBackend, s3: S3Client, storage: RunStorage
+) -> JobBackend:
+    """Provision and fetch jobs in local docker on this host; smoke and exec jobs in Sandboxes
+    (the default) or on Nebius GPUs."""
     assert settings.p2p_local_jobs_dir and settings.p2p_provisioner_image  # noqa: S101
     root = settings.p2p_local_jobs_dir
+    sandbox = None
+    if exec_backend(settings) == "sandboxes":
+        image = _sandbox_image(settings)
+        key, project = settings.nebius_api_key, settings.tf_project_id
+        if not (image and key and project and settings.p2p_runner_cpu_image):  # _check_hybrid
+            raise ConfigError("P2P_EXEC_BACKEND=sandboxes is not fully configured")
+        sandbox = SandboxesJobBackend(
+            api_key=key,
+            project_id=project,
+            runner_image=settings.p2p_runner_cpu_image,
+            image_uuid=image,
+            storage=storage,  # the Nebius run bucket: the workspace in, the outputs back
+            local_buckets=root.resolve() / "buckets",
+            index_dir=root.resolve() / "sandbox-jobs",
+        )
     local = DevDockerBackend(
         env=settings.p2p_env,
         canaries={},
@@ -289,6 +339,7 @@ def _hybrid_jobs(settings: Settings, remote: JobBackend, s3: S3Client) -> JobBac
         remote=remote,
         local_buckets=root.resolve() / "buckets",
         upload=functools.partial(upload_run_dir, s3),
+        sandbox=sandbox,
     )
 
 
@@ -328,8 +379,12 @@ def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
         "preemptible_gpu": ("P2P_GPU_PREEMPTIBLE", settings.p2p_gpu_preemptible),
     }
     hybrid = settings.p2p_execution == "hybrid"
+    sandboxed = hybrid and exec_backend(settings) == "sandboxes"
     if hybrid:  # provision and fetch jobs run on this host: no provision subnet
         values.pop("subnet_provision")
+    if sandboxed:  # smoke and exec jobs run runner-cpu in Sandboxes: no GPU image, no subnet
+        values.pop("runner_image")
+        values.pop("subnet_exec")
     missing = [env for env, value in values.values() if value is None]
     if prod and missing:
         raise ConfigError(f"P2P_ENV=prod needs {', '.join(missing)}")
@@ -342,6 +397,20 @@ def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
         "preemptible_gpu": True,
     }
     config = {k: defaults[k] if v is None else v for k, (_, v) in values.items()}
+    if sandboxed:
+        return ExecutionConfig.model_validate(
+            {
+                **config,
+                "runner_image": config["runner_cpu_image"],
+                "subnet_provision": defaults["subnet_provision"],
+                "subnet_exec": settings.p2p_subnet_exec or "sandboxes",
+                "smoke_platform": SANDBOX_PLATFORM,
+                "smoke_preset": SANDBOX_PRESET,
+                "exec_platform": SANDBOX_PLATFORM,
+                "exec_preset": SANDBOX_PRESET,
+                "exec_fallback": None,
+            }
+        )
     if hybrid:  # no CPU quota: smoke jobs (the Sandboxes fallback) run on the GPU platform
         config.update(
             subnet_provision=defaults["subnet_provision"],
@@ -496,9 +565,14 @@ def build_runtime(
     prod = settings.p2p_env == "prod"
     if not prod and settings.p2p_execution == "hybrid":
         raise ConfigError("P2P_EXECUTION=hybrid is a prod deploy (docs/specs/hybrid-deploy.md)")
+    if settings.p2p_execution != "hybrid" and exec_backend(settings) == "sandboxes":
+        raise ConfigError("P2P_EXEC_BACKEND=sandboxes runs in the hybrid deploy only")
     if prod and settings.p2p_job_backend != "fake":
         raise ConfigError("P2P_JOB_BACKEND=docker is for dev canaries only, never in prod")
     built = (adapters or (prod_adapters if prod else dev_adapters))(settings)
+    bind = getattr(built.jobs, "bind_cpu_pool", None)
+    if bind is not None:  # the Sandboxes backend parses harvests there (invariant 12)
+        bind(cpu_pool)
     if prod and settings.smoke_executor == "local":
         raise ConfigError("SMOKE_EXECUTOR=local is for dev canaries only, never in prod")
     if prod and not settings.p2p_bundle_key_id:
@@ -567,6 +641,8 @@ def build_runtime(
             artifacts,
             cloud,
             preemptible=execution.preemptible_gpu,
+            exec_on=(execution.exec_platform, execution.exec_preset),
+            hardware=GPU_HARDWARE if execution.exec_platform.startswith("gpu-") else CPU_HARDWARE,
             package_check=package_check,
             dataset_check=HfDatasets(store, http).check,
         ),

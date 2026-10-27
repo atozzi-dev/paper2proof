@@ -27,7 +27,7 @@ from app.models.pricing import load_cloud_prices
 from app.orchestrator.budget import BudgetExceeded
 from app.orchestrator.cost_estimate import estimate_plan_cost
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
-from app.orchestrator.steps.planning import DatasetCheck, PlanningStep, correct_plan
+from app.orchestrator.steps.planning import CPU_HARDWARE, DatasetCheck, PlanningStep, correct_plan
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
@@ -60,6 +60,7 @@ async def _plan(
     preemptible: bool = True,
     dataset_check: DatasetCheck | None = None,
     models: FakeModelClient | None = None,
+    hardware: str | None = None,
 ) -> tuple[Plan, StepName | RunStatus, list[object]]:
     artifacts = LocalArtifactStore(tmp_path)
     discovery = Discovery(repo=RepoRef(url="https://github.com/a/b", source="paper", official=True))
@@ -81,12 +82,31 @@ async def _plan(
         CLOUD,
         preemptible=preemptible,
         dataset_check=dataset_check,
+        **({"hardware": hardware} if hardware else {}),
     )
     result = await step.run(ctx)
     assert result.output_ref is not None
     plan = Plan.model_validate(artifacts.get_json(result.output_ref)["plan"])
     events = [e.payload for e in await store.events_after(RUN, 0)]
     return plan, result.next, events
+
+
+def _prompt(models: FakeModelClient) -> str:
+    _, messages = models.requests[-1]
+    return "\n".join(str(m.content) for m in messages)
+
+
+async def test_the_planner_plans_for_one_l40s_by_default(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
+    await _plan(store, tmp_path, "two_seeds", models=models)
+    assert "one L40S GPU (48 GB)" in _prompt(models)
+
+
+async def test_in_sandboxes_the_planner_plans_for_a_cpu(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
+    await _plan(store, tmp_path, "two_seeds", models=models, hardware=CPU_HARDWARE)
+    prompt = _prompt(models)
+    assert CPU_HARDWARE in prompt and "L40S" not in prompt
 
 
 async def test_two_seeds_are_raised_to_three_and_noted(store: Store, tmp_path: Path) -> None:
@@ -140,6 +160,11 @@ def test_cost_estimate_uses_pricing_yaml() -> None:
     provision = 20 / 60 * (4 * 0.015 + 16 * 0.0045)  # cpu-d3 4vcpu-16gb for 20 min
     assert on_demand == pytest.approx(0.2 + gpu_hour + provision, abs=1e-4)
     assert spot == pytest.approx(0.2 + spot_hour + provision, abs=1e-4)
+    sandboxed = estimate_plan_cost(
+        plan, CLOUD, inference_so_far=0.2, preemptible=True, exec_on=("sandbox", "4vcpu-16gb")
+    )
+    sandbox_hour = 4 * 0.015 + 16 * 0.0045  # priced like cpu-d3, never preemptible
+    assert sandboxed == pytest.approx(0.2 + sandbox_hour + provision, abs=1e-4)
 
 
 class FakeClock:

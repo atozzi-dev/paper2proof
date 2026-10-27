@@ -43,12 +43,6 @@ from app.execution.run_storage import RunStorage
 from app.models.pricing import CloudPrices
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
-from app.orchestrator.cost_estimate import (
-    EXEC_FALLBACK_PLATFORM,
-    EXEC_FALLBACK_PRESET,
-    EXEC_PLATFORM,
-    EXEC_PRESET,
-)
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of, planned_claims
 from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job, stop_jobs, utcnow
@@ -65,8 +59,6 @@ MAX_LIVE_LOG_BYTES = 512 * 1024
 LINE_CHARS = 500
 LIVE_LINES = 200  # what the runner mirrors into live.log
 EXEC_DISK_GIB = 100
-PRIMARY = (EXEC_PLATFORM, EXEC_PRESET)
-FALLBACK = (EXEC_FALLBACK_PLATFORM, EXEC_FALLBACK_PRESET)  # execution-contracts §8
 CAPACITY_RETRIES = 3  # on the primary platform, before the fallback (architecture §15)
 CAPACITY_WAIT_S = 120
 NO_CAPACITY = "NO_GPU_CAPACITY"
@@ -90,6 +82,14 @@ def log_lines(raw: bytes) -> list[str]:
     while shown and not shown[-1]:
         shown.pop()
     return shown[-LIVE_LINES:]
+
+
+def _noun(where: tuple[str, str]) -> str:
+    return "GPU " if where[0].startswith("gpu-") else ""
+
+
+def _job(where: tuple[str, str]) -> str:
+    return "GPU job" if where[0].startswith("gpu-") else "experiment job"
 
 
 def _printable(ch: str) -> bool:
@@ -212,6 +212,8 @@ class ExecutingStep:
         self._poll_s = poll_s
         self._clock = clock
         self._sleep = sleep
+        self._primary = (config.exec_platform, config.exec_preset)
+        self._fallback = config.exec_fallback  # execution-contracts §8; None in Sandboxes
 
     async def _json(self, key: str) -> Any:
         return await asyncio.to_thread(self._artifacts.get_json, key)
@@ -377,15 +379,18 @@ class ExecutingStep:
 
     async def _placements(self, ctx: RunContext, attempt: int) -> list[tuple[str, str]]:
         """Where the attempt's job may be created, in order: the primary platform and its
-        retries, then the fallback; only the fallback once the step moved there."""
-        if await self._moved(ctx, attempt):
-            return [FALLBACK]
-        return [PRIMARY] * (1 + CAPACITY_RETRIES) + [FALLBACK]
+        retries, then the fallback (if any); only the fallback once the step moved there."""
+        if self._fallback is not None and await self._moved(ctx, attempt):
+            return [self._fallback]
+        retries = [self._primary] * (1 + CAPACITY_RETRIES)
+        return retries if self._fallback is None else [*retries, self._fallback]
 
     async def _ran_on(self, ctx: RunContext, attempt: int) -> tuple[str, str]:
         """Where an attempt that had a job ran: the fallback once it moved there, else the
         primary platform (a job is only ever created on one of the two)."""
-        return FALLBACK if await self._moved(ctx, attempt) else PRIMARY
+        if self._fallback is not None and await self._moved(ctx, attempt):
+            return self._fallback
+        return self._primary
 
     async def _no_capacity(self, ctx: RunContext, message: str) -> None:
         await ctx.emit(EventType.WARNING, {"code": NO_CAPACITY, "message": message})
@@ -405,7 +410,7 @@ class ExecutingStep:
             if i > 0:
                 if where == places[i - 1]:
                     await self._no_capacity(
-                        ctx, f"no GPU capacity on {where[0]}: retrying in 2 minutes"
+                        ctx, f"no {_noun(where)}capacity on {where[0]}: retrying in 2 minutes"
                     )
                     await self._sleep(CAPACITY_WAIT_S)
                 else:
@@ -439,13 +444,15 @@ class ExecutingStep:
                 minutes = QUEUE_CAP_S // 60
                 await self._no_capacity(
                     ctx,
-                    f"no GPU on {where[0]} after {minutes} minutes in the queue: "
-                    "the GPU job did not run",
+                    f"no {_noun(where)}capacity on {where[0]} after {minutes} minutes in the "
+                    f"queue: the {_job(where)} did not run",
                 )
                 return "queue_timeout"  # it existed: it may have run before the cancel
             return _Placed(outcome, spec)
         tried = " or ".join(dict.fromkeys(p for p, _ in places))
-        await self._no_capacity(ctx, f"no GPU capacity on {tried}: the GPU job did not run")
+        await self._no_capacity(
+            ctx, f"no {_noun(places[0])}capacity on {tried}: the {_job(places[0])} did not run"
+        )
         return "no_capacity"
 
     async def _warn(self, ctx: RunContext, message: str) -> None:

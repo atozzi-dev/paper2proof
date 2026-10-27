@@ -474,3 +474,54 @@ def test_a_file_rewritten_in_place_during_the_upload_is_refused_and_removed(
     with pytest.raises(UploadRefused, match="changed during the upload"):
         upload_run_dir(s3, bucket_name(RUN), root)
     assert "staging/overlay.tar.zst" not in _keys(s3)
+
+
+# --- plan B: smoke and exec jobs in Sandboxes (docs/specs/hybrid-deploy.md) ----------------
+
+
+class FakeSandbox(FakeJobBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forgotten: list[str] = []
+
+    async def forget(self, run_id: str) -> None:
+        self.forgotten.append(run_id)
+
+
+def _sandboxed(
+    tmp_path: Path,
+) -> tuple[HybridJobBackend, FakeJobBackend, FakeJobBackend, FakeSandbox]:
+    local, remote, sandbox = FakeJobBackend(), FakeJobBackend(), FakeSandbox()
+    backend = HybridJobBackend(
+        local=local, remote=remote, local_buckets=tmp_path / "buckets", upload=Uploads(),
+        sandbox=sandbox,
+    )  # fmt: skip
+    return backend, local, remote, sandbox
+
+
+@pytest.mark.parametrize(
+    ("kind", "where"),
+    [(JobKind.PROVISION, "local"), (JobKind.FETCH, "local"),
+     (JobKind.EXEC, "sandbox"), (JobKind.SMOKE, "sandbox")],
+)  # fmt: skip
+async def test_with_sandboxes_smoke_and_exec_jobs_never_reach_nebius(
+    tmp_path: Path, kind: JobKind, where: str
+) -> None:
+    backend, local, remote, sandbox = _sandboxed(tmp_path)
+    handle = await backend.submit(_job(kind))
+    ran = local if where == "local" else sandbox
+    assert handle.name in ran.jobs and not remote.jobs
+    assert await backend.status(handle) is JobState.SUCCEEDED
+    await backend.cancel(handle)
+    assert ran.cancelled == [handle.name]
+
+
+async def test_with_sandboxes_the_reaper_sees_them_and_a_deleted_run_is_forgotten(
+    tmp_path: Path,
+) -> None:
+    backend, _, remote, sandbox = _sandboxed(tmp_path)
+    await backend.submit(_job(JobKind.EXEC))
+    assert {h.name for h, _, _ in await backend.list_jobs("p2p-")} == {f"p2p-exec-{SLUG}-1"}
+    await backend.ensure_run_bucket(RUN)
+    await backend.delete_run_bucket(RUN)
+    assert sandbox.forgotten == [RUN] and remote.buckets == set()

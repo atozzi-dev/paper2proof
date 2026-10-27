@@ -22,7 +22,7 @@ from app.models.prompt_files import load_prompt
 from app.models.untrusted import UNTRUSTED_NOTICE, wrap_untrusted
 from app.orchestrator.budget import SpendKind
 from app.orchestrator.context import RunContext
-from app.orchestrator.cost_estimate import estimate_plan_cost
+from app.orchestrator.cost_estimate import EXEC_PLATFORM, EXEC_PRESET, estimate_plan_cost
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of
 from app.storage.artifacts import ArtifactStore
@@ -30,6 +30,14 @@ from app.storage.artifacts import ArtifactStore
 MIN_SEEDS = 3
 PackageCheck = Callable[[list[PackageReq]], Awaitable[list[PackageReq]]]
 DatasetCheck = Callable[[list[DatasetReq], RunCpu], Awaitable[DatasetReport]]
+
+
+GPU_HARDWARE = "one L40S GPU (48 GB)"
+# the hybrid deploy without GPU capacity (docs/specs/hybrid-deploy.md)
+CPU_HARDWARE = (
+    "a CPU only (no GPU): one Token Factory Sandboxes microVM without network, the experiment "
+    "at most 30 minutes in all; scale GPU training down to what a CPU finishes in that time"
+)
 
 
 def _problems(dropped: list[DatasetProblem]) -> str:
@@ -91,6 +99,8 @@ class PlanningStep:
         preemptible: bool,
         package_check: PackageCheck | None = None,
         dataset_check: DatasetCheck | None = None,
+        exec_on: tuple[str, str] = (EXEC_PLATFORM, EXEC_PRESET),
+        hardware: str = GPU_HARDWARE,
     ) -> None:
         self._models = models
         self._artifacts = artifacts
@@ -98,6 +108,8 @@ class PlanningStep:
         self._preemptible = preemptible
         self._package_check = package_check
         self._dataset_check = dataset_check
+        self._exec_on = exec_on  # the configured exec platform and preset (the estimate's price)
+        self._hardware = hardware  # what the experiment runs on, as the Planner reads it
 
     async def run(self, ctx: RunContext) -> StepResult:
         claims = [c for c, selected in await ctx.store.get_claims(ctx.run_id) if selected]
@@ -107,10 +119,9 @@ class PlanningStep:
         )
         limits = ctx.limits.per_run
         prompt = load_prompt("planner_experiment_plan")
-        budget = json.dumps(
-            {"gpu_minutes": limits.gpu_minutes, "min_seeds": MIN_SEEDS, "gpu": "1x L40S 48GB"}
-        )
+        budget = json.dumps({"experiment_minutes": limits.gpu_minutes, "min_seeds": MIN_SEEDS})
         user = prompt.render(
+            hardware=self._hardware,
             budget=budget,
             claims=wrap_untrusted(
                 json.dumps([c.model_dump(mode="json") for c in claims], indent=1),
@@ -154,7 +165,11 @@ class PlanningStep:
 
         spent = await ctx.budget.run_spend(ctx.run_id, SpendKind.INFERENCE_USD)
         cost = estimate_plan_cost(
-            plan, self._cloud, inference_so_far=spent, preemptible=self._preemptible
+            plan,
+            self._cloud,
+            inference_so_far=spent,
+            preemptible=self._preemptible,
+            exec_on=self._exec_on,
         )
         needs_approval = cost >= ctx.limits.approval.auto_approve_below_usd
         key = f"runs/{ctx.run_id}/plan.json"

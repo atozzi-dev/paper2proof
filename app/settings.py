@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     p2p_execution: Literal["nebius", "hybrid"] = "nebius"
     p2p_local_jobs_dir: Path | None = None  # hybrid: local run copies and the overlay cache
     p2p_local_jobs_network: str | None = None  # hybrid: the docker network the firewall restricts
+    # hybrid: where smoke and exec jobs run, "sandboxes" (the default) or "gpu" (needs spike S5)
+    p2p_exec_backend: Literal["gpu", "sandboxes"] | None = None
     # S3 credentials of sa-api-runtime (control-plane buckets); loaded by deploy/secrets.sh
     runtime_s3_key_id: SecretStr | None = None
     runtime_s3_secret: SecretStr | None = None
