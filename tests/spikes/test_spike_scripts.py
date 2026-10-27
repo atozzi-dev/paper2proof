@@ -182,3 +182,12 @@ def test_s7_whoami_fails_on_a_failed_cli_call_not_on_jq() -> None:
     step = text[text.index("- name: Use the token with the Nebius CLI") :]
     step = step[: step.index("- name: Verdict")]
     assert "set -euo pipefail" in step
+
+
+def test_s5_runs_on_a_chosen_platform_and_records_the_network_flags() -> None:
+    """With the non-GPU vCPU quota at 0, S5 runs on the L40S platform (PLATFORM/PRESET), and
+    the CLI's network options are recorded for the hybrid deploy's isolation decision."""
+    text = _text("s5_job_gateway.sh")
+    assert 'PLATFORM="${PLATFORM:-cpu-d3}"' in text and 'PRESET="${PRESET:-2vcpu-8gb}"' in text
+    assert '--platform "$PLATFORM" --preset "$PRESET"' in text
+    assert "network flags:" in text

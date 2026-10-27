@@ -7,13 +7,16 @@
 #                open internet work without the gateway (the reference behaviour).
 #   gateway-on   after H-04: exec subnet, gateway running. Expect pull OK, mount OK, egress blocked.
 #   gateway-off  after H-04: stops the gateway, runs the job, starts the gateway again.
-# Needs: nebius CLI (parent-id = p2p-sandbox), S5_BUCKET (an existing bucket to mount).
+# Needs: nebius CLI (parent-id = p2p-sandbox), S5_BUCKET (the ID of an existing bucket).
+# Optional: PLATFORM / PRESET (default cpu-d3 / 2vcpu-8gb; with the non-GPU vCPU quota at 0
+#        use gpu-l40s-a / 1gpu-8vcpu-32gb), SUBNET_ID (baseline only).
 #        gateway modes also: SUBNET_EXEC_ID, GATEWAY_INSTANCE_ID, PROBE_IMAGE (python:3.12-alpine
 #        mirrored into the sandbox registry, by digest), NEBIUS_STORAGE_HOST, NEBIUS_REGISTRY_HOST.
-# Cost: one cpu-d3 2vcpu-8gb job for ~3 min per mode (< $0.01).
+# Cost: one cpu-d3 2vcpu-8gb job for ~3 min per mode (< $0.01); on gpu-l40s-a about
+#       $0.10-0.15 per mode, plus any wait for capacity.
 set -euo pipefail
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,7 +34,11 @@ need_cmd "$PY"
 need_env S5_BUCKET
 
 PUBLIC_IMAGE="python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4"
-ARGS=(--platform cpu-d3 --preset 2vcpu-8gb --disk-size 30Gi --timeout 1h --restart-policy never
+PLATFORM="${PLATFORM:-cpu-d3}"
+PRESET="${PRESET:-2vcpu-8gb}"
+DISK="30Gi"
+case "$PLATFORM" in gpu-*) DISK="50Gi" ;; esac
+ARGS=(--platform "$PLATFORM" --preset "$PRESET" --disk-size "$DISK" --timeout 1h --restart-policy never
       --container-command python --args /etc/p2p/net_probe.py
       --inject-file "$SPIKES_DIR/net_probe.py:/etc/p2p/net_probe.py"
       --volume "$S5_BUCKET:/mnt/run:rw")
@@ -54,7 +61,13 @@ EOF
 ARGS+=(--inject-file "$SPEC_FILE:/etc/p2p/probe.json")
 
 echo "== CLI preflight"
-require_flags "$(nebius ai job create --help 2>&1 || true)" --inject-file --volume --subnet-id --args
+HELP="$(nebius ai job create --help 2>&1 || true)"
+require_flags "$HELP" --inject-file --volume --subnet-id --args
+# what the CLI offers to control a job's network (public IP, subnet...): decides how the hybrid
+# deploy isolates exec jobs when there is no gateway
+NET_FLAGS="$(grep -oE -- '--[a-z0-9-]*(public|network|subnet|ip|egress)[a-z0-9-]*' <<<"$HELP" | sort -u | tr '\n' ' ')"
+fact "network flags: ${NET_FLAGS:-none}"
+fact "platform: $PLATFORM/$PRESET"
 
 instance_state() { nebius compute instance get --id "$1" --format json 2>/dev/null | json_state || true; }
 restore_gateway() {
@@ -99,7 +112,11 @@ case "$MODE" in
   baseline)
     [ "$PULLED" = 1 ] || fail "job never started (see state above)"
     grep -q '^MOUNT_OK' <<<"$LOGS" || fail "bucket mount by name failed"
-    opened example.com 443 && fact "baseline: open internet reachable (expected without gateway)" ;;
+    if opened example.com 443 || opened 1.1.1.1 443 || opened 8.8.8.8 53; then
+      fact "baseline: open internet reachable from this subnet (no isolation without a gateway)"
+    else
+      fact "baseline: no internet from this subnet (isolated without a gateway)"
+    fi ;;
   gateway-on)
     [ "$PULLED" = 1 ] || fail "image pull through the gateway failed -> registry must be allowlisted or routed"
     grep -q '^MOUNT_OK' <<<"$LOGS" || fail "bucket mount failed with the gateway route"
