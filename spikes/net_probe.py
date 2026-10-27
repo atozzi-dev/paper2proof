@@ -40,6 +40,8 @@ def tls(host: str, port: int, timeout: float = 6.0) -> str:
             ctx.wrap_socket(raw, server_hostname=host) as conn,
         ):
             return f"OK({conn.version()})"
+    except ConnectionRefusedError:
+        return "REFUSED"
     except ssl.SSLError as err:
         return f"TLS_ERROR({err.reason})"
     except TimeoutError:
@@ -55,28 +57,35 @@ def dns(name: str) -> str:
         return f"FAILED({type(err).__name__})"
 
 
-def metadata_verdict(status: int, body: bytes) -> str:
-    """Whether the metadata service answered, and whether its answer looks like a credential;
-    never the body itself."""
-    token = b"token" in body.lower()
-    return f"OPEN({status}, token={'yes' if token else 'no'})"
+# The root, and the credential paths of the common metadata services: only status codes are
+# printed, never a body (a token must not reach the job logs).
+META_PATHS = {
+    "root": "/",
+    "token-path": "/computeMetadata/v1/instance/service-accounts/default/token",
+    "credentials-path": "/latest/meta-data/iam/security-credentials/",
+}
 
 
-def metadata(timeout: float = 4.0) -> str:
-    request = "GET / HTTP/1.0\r\nHost: 169.254.169.254\r\nMetadata-Flavor: Google\r\n\r\n"
+def http_status(path: str, timeout: float = 4.0) -> str:
+    request = (
+        f"GET {path} HTTP/1.0\r\nHost: 169.254.169.254\r\n"
+        "Metadata-Flavor: Google\r\nMetadata: true\r\n\r\n"
+    )
     try:
         with socket.create_connection(("169.254.169.254", 80), timeout) as conn:
             conn.sendall(request.encode())
-            data = conn.recv(65536)
+            head = conn.recv(256).split(b"\r\n", 1)[0].split()
     except ConnectionRefusedError:
         return "REFUSED"
     except TimeoutError:
         return "TIMEOUT"
     except OSError as err:
         return f"ERROR({type(err).__name__})"
-    head = data.split(b"\r\n", 1)[0].split()
-    status = int(head[1]) if len(head) > 1 and head[1].isdigit() else 0
-    return metadata_verdict(status, data)
+    return head[1].decode() if len(head) > 1 and head[1].isdigit() else "NO_STATUS"
+
+
+def metadata() -> str:
+    return " ".join(f"{name}={http_status(path)}" for name, path in META_PATHS.items())
 
 
 def mount(path: str) -> str:
