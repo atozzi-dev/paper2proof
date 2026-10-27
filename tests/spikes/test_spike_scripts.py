@@ -214,7 +214,7 @@ def _probe() -> Any:
     return module
 
 
-def test_the_probe_reports_dns_and_metadata_without_printing_secrets(
+def test_the_probe_reports_dns_resolution(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     probe = _probe()
@@ -228,9 +228,6 @@ def test_the_probe_reports_dns_and_metadata_without_printing_secrets(
 
     monkeypatch.setattr(probe.socket, "getaddrinfo", no_dns)
     assert probe.dns("example.com").startswith("FAILED")
-    body = b'{"access_token": "secret-value", "expires_in": 3600}'
-    assert probe.metadata_verdict(200, body) == "OPEN(200, token=yes)"
-    assert "secret-value" not in probe.metadata_verdict(200, body)
 
 
 def test_s5_isolated_needs_complete_probe_output_and_a_gpu_platform() -> None:
@@ -242,3 +239,29 @@ def test_s5_isolated_needs_complete_probe_output_and_a_gpu_platform() -> None:
     assert "gpu-*" in text and "isolated mode runs on the exec GPU platform" in text
     assert '[ "$REPORT_OUTCOME" = "PASS" ]' in isolated  # the success fact only on PASS
     assert "META" in isolated and "public IP" in isolated
+
+
+def test_a_refused_tls_connection_is_reported_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = _probe()
+
+    def refused(*a: Any, **k: Any) -> Any:
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(probe.socket, "create_connection", refused)
+    assert probe.tls("example.com", 443) == "REFUSED"
+
+
+def test_the_metadata_probe_asks_for_credentials_and_prints_only_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _probe()
+    asked: list[str] = []
+
+    def fetch(path: str, timeout: float = 4.0) -> str:
+        asked.append(path)
+        return "200" if "token" in path else "404"
+
+    monkeypatch.setattr(probe, "http_status", fetch)
+    verdict = probe.metadata()
+    assert any("token" in p or "credentials" in p for p in asked)
+    assert "token-path=200" in verdict  # a credential path answered: the gate fails on it

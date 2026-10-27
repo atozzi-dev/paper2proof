@@ -122,16 +122,25 @@ while read -r line; do fact "$line"; done < <(grep -E '^(MOUNT|TCP|TLS|DNS|META)
 PULLED=0; grep -q '^PROBE_START' <<<"$LOGS" && PULLED=1
 fact "image pulled and started: $([ "$PULLED" = 1 ] && echo yes || echo no)"
 opened() { grep -E "^(TLS|TCP) $1:$2 (OK|OPEN)" <<<"$LOGS" >/dev/null; }
-# every target printed a line, and every one says it could not connect (TIMEOUT or ERROR);
-# a missing line is not "blocked" (truncated logs, a dead probe), a REFUSED is a live host
+# every target printed a line, and every one is a known "could not get out" result: a timeout,
+# no route, no network, no IPv6, a name that does not resolve. A missing line is a FAIL
+# (truncated logs, a dead probe); anything else (REFUSED, a reset, a TLS error) means a host
+# answered, so it is PARTIAL at best.
+blocked_result() {
+  case "$1" in
+    *" TIMEOUT"|*"ERROR(gaierror"*|*"Errno 101]"*|*"Errno 113]"*|*"Errno 97]"*) return 0 ;;
+    *"Network is unreachable"*|*"No route to host"*|*"Address family not supported"*) return 0 ;;
+  esac
+  return 1
+}
 every_target_blocked() {
   local target line ok=0
   for target in 1.1.1.1:443 8.8.8.8:53 2606:4700:4700::1111:443 example.com:443 pypi.org:443; do
     line="$(grep -E "^(TCP|TLS) $target " <<<"$LOGS" | head -1 || true)"
     case "$line" in
       "") fail "no probe result for $target (incomplete output)"; ok=1 ;;
-      *" OK"*|*" OPEN") fail "egress NOT blocked: $line"; ok=1 ;;
-      *" REFUSED") partial "a host answered (RST) for $target: something is reachable"; ok=1 ;;
+      *" OK("*|*" OPEN") fail "egress NOT blocked: $line"; ok=1 ;;
+      *) blocked_result "$line" || { partial "a host answered for $target: $line"; ok=1; } ;;
     esac
   done
   return "$ok"
@@ -162,12 +171,16 @@ case "$MODE" in
     grep -q '^PROBE_END' <<<"$LOGS" || fail "the probe output is incomplete (no PROBE_END)"
     grep -q '^MOUNT_OK' <<<"$LOGS" || fail "no gateway: the run bucket could not be mounted"
     every_target_blocked || true
-    case "$(grep -E '^META ' <<<"$LOGS" | head -1)" in
+    META="$(grep -E '^META ' <<<"$LOGS" | head -1 || true)"
+    case "$META" in
       "") fail "no metadata-service result (incomplete output)" ;;
-      *"token=yes"*) fail "the metadata service hands out a token to the job" ;;
-      *"OPEN("*) partial "the metadata service answers the job (no token seen)" ;;
+      *"token-path=200"*|*"credentials-path=200"*) fail "the metadata service hands out credentials: $META" ;;
+      *"root=2"*|*"root=3"*|*"root=4"*|*"root=5"*) partial "the metadata service answers the job: $META" ;;
     esac
-    grep -qE '^DNS example.com RESOLVED' <<<"$LOGS" && partial "public names resolve: DNS is a possible tunnel"
+    # the VPC resolver answers public names by design (architecture §8.3): a fact, not a gate
+    if grep -qE '^DNS example.com RESOLVED' <<<"$LOGS"; then
+      fact "public names resolve from the exec subnet (known: DNS is a possible tunnel)"
+    fi
     case "$IMAGE" in
       cr.*@sha256:*) ;;
       *) partial "pulled $IMAGE, not from the Nebius registry: the prod pull path is untested" ;;
