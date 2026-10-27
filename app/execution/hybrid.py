@@ -5,13 +5,26 @@ The local run directory was written by the provisioner image (our code) from unt
 (PyPI wheels, a repository clone, parquet files): the upload never follows a link, sends only
 regular files, and refuses a copy over its bounds before anything is sent."""
 
+import asyncio
+import logging
 import os
 import stat
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
+from app.execution.backend import (
+    JobBackend,
+    JobHandle,
+    JobKind,
+    JobSpec,
+    JobState,
+    JobStatusUnavailable,
+)
+from app.execution.naming import bucket_name
 from app.execution.s3 import check_run_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -19,6 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 else:
     S3Client = object
 
+log = logging.getLogger(__name__)
 MAX_UPLOAD_FILES = 10_000
 MAX_UPLOAD_BYTES = 30 * 2**30
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -87,3 +101,88 @@ def upload_run_dir(client: S3Client, bucket: str, root: Path) -> int:
             client.upload_fileobj(handle, bucket, key)  # multipart for large files
         sent += 1
     return sent
+
+
+LOCAL_KINDS = frozenset({JobKind.PROVISION, JobKind.FETCH})
+_PREFIXES = {kind: f"p2p-{kind.value}-" for kind in JobKind}
+Upload = Callable[[str, Path], int]  # (bucket, local run directory) -> files sent; blocking
+
+
+def _kind(name: str) -> JobKind:
+    for kind, prefix in _PREFIXES.items():
+        if name.startswith(prefix):
+            return kind
+    raise ValueError(f"not a job name: {name!r}")
+
+
+class HybridJobBackend:
+    """Provision and fetch jobs on this host (`local`, a provisioner-only DevDockerBackend),
+    exec and smoke jobs on Nebius (`remote`). A local job is SUCCEEDED only once its output is
+    in the Nebius run bucket. There is no gateway: exec isolation comes from the exec subnet's
+    route (docs/specs/hybrid-deploy.md)."""
+
+    def __init__(
+        self, *, local: JobBackend, remote: JobBackend, local_buckets: Path, upload: Upload
+    ) -> None:
+        self._local = local
+        self._remote = remote
+        self._buckets = local_buckets
+        self._upload = upload
+        self._uploaded: set[str] = set()  # job names whose output is in the run bucket
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _for(self, name: str) -> JobBackend:
+        return self._local if _kind(name) in LOCAL_KINDS else self._remote
+
+    async def ensure_run_bucket(self, run_id: str) -> str:
+        await self._local.ensure_run_bucket(run_id)
+        return await self._remote.ensure_run_bucket(run_id)
+
+    async def delete_run_bucket(self, run_id: str) -> None:
+        await self._remote.delete_run_bucket(run_id)
+        await self._local.delete_run_bucket(run_id)
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        return await self._for(spec.name).submit(spec)
+
+    async def status(self, handle: JobHandle) -> JobState:
+        state = await self._for(handle.name).status(handle)
+        if state is not JobState.SUCCEEDED or _kind(handle.name) not in LOCAL_KINDS:
+            return state
+        lock = self._locks.setdefault(handle.name, asyncio.Lock())
+        async with lock:  # two polls never upload the same copy at once
+            if handle.name in self._uploaded:
+                return state
+            bucket = bucket_name("r_" + handle.name.split("-")[2])
+            try:
+                sent = await asyncio.to_thread(self._upload, bucket, self._buckets / bucket)
+            except UploadRefused as err:
+                log.warning("run copy not uploaded: %s", err, extra={"job": handle.name})
+                return JobState.FAILED
+            except (OSError, ClientError, BotoCoreError) as err:  # unreachable: ask again later
+                raise JobStatusUnavailable(f"upload of {bucket}: {type(err).__name__}") from None
+            self._uploaded.add(handle.name)
+            log.info("run copy uploaded", extra={"job": handle.name, "files": sent})
+        return state
+
+    async def cancel(self, handle: JobHandle) -> None:
+        await self._for(handle.name).cancel(handle)
+
+    async def ensure_gateway_up(self) -> None:
+        return None  # no gateway VM: the exec subnet's route has no next hop (fail-closed)
+
+    async def gateway_idle_check(self, idle_minutes: int = 30) -> bool:
+        return False
+
+    async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]:
+        return [*await self._local.list_jobs(prefix), *await self._remote.list_jobs(prefix)]
+
+    async def list_run_buckets(self) -> list[tuple[str, datetime]]:
+        """Both copies, by name, with the older creation time (the reaper's age check)."""
+        merged: dict[str, datetime] = {}
+        for name, created in [
+            *await self._remote.list_run_buckets(),
+            *await self._local.list_run_buckets(),
+        ]:
+            merged[name] = min(created, merged.get(name, created))
+        return sorted(merged.items())

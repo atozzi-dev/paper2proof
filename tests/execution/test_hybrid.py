@@ -12,9 +12,10 @@ from moto import mock_aws
 from pydantic import SecretStr
 
 from app.execution import hybrid
-from app.execution.backend import JobKind
+from app.execution.backend import JobKind, JobState, JobStatusUnavailable
 from app.execution.dev_docker import DevDockerBackend
-from app.execution.hybrid import UploadRefused, upload_run_dir
+from app.execution.fake_backend import FakeJobBackend
+from app.execution.hybrid import HybridJobBackend, UploadRefused, upload_run_dir
 from app.execution.local_trusted import LocalTrustedRefused
 from app.execution.naming import bucket_name
 from app.execution.s3 import make_s3_client
@@ -173,3 +174,115 @@ def test_a_name_that_is_not_a_safe_key_is_refused(tmp_path: Path, s3: Any) -> No
     (root / "staging" / "bad\x7fname").write_bytes(b"x")
     with pytest.raises(UploadRefused, match="key"):
         upload_run_dir(s3, bucket_name(RUN), root)
+
+
+# --- HybridJobBackend: provision and fetch here, exec and smoke on Nebius -----------------
+
+
+class Uploads:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[tuple[str, Path]] = []
+        self.error = error
+
+    def __call__(self, bucket: str, root: Path) -> int:
+        self.calls.append((bucket, root))
+        if self.error is not None:
+            raise self.error
+        return 1
+
+
+def _hybrid(
+    tmp_path: Path, uploads: Uploads | None = None
+) -> tuple[HybridJobBackend, FakeJobBackend, FakeJobBackend, Uploads]:
+    local, remote = FakeJobBackend(), FakeJobBackend()
+    uploads = uploads or Uploads()
+    backend = HybridJobBackend(
+        local=local, remote=remote, local_buckets=tmp_path / "buckets", upload=uploads
+    )
+    return backend, local, remote, uploads
+
+
+def _job(kind: JobKind) -> Any:
+    short = "prov" if kind is JobKind.PROVISION else kind.value
+    if kind in (JobKind.PROVISION, JobKind.FETCH):
+        return _prov(kind)
+    return _spec(kind, name=f"p2p-{short}-{SLUG}-1", platform="gpu-l40s-a")
+
+
+@pytest.mark.parametrize(
+    ("kind", "where"),
+    [(JobKind.PROVISION, "local"), (JobKind.FETCH, "local"),
+     (JobKind.EXEC, "remote"), (JobKind.SMOKE, "remote")],
+)  # fmt: skip
+async def test_jobs_are_routed_by_kind(tmp_path: Path, kind: JobKind, where: str) -> None:
+    backend, local, remote, _ = _hybrid(tmp_path)
+    handle = await backend.submit(_job(kind))
+    ran, other = (local, remote) if where == "local" else (remote, local)
+    assert handle.name in ran.jobs and not other.jobs
+    await backend.cancel(handle)
+    assert ran.cancelled == [handle.name]
+
+
+async def test_a_local_job_succeeds_only_once_its_output_is_in_the_run_bucket(
+    tmp_path: Path,
+) -> None:
+    backend, _, _, uploads = _hybrid(tmp_path)
+    handle = await backend.submit(_job(JobKind.PROVISION))
+    assert await backend.status(handle) is JobState.SUCCEEDED
+    assert uploads.calls == [(bucket_name(RUN), tmp_path / "buckets" / bucket_name(RUN))]
+    assert await backend.status(handle) is JobState.SUCCEEDED
+    assert len(uploads.calls) == 1  # polled again after success: nothing sent twice
+
+
+async def test_a_refused_upload_fails_the_job(tmp_path: Path) -> None:
+    backend, _, _, _ = _hybrid(tmp_path, Uploads(UploadRefused("too many files")))
+    handle = await backend.submit(_job(JobKind.FETCH))
+    assert await backend.status(handle) is JobState.FAILED
+
+
+async def test_an_upload_that_cannot_reach_the_bucket_is_retried_at_the_next_poll(
+    tmp_path: Path,
+) -> None:
+    uploads = Uploads(OSError("connection reset"))
+    backend, _, _, _ = _hybrid(tmp_path, uploads)
+    handle = await backend.submit(_job(JobKind.PROVISION))
+    with pytest.raises(JobStatusUnavailable):
+        await backend.status(handle)
+    uploads.error = None
+    assert await backend.status(handle) is JobState.SUCCEEDED
+
+
+async def test_a_failed_local_job_uploads_nothing(tmp_path: Path) -> None:
+    backend, local, _, uploads = _hybrid(tmp_path)
+    local.final_state = JobState.FAILED
+    handle = await backend.submit(_job(JobKind.PROVISION))
+    assert await backend.status(handle) is JobState.FAILED
+    assert uploads.calls == []
+
+
+async def test_remote_jobs_are_never_uploaded(tmp_path: Path) -> None:
+    backend, _, _, uploads = _hybrid(tmp_path)
+    handle = await backend.submit(_job(JobKind.EXEC))
+    assert await backend.status(handle) is JobState.SUCCEEDED
+    assert uploads.calls == []
+
+
+async def test_both_copies_of_the_run_bucket_are_created_and_deleted(tmp_path: Path) -> None:
+    backend, local, remote, _ = _hybrid(tmp_path)
+    assert await backend.ensure_run_bucket(RUN) == bucket_name(RUN)
+    assert local.buckets == remote.buckets == {bucket_name(RUN)}
+    assert [n for n, _ in await backend.list_run_buckets()] == [bucket_name(RUN)]
+    await backend.delete_run_bucket(RUN)
+    assert local.buckets == remote.buckets == set()
+
+
+async def test_the_reaper_sees_local_and_remote_jobs_and_there_is_no_gateway(
+    tmp_path: Path,
+) -> None:
+    backend, _, _, _ = _hybrid(tmp_path)
+    await backend.submit(_job(JobKind.PROVISION))
+    await backend.submit(_job(JobKind.EXEC))
+    names = {h.name for h, _, _ in await backend.list_jobs("p2p-")}
+    assert names == {f"p2p-prov-{SLUG}-1", f"p2p-exec-{SLUG}-1"}
+    await backend.ensure_gateway_up()  # nothing to start: exec isolation is the route
+    assert await backend.gateway_idle_check() is False
