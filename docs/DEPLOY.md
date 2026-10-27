@@ -159,8 +159,13 @@ its facts go in `docs/spikes/RESULTS.md`. PASS means:
 - the job gets no metadata token and has no public IP.
 
 Without that PASS, exec jobs could reach the internet, and the hybrid deploy must not start.
-Run it with a `PROBE_IMAGE` from the sandbox registry once the registry exists, so that the
-prod pull path is tested too.
+Public names resolving is recorded as a fact and does not block: the VPC resolver answers by
+design (architecture §8.3).
+
+A first run before the registry exists can only be PARTIAL, because the image does not come
+from the Nebius registry. That is a preliminary result, enough to apply the network. The final
+gate is a run with a `PROBE_IMAGE` from the sandbox registry, and it must PASS. No other PARTIAL
+is acceptable: not a host that answered, and not the metadata service answering.
 
 **What this host is trusted with.** Read this before using a shared or general-purpose machine.
 - **It holds every prod secret.** That includes `sa-job-launcher` (editor on p2p-sandbox, enough
@@ -190,7 +195,7 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
 1. Install:
    - Docker, rootful: the jobs' uid 10001 must be uid 10001 on the host.
    - The `acl` package.
-   - `uv`.
+   - `uv` (for the build only).
    - Node 20 (for the web build).
    - litestream v0.5.17, with its sha256 checked against the one in `images/api/Dockerfile`:
      `echo "cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d  litestream-0.5.17-linux-x86_64.tar.gz" | sha256sum -c`.
@@ -199,28 +204,47 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
      `git status --porcelain`; it must print nothing.
    - Create `/var/lib/p2p` (the database and `P2P_VAR_DIR`) and `/var/lib/p2p/jobs`
      (`P2P_LOCAL_JOBS_DIR`), owned by `p2p`, mode 0700. Put the jobs directory on its own
-     filesystem, or on a fixed-size loop device (for example 60 GiB). A huge repository or
-     dataset then fills that disk, not the database's: a full database disk loses the ledger and
-     the kill switch.
+     filesystem, or on a fixed-size loop device (for example 60 GiB, ext4, which supports ACLs).
+     Mount it first, then `chown p2p: /var/lib/p2p/jobs && chmod 0700 /var/lib/p2p/jobs`, because
+     the mount hides the directory's own permissions. A huge repository or dataset then fills
+     that disk, not the database's: a full database disk loses the ledger and the kill switch.
 3. Network for the local jobs:
-   - Create it with `docker network create --driver bridge --opt com.docker.network.bridge.name=p2p-jobs p2p-local-jobs`.
-   - Drop anything that is not the internet in `DOCKER-USER`, before docker's own rules:
+   - Create it with IPv4 only:
+     `docker network create --driver bridge --opt com.docker.network.bridge.name=p2p-jobs p2p-local-jobs`.
+     Never add `--ipv6`.
+   - Drop anything that is not the internet, with a oneshot unit that runs after docker:
+     `/etc/systemd/system/p2p-jobs-firewall.service`. A unit, not `iptables-persistent`, because
+     that package removes ufw, which step 8 uses.
      ```
-     iptables -I DOCKER-USER -i p2p-jobs -d 169.254.0.0/16 -j DROP
-     iptables -I DOCKER-USER -i p2p-jobs -d 10.0.0.0/8 -j DROP
-     iptables -I DOCKER-USER -i p2p-jobs -d 172.16.0.0/12 -j DROP
-     iptables -I DOCKER-USER -i p2p-jobs -d 192.168.0.0/16 -j DROP
-     iptables -I INPUT -i p2p-jobs -j DROP
+     [Unit]
+     After=docker.service
+     Requires=docker.service
+     Before=p2p.service
+     [Service]
+     Type=oneshot
+     RemainAfterExit=yes
+     ExecStart=/usr/sbin/iptables -I DOCKER-USER -i p2p-jobs -d 169.254.0.0/16 -j DROP
+     ExecStart=/usr/sbin/iptables -I DOCKER-USER -i p2p-jobs -d 100.64.0.0/10 -j DROP
+     ExecStart=/usr/sbin/iptables -I DOCKER-USER -i p2p-jobs -d 10.0.0.0/8 -j DROP
+     ExecStart=/usr/sbin/iptables -I DOCKER-USER -i p2p-jobs -d 172.16.0.0/12 -j DROP
+     ExecStart=/usr/sbin/iptables -I DOCKER-USER -i p2p-jobs -d 192.168.0.0/16 -j DROP
+     ExecStart=/usr/sbin/iptables -I INPUT -i p2p-jobs -j DROP
+     [Install]
+     WantedBy=multi-user.target
      ```
-     The `INPUT` rule keeps the containers away from the host's own services (the API on
-     127.0.0.1 included). Make the rules persistent (`iptables-persistent`). Never publish docker
-     ports: rootful docker bypasses ufw.
-4. Build once, as `p2p` in `/opt/p2p`:
+     The `INPUT` rule keeps the containers away from the host's own services, the API on
+     127.0.0.1 included. After a reboot, `iptables -S DOCKER-USER` must list the five drops.
+   - If the host's upstream DNS server is a private or link-local address (common on a VPS),
+     container lookups are now dropped and provision jobs fail (fail-closed: the canary in step 9
+     shows it). Set public resolvers in `/etc/docker/daemon.json` (`"dns": ["1.1.1.1", "9.9.9.9"]`).
+   - Never publish docker ports: rootful docker bypasses ufw.
+4. Build once, as root in `/opt/p2p` (the checkout, `.venv` and `web/dist` stay root-owned and
+   read-only to `p2p`):
    ```
-   uv sync --frozen --no-dev
-   cd web && npm ci && npm run build
+   UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev
+   cd web && npm ci --ignore-scripts && npm run build
    ```
-   Without `web/dist` the API runs, but no UI is served.
+   Without `web/dist` the API runs, but no UI is served. Repeat this step for every new commit.
 5. Images:
    - Log in to the sandbox registry with a viewer-only token (`docker login`).
    - Run `docker pull <registry>/p2p-provisioner@sha256:…`.
@@ -249,20 +273,40 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
    WorkingDirectory=/opt/p2p
    EnvironmentFile=/etc/p2p/p2p.env
    Environment=P2P_LITESTREAM_CONFIG=/opt/p2p/images/api/litestream.yml
-   ExecStart=/usr/local/bin/uv run --frozen --no-sync sh images/api/start.sh
+   Environment=PATH=/opt/p2p/.venv/bin:/usr/local/bin:/usr/bin:/bin
+   ExecStart=/bin/sh images/api/start.sh
    Restart=on-failure
    TimeoutStopSec=30
+   ProtectSystem=strict
+   ReadWritePaths=/var/lib/p2p
+   ProtectHome=yes
+   PrivateTmp=yes
    [Install]
    WantedBy=multi-user.target
    ```
-   The first start only runs `P2P_DB_BOOTSTRAP=1` by hand with the same environment, never from
-   the env file. Only one writer may ever replicate to the `p2p-state` path: stop any other
-   control plane, endpoint or dev included, before the first start.
+   uv is not needed at runtime: `PATH` puts the built virtualenv first.
+
+   **First start only** (an empty database is allowed just this once):
+   1. Run `systemctl edit p2p` and add `[Service]` and `Environment=P2P_DB_BOOTSTRAP=1`.
+   2. Run `systemctl start p2p`, and wait for `/readyz`.
+   3. Remove the drop-in (`systemctl revert p2p`), then run `systemctl restart p2p`.
+
+   Never put `P2P_DB_BOOTSTRAP` in the env file. Only one writer may ever replicate to the
+   `p2p-state` path: stop any other control plane, endpoint or dev included, before the first
+   start.
 8. TLS in front, for example Caddy with automatic HTTPS: `reverse_proxy 127.0.0.1:8080`, using
    the address `127.0.0.1`, not `localhost`. In the firewall, open 80 and 443, plus SSH from
    known addresses only.
 9. Checks:
    - `https://<host>/readyz` reports the deployed commit.
    - `curl http://<public IP>:8080/` from another machine fails.
+   - `docker network inspect p2p-local-jobs -f '{{index .Options "com.docker.network.bridge.name"}} {{.EnableIPv6}}'`
+     prints `p2p-jobs false`. A network made without that option gets a `br-<id>` interface, and
+     then no firewall rule matches, silently.
+   - A throwaway container on that network reaches the internet but not the host or the
+     metadata service: `docker run --rm --network p2p-local-jobs --entrypoint python
+     <registry>/p2p-provisioner@sha256:… -c "import socket; [print(h, socket.create_connection((h, p), 3) and 'OPEN') for h, p in (('1.1.1.1', 443),)]"`
+     prints `OPEN`. The same with `('169.254.169.254', 80)` and with the host's own address must
+     time out.
    - One canary paper runs end to end before anything else. Its provision job must appear in
      `docker ps -a` on the host, and its exec job in `nebius ai job list`.
