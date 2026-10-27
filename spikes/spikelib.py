@@ -84,12 +84,15 @@ def http(
     *,
     headers: dict[str, str] | None = None,
     body: Any = None,
+    data: bytes | None = None,
     timeout: float = 60,
 ) -> Response:
-    """One HTTP call that never raises on HTTP errors (status 0 = transport error)."""
-    data = None
+    """One HTTP call that never raises on HTTP errors (status 0 = transport error). `body` is
+    sent as JSON, `data` as raw bytes (application/octet-stream)."""
     hdrs = {"User-Agent": "paper2proof-spike/0.1", **(headers or {})}
     auth = hdrs.pop("Authorization", None)
+    if data is not None:
+        hdrs.setdefault("Content-Type", "application/octet-stream")
     if body is not None:
         data = json.dumps(body).encode()
         hdrs.setdefault("Content-Type", "application/json")

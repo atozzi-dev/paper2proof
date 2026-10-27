@@ -84,6 +84,15 @@ uv run python spikes/s3_sandboxes.py            # --image <uuid|tag:python:3.12>
 run prints `CONNECT_FAILED` and `IFACES: lo`. **FAIL** with HTTP 401/403 = no beta access yet →
 smoke tests fall back to CPU jobs (`JobSmokeExecutor`).
 
+### S14 — An exec job in a Sandbox (plan B of the hybrid deploy)
+```bash
+uv run python spikes/s14_sandbox_exec.py        # --big-mib 256 to try a larger upload
+```
+**PASS:** both uploads return their sha256 and are found again by it; the offline instance sees
+both files with their digests, drops to uid 10001 with `setpriv`, writes its results directory
+and not the inputs, reports exit code 3 and returns ~8 MiB of stdout untruncated; the `sleep`
+instance ends `CANCELLED` after the DELETE; the list shows the operations.
+
 ### S11 — Per-run buckets
 ```bash
 nebius config set parent-id "$NEBIUS_SANDBOX_PROJECT_ID"
