@@ -12,10 +12,11 @@ import logging
 import os
 import stat
 from collections.abc import Callable
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, BinaryIO, cast
+from typing import IO, TYPE_CHECKING, BinaryIO, Protocol, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -142,23 +143,28 @@ def _open(root: Path, entry: _Entry) -> int:
         raise
 
 
-def _open_checked(root: Path, entry: _Entry) -> int:
+def open_no_follow(root: Path, parts: tuple[str, ...]) -> int:
+    """`root/parts...` opened read-only without following a link at any component below
+    `root` (OSError otherwise, ELOOP or ENOTDIR on POSIX). The caller checks what it got."""
     flags = os.O_RDONLY | _NOFOLLOW | _NONBLOCK | _BINARY
     if _DIR_FD:
         fd = _open_dir(None, str(root))
         try:
-            for part in entry.parts[:-1]:
+            for part in parts[:-1]:
                 child = _open_dir(fd, part)
                 os.close(fd)
                 fd = child
-            file = os.open(entry.parts[-1], flags, dir_fd=fd)
+            return os.open(parts[-1], flags, dir_fd=fd)
         finally:
             os.close(fd)
-    else:
-        path = root.joinpath(*entry.parts)
-        if any(p.is_symlink() for p in [path, *path.parents] if p != root and root in p.parents):
-            raise UploadRefused(f"{entry.key} changed after the scan (a link)")
-        file = os.open(path, flags)
+    path = root.joinpath(*parts)
+    if any(p.is_symlink() for p in [path, *path.parents] if p != root and root in p.parents):
+        raise OSError(errno.ELOOP, "a link in the run copy", str(path))
+    return os.open(path, flags)
+
+
+def _open_checked(root: Path, entry: _Entry) -> int:
+    file = open_no_follow(root, entry.parts)
     info = os.fstat(file)
     if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino, info.st_size) != (
         entry.dev,
@@ -236,6 +242,17 @@ _PREFIXES = {kind: f"p2p-{kind.value}-" for kind in JobKind}
 Upload = Callable[[str, Path], int]  # (bucket, local run directory) -> files sent; blocking
 
 
+class SandboxJobs(Protocol):
+    """The Sandboxes job backend (app/execution/sandbox_jobs.py): smoke and exec jobs only."""
+
+    async def submit(self, spec: JobSpec) -> JobHandle: ...
+    async def status(self, handle: JobHandle) -> JobState: ...
+    async def cancel(self, handle: JobHandle) -> None: ...
+    async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]: ...
+    async def forget(self, run_id: str) -> None: ...
+    def bind_cpu_pool(self, pool: Executor | None) -> None: ...
+
+
 def _kind(name: str) -> JobKind:
     for kind, prefix in _PREFIXES.items():
         if name.startswith(prefix):
@@ -245,22 +262,36 @@ def _kind(name: str) -> JobKind:
 
 class HybridJobBackend:
     """Provision and fetch jobs on this host (`local`, a provisioner-only DevDockerBackend),
-    exec and smoke jobs on Nebius (`remote`). A local job is SUCCEEDED only once its output is
-    in the Nebius run bucket. There is no gateway: exec isolation comes from the exec subnet's
-    route (docs/specs/hybrid-deploy.md)."""
+    exec and smoke jobs in Sandboxes (`sandbox`, the default) or on Nebius (`remote`). A local
+    job is SUCCEEDED only once its output is in the Nebius run bucket. There is no gateway: a
+    Sandboxes job has no network, a GPU job only the exec subnet's route
+    (docs/specs/hybrid-deploy.md). Buckets are always the Nebius ones and their local copies."""
 
     def __init__(
-        self, *, local: JobBackend, remote: JobBackend, local_buckets: Path, upload: Upload
+        self,
+        *,
+        local: JobBackend,
+        remote: JobBackend,
+        local_buckets: Path,
+        upload: Upload,
+        sandbox: SandboxJobs | None = None,
     ) -> None:
         self._local = local
         self._remote = remote
+        self._sandbox = sandbox
         self._buckets = local_buckets
         self._upload = upload
         self._uploaded: set[str] = set()  # job names whose output is in the run bucket
         self._locks: dict[str, asyncio.Lock] = {}
 
-    def _for(self, name: str) -> JobBackend:
-        return self._local if _kind(name) in LOCAL_KINDS else self._remote
+    def bind_cpu_pool(self, pool: Executor | None) -> None:
+        if self._sandbox is not None:
+            self._sandbox.bind_cpu_pool(pool)
+
+    def _for(self, name: str) -> JobBackend | SandboxJobs:
+        if _kind(name) in LOCAL_KINDS:
+            return self._local
+        return self._sandbox or self._remote
 
     async def ensure_run_bucket(self, run_id: str) -> str:
         await self._local.ensure_run_bucket(run_id)
@@ -269,6 +300,8 @@ class HybridJobBackend:
     async def delete_run_bucket(self, run_id: str) -> None:
         await self._remote.delete_run_bucket(run_id)
         await self._local.delete_run_bucket(run_id)
+        if self._sandbox is not None:
+            await self._sandbox.forget(run_id)
 
     async def submit(self, spec: JobSpec) -> JobHandle:
         return await self._for(spec.name).submit(spec)
@@ -318,7 +351,12 @@ class HybridJobBackend:
         return False
 
     async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]:
-        return [*await self._local.list_jobs(prefix), *await self._remote.list_jobs(prefix)]
+        sandboxed = await self._sandbox.list_jobs(prefix) if self._sandbox is not None else []
+        return [
+            *await self._local.list_jobs(prefix),
+            *await self._remote.list_jobs(prefix),
+            *sandboxed,
+        ]
 
     async def list_run_buckets(self) -> list[tuple[str, datetime]]:
         """Both copies, by name, with the older creation time (the reaper's age check)."""

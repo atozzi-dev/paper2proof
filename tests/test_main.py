@@ -6,6 +6,7 @@ import dataclasses
 import json
 import multiprocessing
 import os
+import shutil
 import stat
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.execution.fake_backend import FakeJobBackend
 from app.execution.hybrid import HybridJobBackend, HybridRunStorage
 from app.execution.local_trusted import LocalTrustedRefused
 from app.execution.run_storage import FakeRunStorage
+from app.execution.sandbox_jobs import SandboxesJobBackend
 from app.models.client import Role
 from app.models.fake import FakeModelClient
 from app.settings import Settings
@@ -484,6 +486,7 @@ HYBRID: dict[str, object] = {
     "p2p_execution": "hybrid",
     "smoke_executor": "sandboxes",
     "p2p_local_jobs_network": "p2p-local-jobs",
+    "p2p_exec_backend": "gpu",
 }
 
 
@@ -546,3 +549,82 @@ def test_hybrid_smoke_jobs_run_on_the_gpu_platform_and_need_no_provision_subnet(
     assert config.subnet_exec == "vpcsubnet-exec"
     with pytest.raises(main.ConfigError, match="P2P_SUBNET_PROVISION"):
         main.execution_config(_prod(tmp_path, monkeypatch, p2p_subnet_provision=None), prod=True)
+
+
+# --- plan B: experiments in Sandboxes (docs/specs/hybrid-deploy.md) ------------------------
+
+CPU_DIGEST = "sha256:" + "c" * 64
+
+
+def _sandboxed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **values: object) -> Settings:
+    config = tmp_path / "config"
+    if not config.exists():
+        shutil.copytree(ROOT / "config", config)
+        image = f"  {CPU_DIGEST}: 11111111-2222-3333-4444-555555555555"
+        (config / "sandbox_images.yaml").write_text(f"images:\n{image}\n", encoding="utf-8")
+    fields: dict[str, object] = {
+        **HYBRID,
+        "p2p_exec_backend": None,  # the hybrid default
+        "smoke_executor": "job",
+        "tf_project_id": "tf-project",
+        "p2p_local_jobs_dir": tmp_path / "jobs",
+        "config_dir": config,
+        "p2p_subnet_exec": None,
+        "p2p_runner_image": None,
+    }
+    fields.update(values)
+    return _prod(tmp_path, monkeypatch, **fields)
+
+
+def test_hybrid_runs_smoke_and_exec_jobs_in_sandboxes_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    monkeypatch.setattr(main.S3ArtifactStore, "connect", lambda **_: LocalArtifactStore(tmp_path))
+    monkeypatch.setattr(main, "kms_signer", lambda *_: FakeSigner())
+    adapters = main.prod_adapters(_sandboxed(tmp_path, monkeypatch))
+    assert isinstance(adapters.jobs, HybridJobBackend)
+    sandbox = adapters.jobs._sandbox
+    assert isinstance(sandbox, SandboxesJobBackend)
+    pool = object()
+    adapters.jobs.bind_cpu_pool(pool)  # type: ignore[arg-type]
+    assert sandbox._pool is pool
+
+
+def test_in_sandboxes_the_exec_job_runs_runner_cpu_without_a_gpu_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = main.execution_config(_sandboxed(tmp_path, monkeypatch), prod=True)
+    assert config.runner_image == config.runner_cpu_image
+    assert (config.exec_platform, config.exec_fallback) == ("sandbox", None)
+    assert (config.smoke_platform, config.smoke_preset) == (
+        config.exec_platform,
+        config.exec_preset,
+    )
+    assert config.subnet_exec == "sandboxes"  # unused: no Nebius job runs there
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"smoke_executor": "sandboxes"}, "SMOKE_EXECUTOR=job"),
+        ({"tf_project_id": None}, "TF_PROJECT_ID"),
+        ({"p2p_runner_cpu_image": None}, "P2P_RUNNER_CPU_IMAGE"),
+        (
+            {"p2p_runner_cpu_image": "cr.example/p2p-runner-cpu@sha256:" + "9" * 64},
+            "sandbox_images",
+        ),
+    ],
+)
+def test_sandboxes_refuse_a_smoke_executor_no_project_or_no_imported_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], error: str
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    with pytest.raises(main.ConfigError, match=error):
+        main.prod_adapters(_sandboxed(tmp_path, monkeypatch, **change))
+
+
+def test_sandboxes_are_for_the_hybrid_deploy_only(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, p2p_exec_backend="sandboxes")
+    with pytest.raises(main.ConfigError, match="P2P_EXEC_BACKEND=sandboxes"):
+        main.build_runtime(settings, adapters=main.dev_adapters)

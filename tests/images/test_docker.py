@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -418,3 +419,88 @@ def test_the_api_image_holds_the_canary_papers_only() -> None:
     names = sorted({Path(line).name for line in out.split()})
     assert names == ["paper.tex", "truth.yaml"]
     assert len(out.split()) == 20  # ten canaries
+
+
+# --- plan B: an exec job as Sandboxes runs it (docs/specs/hybrid-deploy.md) ----------------
+
+
+def _sandbox_exec(tmp_path: Path, script: str, watchdog_s: int) -> tuple[Any, ExecManifest]:
+    """The canary workspace run by the Sandboxes job command: as root with no network, the
+    inputs read-only at their /mnt/run paths, the manifest injected (the backend's layout)."""
+    from app.execution.backend import JobKind
+    from app.execution.sandbox_jobs import job_command
+
+    _need("p2p-runner-cpu")
+    image, name = f"p2p-runner-cpu:{TAG}", f"p2p-sbx-{uuid.uuid4().hex[:12]}"
+    staging = tmp_path / "staging"
+    (staging / "data").mkdir(parents=True)
+    workspace, workspace_sha256 = pack_with_digest({"train.py": script.encode()})
+    (staging / "workspace.tar").write_bytes(workspace)
+    (staging / "overlay.tar").write_bytes(_tar({"canary_overlay.py": "BASE = 0.5\n"}))
+    (staging / "data" / "canary.tar").write_bytes(_tar({"offset.txt": "0.25\n"}))
+    try:
+        packed = _docker(
+            ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "zstd",
+             "-v", f"{staging}:/s", image, "-q", "--rm", "/s/overlay.tar", "/s/data/canary.tar"]
+        )  # fmt: skip
+        assert packed.returncode == 0, packed.stderr[-2000:]
+        overlay, data = (
+            hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in (staging / "overlay.tar.zst", staging / "data" / "canary.tar.zst")
+        )
+        manifest = _canary_manifest(workspace_sha256, overlay, data)
+        (tmp_path / "manifest.json").write_text(
+            manifest.model_dump_json(by_alias=True), encoding="utf-8"
+        )
+        marker = "ef" * 16
+        command = job_command(
+            kind=JobKind.EXEC, out_dir="/mnt/run/results/1", watchdog_s=watchdog_s, marker=marker
+        )
+        done = _docker(
+            ["run", "--rm", "--name", name, "--network", "none", "--user", "0:0",
+             "--entrypoint", "/bin/sh", "-v", f"{staging}:/mnt/run/staging:ro",
+             "-v", f"{tmp_path / 'manifest.json'}:/etc/p2p/manifest.json:ro", image,
+             "-c", command],
+            timeout=600,
+        )  # fmt: skip
+        return done, manifest
+    finally:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(["rm", "-f", name], timeout=60)
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(
+                ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chmod",
+                 "-v", f"{staging}:/s", image, "-R", "a+rwX", "/s"],
+                timeout=60,
+            )  # fmt: skip
+
+
+def test_a_sandboxes_exec_job_runs_as_uid_10001_and_harvests_its_results(tmp_path: Path) -> None:
+    from app.execution.sandbox_jobs import parse_harvest
+
+    done, manifest = _sandbox_exec(tmp_path, CANARY_SCRIPT, watchdog_s=300)
+    assert done.returncode == 0, done.stderr[-3000:]
+    files = parse_harvest(done.stdout, "ef" * 16, "exec")
+    assert files is not None and set(files) == {
+        "results.json", "env.json", "live.log", "stdout.log", "stderr.log",
+    }  # fmt: skip
+    analysis = analyze_results(files["results.json"], manifest)
+    assert analysis.problem is None
+    assert (analysis.exit_reason, analysis.used_seeds) == ("completed", [0, 1, 2])
+    assert b"seed 2: " in files["stdout.log"]
+
+
+SLOW_SCRIPT = CANARY_SCRIPT.replace('print(f"seed', 'import time; time.sleep(25); print(f"seed')
+
+
+def test_a_sandboxes_exec_job_stopped_at_its_watchdog_still_reports_partial_results(
+    tmp_path: Path,
+) -> None:
+    from app.execution.sandbox_jobs import parse_harvest
+
+    done, manifest = _sandbox_exec(tmp_path, SLOW_SCRIPT, watchdog_s=100)  # TERM at 40 s
+    assert done.returncode == 20, done.stderr[-3000:]  # the runner's budget_timeout, preserved
+    files = parse_harvest(done.stdout, "ef" * 16, "exec")
+    assert files is not None
+    analysis = analyze_results(files["results.json"], manifest)
+    assert analysis.exit_reason == "budget_timeout" and analysis.used_seeds == [0]

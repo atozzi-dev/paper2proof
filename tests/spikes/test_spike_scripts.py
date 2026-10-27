@@ -25,6 +25,7 @@ EXPECTED = [
     "s12_pull_time.sh",
     "s13_sse_probe/client.py",
     "s13_sse_probe/server.py",
+    "s14_sandbox_exec.py",
 ]
 EXECUTABLE = [name for name in EXPECTED if not name.endswith(".yml")]
 PYTHON = [name for name in EXPECTED if name.endswith(".py")]

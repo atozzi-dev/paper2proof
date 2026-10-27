@@ -381,7 +381,7 @@ class SmokeExecutor(Protocol):
     async def run_branches(self, env_id: str, variants: list[dict[str, bytes]], argv: list[str], timeout_s: int) -> list[SmokeResult]: ...
 ```
 
-Implementations: `NebiusJobBackend`, `FakeJobBackend`; `SandboxesSmokeExecutor`, `JobSmokeExecutor`, `LocalTrustedExecutor` (dev + canary allowlist only), `FakeSmokeExecutor`.
+Implementations: `NebiusJobBackend`, `FakeJobBackend`, `HybridJobBackend` and `SandboxesJobBackend` (smoke and exec jobs in Sandboxes, `docs/specs/hybrid-deploy.md`); `SandboxesSmokeExecutor`, `JobSmokeExecutor`, `LocalTrustedExecutor` (dev + canary allowlist only), `FakeSmokeExecutor`.
 
 ## 10. Sandboxes flow **[S-3]**
 
