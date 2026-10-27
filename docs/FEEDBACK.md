@@ -106,6 +106,22 @@ which worked on the first call.
 - **Suggestion:** expose the provisioning reason in `status.state_details`.
 - **Severity:** minor
 
+### 2026-10-27 — A GPU job in a custom subnet fails with a bare "internal error" and no reason
+- **Context:** spike S5 `--mode isolated` (H-03): `gpu-l40s-a` / `1gpu-8vcpu-32gb`, `--subnet-id` of our exec subnet, whose route table sends `0.0.0.0/0` to an allocation no VM holds (no gateway, by design).
+- **What happened:** three runs. The CLI printed `Job ID: aijob-…`, then `Error: operation failed [id=opvmapp-…, code=13]: Operation failed with internal error`. `nebius ai job get` showed only `{"state": "ERROR"}`, and `nebius ai job logs` had nothing. The same job in the default subnet failed differently, with a clear `NotEnoughResources … VM schedule timeout` (code 8).
+- **Expected:** either the job starts in a subnet with no egress (the point of the setup), or the error names the cause (unsupported route, missing public pool, capacity).
+- **Impact:** we could not tell a subnet problem from a capacity problem, three days before the deadline, so our isolated-execution gate stayed open and we planned a fallback.
+- **Suggestion:** propagate the compute operation's error into the job operation and `status`, as the code-8 path already does, and document which subnet setups jobs support.
+- **Severity:** major
+
+### 2026-10-27 — No L40S capacity for a 1-GPU job, and no way to see it before trying
+- **Context:** the same spike, default subnet, `gpu-l40s-a` / `1gpu-8vcpu-32gb`.
+- **What happened:** after the scheduling wait, `NotEnoughResources: … VM schedule timeout, most likely due to insufficient hardware resources`.
+- **Expected:** a way to check capacity (or reserve it) before creating the job.
+- **Impact:** GPU experiments become best effort near the deadline; our orchestrator already maps this to the `CAPACITY` error code and reports the verdict as inconclusive for capacity.
+- **Suggestion:** a capacity hint per platform and preset in the API or console.
+- **Severity:** major
+
 ## Networking, IAM, Storage, KMS
 
 ### 2026-10-15 — No guide for GitHub Actions OIDC → Nebius access token (federated credentials)
