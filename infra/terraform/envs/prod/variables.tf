@@ -55,6 +55,12 @@ variable "cache_bucket_name" {
   default     = "p2p-cache"
 }
 
+variable "enable_gateway" {
+  description = "Create the egress gateway VM (A-04). false for the hybrid deploy (no non-GPU vCPU quota, docs/specs/hybrid-deploy.md): provision and exec then have no egress at all."
+  type        = bool
+  default     = true
+}
+
 variable "enable_managed_pg" {
   description = "Create the Managed PostgreSQL cluster (migration path off SQLite)."
   type        = bool

@@ -47,8 +47,11 @@ module "network_sandbox" {
 }
 
 # The only egress of provision and exec (A-04). It carries the allocation their routes point at.
+# Not created in the hybrid deploy (enable_gateway = false, docs/specs/hybrid-deploy.md): those
+# routes then have no next hop, so jobs in provision and exec have no internet at all.
 module "egress_gateway" {
   source = "../../modules/egress_gateway"
+  count  = var.enable_gateway ? 1 : 0
 
   project_id            = var.sandbox_project_id
   network_id            = module.network_sandbox.network_id
@@ -60,6 +63,11 @@ module "egress_gateway" {
   storage_host          = local.storage_host
   registry_host         = module.registry_sandbox.host
   allowlist_yaml        = file("${path.root}/../../../../config/allowlist.yaml")
+}
+
+moved {
+  from = module.egress_gateway
+  to   = module.egress_gateway[0]
 }
 
 module "storage" {
