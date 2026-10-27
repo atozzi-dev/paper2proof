@@ -2,21 +2,24 @@
 # Spike S5: a job in a subnet routed to the egress gateway: image pull, bucket mount, egress blocked;
 # and what happens with the gateway stopped (must fail closed).
 #
-# Usage: spikes/s5_job_gateway.sh --mode baseline|gateway-on|gateway-off [--help]
+# Usage: spikes/s5_job_gateway.sh --mode baseline|gateway-on|gateway-off|isolated [--help]
 #   baseline     day 1, before infra: default subnet, public image. Records that pull, mount and
 #                open internet work without the gateway (the reference behaviour).
 #   gateway-on   after H-04: exec subnet, gateway running. Expect pull OK, mount OK, egress blocked.
 #   gateway-off  after H-04: stops the gateway, runs the job, starts the gateway again.
+#   isolated     hybrid deploy, no gateway VM at all: exec subnet whose default route points
+#                at an allocation nobody holds. Expect egress blocked; records pull and mount.
 # Needs: nebius CLI (parent-id = p2p-sandbox), S5_BUCKET (the ID of an existing bucket).
 # Optional: PLATFORM / PRESET (default cpu-d3 / 2vcpu-8gb; with the non-GPU vCPU quota at 0
 #        use gpu-l40s-a / 1gpu-8vcpu-32gb), SUBNET_ID (baseline only).
+#        isolated also: SUBNET_EXEC_ID (PROBE_IMAGE optional: the public image by default).
 #        gateway modes also: SUBNET_EXEC_ID, GATEWAY_INSTANCE_ID, PROBE_IMAGE (python:3.12-alpine
 #        mirrored into the sandbox registry, by digest), NEBIUS_STORAGE_HOST, NEBIUS_REGISTRY_HOST.
 # Cost: one cpu-d3 2vcpu-8gb job for ~3 min per mode (< $0.01); on gpu-l40s-a about
 #       $0.10-0.15 per mode, plus any wait for capacity.
 set -euo pipefail
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
 MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -25,7 +28,7 @@ while [ $# -gt 0 ]; do
     *) usage; exit 2 ;;
   esac
 done
-case "$MODE" in baseline|gateway-on|gateway-off) ;; *) usage; exit 2 ;; esac
+case "$MODE" in baseline|gateway-on|gateway-off|isolated) ;; *) usage; exit 2 ;; esac
 
 # shellcheck source=spikes/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -47,6 +50,13 @@ TLS_TARGETS='["example.com", 443], ["pypi.org", 443]'
 if [ "$MODE" = "baseline" ]; then
   IMAGE="${PROBE_IMAGE:-$PUBLIC_IMAGE}"
   [ -n "${SUBNET_ID:-}" ] && ARGS+=(--subnet-id "$SUBNET_ID")
+elif [ "$MODE" = "isolated" ]; then
+  need_env SUBNET_EXEC_ID
+  IMAGE="${PROBE_IMAGE:-$PUBLIC_IMAGE}"
+  ARGS+=(--subnet-id "$SUBNET_EXEC_ID")
+  if [ -n "${NEBIUS_STORAGE_HOST:-}" ]; then
+    TLS_TARGETS="$TLS_TARGETS, [\"$NEBIUS_STORAGE_HOST\", 443]"
+  fi
 else
   need_env SUBNET_EXEC_ID GATEWAY_INSTANCE_ID PROBE_IMAGE NEBIUS_STORAGE_HOST NEBIUS_REGISTRY_HOST
   IMAGE="$PROBE_IMAGE"
@@ -128,6 +138,13 @@ case "$MODE" in
     fact "gateway off: pulled=$PULLED mount=$(grep -q '^MOUNT_OK' <<<"$LOGS" && echo ok || echo failed)"
     if opened example.com 443 || opened 1.1.1.1 443; then fail "gateway off but internet reachable: NOT fail-closed"; fi
     [ "$PULLED" = 1 ] || partial "with the gateway off the image cannot be pulled (jobs fail; expected fail-closed)" ;;
+  isolated)
+    [ "$PULLED" = 1 ] || fail "no gateway: the image could not be pulled in the exec subnet ($IMAGE)"
+    grep -q '^MOUNT_OK' <<<"$LOGS" || fail "no gateway: the run bucket could not be mounted"
+    if opened example.com 443 || opened pypi.org 443 || opened 1.1.1.1 443 || opened 8.8.8.8 53; then
+      fail "egress NOT blocked from the exec subnet without a gateway"
+    fi
+    fact "isolated: pull and mount work, egress blocked: exec jobs need no gateway" ;;
 esac
 
 print_facts

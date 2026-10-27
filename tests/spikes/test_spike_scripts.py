@@ -191,3 +191,13 @@ def test_s5_runs_on_a_chosen_platform_and_records_the_network_flags() -> None:
     assert 'PLATFORM="${PLATFORM:-cpu-d3}"' in text and 'PRESET="${PRESET:-2vcpu-8gb}"' in text
     assert '--platform "$PLATFORM" --preset "$PRESET"' in text
     assert "network flags:" in text
+
+
+def test_s5_isolated_mode_needs_no_gateway_and_fails_on_open_egress() -> None:
+    """The hybrid deploy has no gateway VM: the exec subnet routes to an allocation nobody
+    holds. `--mode isolated` checks that pull and mount still work there and egress does not."""
+    text = _text("s5_job_gateway.sh")
+    assert "baseline|gateway-on|gateway-off|isolated" in text
+    isolated = text.split("  isolated)", 1)[1].split(";;", 1)[0]
+    assert "GATEWAY_INSTANCE_ID" not in isolated
+    assert 'fail "egress NOT blocked' in isolated
