@@ -3,12 +3,15 @@ local docker, with per-run "buckets" as directories under `root`.
 
 Like LocalTrustedExecutor, this is the one exception to invariant 1: it refuses to exist unless
 `P2P_ENV=dev`, and refuses every job of a run unless `config/canary_allowlist.yaml` binds its
-paper's sha256 to the run's arXiv ID. Containers keep the job's isolation: non-root (10001), no
-capabilities, no new privileges, a read-only root with private scratch space, capped memory and
-logs, a host-side kill at the watchdog, no network except for the provision and fetch jobs
-(the provisioner image, our code; locally their egress is not allowlisted as the gateway does
-in the cloud), and only the run's own directory and the cache mounted: the cache read-only
-except for the provision job, never for the fetch job.
+paper's sha256 to the run's arXiv ID. With `provisioner_only` (the hybrid deploy,
+docs/specs/hybrid-deploy.md) it serves the prod control-plane host instead: only provision and
+fetch jobs, only the configured provisioner image (our code, by its registry digest), for any
+paper, since no model or paper code ever runs in them. Containers keep the job's isolation:
+non-root (10001), no capabilities, no new privileges, a read-only root with private scratch
+space, capped memory and logs, a host-side kill at the watchdog, no network except for the
+provision and fetch jobs (the provisioner image, our code; locally their egress is not
+allowlisted as the gateway does in the cloud), and only the run's own directory and the cache
+mounted: the cache read-only except for the provision job, never for the fetch job.
 """
 
 import asyncio
@@ -100,9 +103,13 @@ class DevDockerBackend:
         docker: DockerRunner = docker_cli,
         host_uid: int | None = _host_uid(),
         acl: DockerRunner = docker_cli,
+        provisioner_only: str | None = None,
     ) -> None:
-        if env != "dev":
+        if provisioner_only is not None and env != "prod":
+            raise LocalTrustedRefused("provisioner-only local jobs are for the hybrid prod deploy")
+        if provisioner_only is None and env != "dev":
             raise LocalTrustedRefused("the local docker job backend runs only with P2P_ENV=dev")
+        self._provisioner = provisioner_only
         self._canaries = canaries
         self._paper = paper
         self._root = root.resolve()
@@ -213,14 +220,32 @@ class DevDockerBackend:
                 raise ValueError(f"invalid inject path: {path!r}")
         return run_id
 
+    async def _image(self, spec: JobSpec, run_id: str) -> str:
+        """What the container runs, after the gate of this backend's mode."""
+        if self._provisioner is None:
+            if not is_canary(self._canaries, await self._paper(run_id)):
+                raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
+            return local_image(spec.image_digest_ref)
+        if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):
+            raise LocalTrustedRefused("this host runs only provision and fetch jobs")
+        if spec.image_digest_ref != self._provisioner:
+            raise LocalTrustedRefused("this host runs only the configured provisioner image")
+        return self._provisioner  # pulled and run by its registry digest (invariant 8)
+
+    def _runs(self, info: dict[str, object], image: str) -> bool:
+        """Whether a container runs `image`: a local build by its image id, a registry image
+        by the digest reference it was started with."""
+        if self._provisioner is None:
+            return info.get("Image") == image
+        config = info.get("Config")
+        return isinstance(config, dict) and config.get("Image") == image
+
     async def submit(self, spec: JobSpec) -> JobHandle:
         run_id = self._checked(spec)
-        if not is_canary(self._canaries, await self._paper(run_id)):
-            raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
-        image = local_image(spec.image_digest_ref)
+        image = await self._image(spec, run_id)
         existing = await self._inspect(spec.name)
         if existing is not None:  # get-by-name: a resumed step finds its container
-            if not self._ours(existing) or existing.get("Image") != image:
+            if not self._ours(existing) or not self._runs(existing, image):
                 raise RuntimeError(f"{spec.name} exists but was not created by this backend")
             return JobHandle(name=spec.name, nebius_id=str(existing.get("Id", "")))
         await self._share_job_dirs()
