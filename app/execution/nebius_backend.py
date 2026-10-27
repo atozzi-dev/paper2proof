@@ -672,6 +672,7 @@ class NebiusJobBackend:
 class NebiusExecution:
     backend: NebiusJobBackend
     storage: S3RunStorage
+    s3: S3Client  # sa-job-launcher's client: the hybrid deploy uploads local run copies with it
 
 
 def _endpoint_url(host: str) -> str:
@@ -704,4 +705,4 @@ def build_nebius_execution(
     backend = NebiusJobBackend.from_sdk(
         sdk, s3, project_id=project_id, gateway_instance_id=gateway_instance_id
     )
-    return NebiusExecution(backend=backend, storage=S3RunStorage(s3))
+    return NebiusExecution(backend=backend, storage=S3RunStorage(s3), s3=s3)

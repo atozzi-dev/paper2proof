@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     p2p_var_dir: Path = Path("var")  # dev/test: local artifacts and smoke work dirs
     # dev only: "docker" runs the real job images locally, for canary papers (A-25)
     p2p_job_backend: Literal["fake", "docker"] = "fake"
+    # prod: "hybrid" without non-GPU compute on Nebius (docs/specs/hybrid-deploy.md)
+    p2p_execution: Literal["nebius", "hybrid"] = "nebius"
+    p2p_local_jobs_dir: Path | None = None  # hybrid: local run copies and the overlay cache
     # S3 credentials of sa-api-runtime (control-plane buckets); loaded by deploy/secrets.sh
     runtime_s3_key_id: SecretStr | None = None
     runtime_s3_secret: SecretStr | None = None
