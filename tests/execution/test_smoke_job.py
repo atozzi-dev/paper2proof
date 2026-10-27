@@ -19,6 +19,7 @@ from app.execution.naming import bucket_name
 from app.execution.run_storage import FakeRunStorage
 from app.execution.smoke import SmokeContractError, SmokeUnavailable
 from app.models.pricing import load_cloud_prices
+from app.orchestrator.budget import SpendKind
 from app.orchestrator.context import RunContext
 from app.storage.store import Store
 from tests.steps.conftest import CPU_POOL, ROOT, RUN, ctx_at
@@ -334,9 +335,18 @@ async def test_the_smoke_platform_comes_from_the_config_and_is_priced_as_such(
         ctx, archives=ARCHIVES, storage=storage, config=gpu, cloud=cloud,
         poll_s=5, clock=clock, sleep=clock.sleep,
     )  # fmt: skip
+    reserved: list[SpendKind] = []
+    check = ctx.budget.check_and_reserve
+
+    async def spy(run_id: str, kind: SpendKind, amount: float) -> Any:
+        reserved.append(kind)
+        return await check(run_id, kind, amount)
+
+    ctx.budget.check_and_reserve = spy  # type: ignore[method-assign]
     env = await smoke.prepare(RUN, {"train.py": b"print(1)"})
     await smoke.run(env, ARGV, {"train.py": b"print(2)"}, 120)
     ((_, _, _, spec),) = jobs.jobs.values()
     assert (spec.platform, spec.preset) == ("gpu-l40s-a", "1gpu-8vcpu-32gb")
     assert smoke.usd_per_hour == cloud.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    assert SpendKind.GPU_MINUTES in reserved  # checked against the GPU caps before the job
     assert CFG.smoke_platform == "cpu-d3" and CFG.smoke_preset == "4vcpu-16gb"  # the default

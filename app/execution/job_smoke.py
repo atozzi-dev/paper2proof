@@ -165,6 +165,7 @@ class JobSmokeExecutor:
             clock=self._clock,
             sleep=self._sleep,
             queue_cap_s=SMOKE_QUEUE_CAP_S,
+            gpu=self._config.smoke_platform.startswith("gpu-"),  # GPU minutes too (invariant 7)
         )
         if outcome.run_cancelled:
             raise SmokeUnavailable("the run was cancelled")

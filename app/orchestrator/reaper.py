@@ -227,7 +227,8 @@ class Reaper:
         now = self._clock()
         elapsed_s = max(0.0, (min(now, started + PLATFORM_TIMEOUT) - started).total_seconds())
         cost = self._rate(record) * elapsed_s / 3600
-        gpu = record.kind == JobKind.EXEC.value
+        # exec jobs, and smoke jobs on a GPU platform (the hybrid deploy): GPU time for the caps
+        gpu = record.kind == JobKind.EXEC.value or (record.platform or "").startswith("gpu-")
         day = now.astimezone(UTC).date()
         ledger: list[tuple[str | None, date, str, float]] = [
             (record.run_id, day, SpendKind.CLOUD_USD.value, cost)
