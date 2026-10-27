@@ -151,43 +151,118 @@ VPS) instead of the Serverless endpoint. Experiments still run in Nebius GPU job
 tests run in Sandboxes. Do these steps in order. Each step that changes the cloud or spends
 money is the human's.
 
-**Before anything else:** spike S5 `--mode isolated` must PASS on the exec subnet: the image is
-pulled, the bucket is mounted and there is no egress. Its facts go in `docs/spikes/RESULTS.md`.
-Without that PASS, exec jobs would have the internet, and the hybrid deploy must not start.
+**Gate, before anything else.** Spike S5 `--mode isolated` must PASS on the exec subnet, and
+its facts go in `docs/spikes/RESULTS.md`. PASS means:
+- the image is pulled and the bucket is mounted;
+- the output is complete;
+- every internet target times out;
+- the job gets no metadata token and has no public IP.
+
+Without that PASS, exec jobs could reach the internet, and the hybrid deploy must not start.
+Run it with a `PROBE_IMAGE` from the sandbox registry once the registry exists, so that the
+prod pull path is tested too.
+
+**What this host is trusted with.** Read this before using a shared or general-purpose machine.
+- **It holds every prod secret.** That includes `sa-job-launcher` (editor on p2p-sandbox, enough
+  to attach the gateway allocation to a VM or change `rt-exec`) and `sa-api-runtime`.
+- **It parses untrusted input.** The API reads paper PDF/LaTeX, and the local provision and
+  fetch containers read git packs, wheels and parquet files, sharing the host's kernel.
+- **Docker membership is root.** The API's user is in the `docker` group, which is root on the
+  host. A remote-code bug in the API, or a container escape, therefore means root on the host
+  plus those keys.
+
+Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (read-only to
+`p2p`). Record this accepted risk in the issue notes.
 
 **Cloud (once):**
 1. Terraform `envs/prod` with `enable_gateway = false` in `prod.auto.tfvars`, then `envs/prod-iam`
-   (H-04 steps 4.5 and 4.6). Keep the plan output and get it reviewed before `apply`.
+   (H-04 steps 4.5 and 4.6). Get each plan reviewed before `apply`. With `enable_gateway =
+   false`, `terraform output -json env` prints `GATEWAY_INSTANCE_ID: null`: leave that variable
+   out, never write `null`.
 2. Load the secrets with `deploy/secrets.sh` (H-04 step 4.7).
 3. Push `p2p-runner`, `p2p-runner-cpu` and `p2p-provisioner` to the `p2p-sandbox` registry, and
-   note their digests. The `p2p-api` image is not used.
+   note their digests. The `p2p-api` image is not used on this host.
 4. Import `p2p-runner-cpu@sha256:…` into Sandboxes and record its UUID in
-   `config/sandbox_images.yaml`. Without it, every smoke test falls back to a GPU smoke job.
+   `config/sandbox_images.yaml`. Without it, every smoke test falls back to a GPU smoke job,
+   which is billed as GPU time.
 
-**Host (the VPS):**
-1. Docker (rootful: the jobs' uid 10001 must be uid 10001 on the host), the `acl` package,
-   `uv`, and `litestream` at the version pinned in `images/api/Dockerfile`.
-2. A user `p2p` in the `docker` group. The repository is checked out at the deployed commit. The
-   directories `/var/lib/p2p` (the database) and `/var/lib/p2p/jobs` (`P2P_LOCAL_JOBS_DIR`) are
-   owned by `p2p`, mode 0700.
-3. `docker login` to the sandbox registry with a read-only token, then
-   `docker pull <registry>/p2p-provisioner@sha256:…`.
-4. `/etc/p2p/p2p.env` (owner `p2p`, mode 0600) holds the prod variables of `deploy/prod.env`,
-   plus the values from the table in the spec:
-   - `P2P_EXECUTION=hybrid`, `P2P_LOCAL_JOBS_DIR=/var/lib/p2p/jobs`,
-     `SMOKE_EXECUTOR=sandboxes`;
-   - `P2P_SUBNET_EXEC`, and no `GATEWAY_INSTANCE_ID`;
-   - `P2P_FORWARDED_ALLOW_IPS=127.0.0.1/32`;
+**Host (the VPS), as root:**
+1. Install:
+   - Docker, rootful: the jobs' uid 10001 must be uid 10001 on the host.
+   - The `acl` package.
+   - `uv`.
+   - Node 20 (for the web build).
+   - litestream v0.5.17, with its sha256 checked against the one in `images/api/Dockerfile`:
+     `echo "cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d  litestream-0.5.17-linux-x86_64.tar.gz" | sha256sum -c`.
+2. Create user `p2p` in the `docker` group, with no login shell. Then:
+   - Clone the repository to `/opt/p2p`, owned by root, at the commit to deploy. Run
+     `git status --porcelain`; it must print nothing.
+   - Create `/var/lib/p2p` (the database and `P2P_VAR_DIR`) and `/var/lib/p2p/jobs`
+     (`P2P_LOCAL_JOBS_DIR`), owned by `p2p`, mode 0700. Put the jobs directory on its own
+     filesystem, or on a fixed-size loop device (for example 60 GiB). A huge repository or
+     dataset then fills that disk, not the database's: a full database disk loses the ledger and
+     the kill switch.
+3. Network for the local jobs:
+   - Create it with `docker network create --driver bridge --opt com.docker.network.bridge.name=p2p-jobs p2p-local-jobs`.
+   - Drop anything that is not the internet in `DOCKER-USER`, before docker's own rules:
+     ```
+     iptables -I DOCKER-USER -i p2p-jobs -d 169.254.0.0/16 -j DROP
+     iptables -I DOCKER-USER -i p2p-jobs -d 10.0.0.0/8 -j DROP
+     iptables -I DOCKER-USER -i p2p-jobs -d 172.16.0.0/12 -j DROP
+     iptables -I DOCKER-USER -i p2p-jobs -d 192.168.0.0/16 -j DROP
+     iptables -I INPUT -i p2p-jobs -j DROP
+     ```
+     The `INPUT` rule keeps the containers away from the host's own services (the API on
+     127.0.0.1 included). Make the rules persistent (`iptables-persistent`). Never publish docker
+     ports: rootful docker bypasses ufw.
+4. Build once, as `p2p` in `/opt/p2p`:
+   ```
+   uv sync --frozen --no-dev
+   cd web && npm ci && npm run build
+   ```
+   Without `web/dist` the API runs, but no UI is served.
+5. Images:
+   - Log in to the sandbox registry with a viewer-only token (`docker login`).
+   - Run `docker pull <registry>/p2p-provisioner@sha256:…`.
+   - Run `docker logout`, so the token does not stay in `~p2p/.docker/config.json`.
+6. Environment file `/etc/p2p/p2p.env`, owned by root:root, mode 0600. systemd reads it as PID 1,
+   and it is the only loader: never `source` it. It holds:
+   - the prod variables of `deploy/prod.env`;
+   - the hybrid values from the spec's table: `P2P_EXECUTION=hybrid`, `SMOKE_EXECUTOR=sandboxes`,
+     `P2P_SUBNET_EXEC`, `P2P_LOCAL_JOBS_DIR=/var/lib/p2p/jobs`,
+     `P2P_LOCAL_JOBS_NETWORK=p2p-local-jobs`, and no `GATEWAY_INSTANCE_ID`;
+   - `P2P_ENV=prod`, `DB_URL=sqlite+aiosqlite:////var/lib/p2p/p2p.db`, `P2P_VAR_DIR=/var/lib/p2p`,
+     `P2P_BUILD_COMMIT=<git rev-parse HEAD>`, `P2P_BIND_HOST=127.0.0.1`,
+     `P2P_FORWARDED_ALLOW_IPS=127.0.0.1/32`, `PYTHONDONTWRITEBYTECODE=1`;
    - the secrets, copied from `p2p-secrets`.
 
-   The file is never in the repository and never in a backup outside the host (invariant 4).
-5. Start as `p2p`, from the checkout:
-   `set -a; . /etc/p2p/p2p.env; set +a; P2P_LITESTREAM_CONFIG=images/api/litestream.yml uv run sh images/api/start.sh`.
-   Add `P2P_DB_BOOTSTRAP=1` on the very first start only. A systemd unit with
-   `EnvironmentFile=/etc/p2p/p2p.env` and `User=p2p` keeps it running.
-6. Put a TLS proxy in front, for example Caddy with automatic HTTPS:
-   `reverse_proxy 127.0.0.1:8080`. Open only ports 80 and 443 in the firewall. Port 8080 stays
-   on localhost.
-7. Check `https://<host>/readyz`, then run one canary paper end to end before anything else.
-   Its exec job must run on Nebius, and its provision job must appear in `docker ps -a` on the
-   host.
+   Single-quote every value. The JSON authorized keys stay on one line. Write the file with
+   `umask 077` and an editor, never with `echo` in the shell history. Keep it out of the
+   repository and out of any backup or provider snapshot of this host (invariant 4).
+7. A systemd unit, `/etc/systemd/system/p2p.service`:
+   ```
+   [Unit]
+   After=network-online.target docker.service
+   Wants=network-online.target
+   [Service]
+   User=p2p
+   WorkingDirectory=/opt/p2p
+   EnvironmentFile=/etc/p2p/p2p.env
+   Environment=P2P_LITESTREAM_CONFIG=/opt/p2p/images/api/litestream.yml
+   ExecStart=/usr/local/bin/uv run --frozen --no-sync sh images/api/start.sh
+   Restart=on-failure
+   TimeoutStopSec=30
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   The first start only runs `P2P_DB_BOOTSTRAP=1` by hand with the same environment, never from
+   the env file. Only one writer may ever replicate to the `p2p-state` path: stop any other
+   control plane, endpoint or dev included, before the first start.
+8. TLS in front, for example Caddy with automatic HTTPS: `reverse_proxy 127.0.0.1:8080`, using
+   the address `127.0.0.1`, not `localhost`. In the firewall, open 80 and 443, plus SSH from
+   known addresses only.
+9. Checks:
+   - `https://<host>/readyz` reports the deployed commit.
+   - `curl http://<public IP>:8080/` from another machine fails.
+   - One canary paper runs end to end before anything else. Its provision job must appear in
+     `docker ps -a` on the host, and its exec job in `nebius ai job list`.
