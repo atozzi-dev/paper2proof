@@ -120,7 +120,7 @@ def _spec(
         kind=kind,
         image_digest_ref=image,
         platform=SANDBOX_PLATFORM,
-        preset="4vcpu-16gb",
+        preset="4vcpu-4gb",
         disk_gib=30,
         subnet_id="sandboxes",
         volumes=[VolumeMount(source=BUCKET, mount_path="/mnt/run", mode="rw")],

@@ -788,7 +788,7 @@ async def test_an_exec_job_in_sandboxes_runs_runner_cpu_and_never_falls_back_to_
         update={
             "runner_image": DIGEST.format("p2p-runner-cpu"),
             "exec_platform": "sandbox",
-            "exec_preset": "4vcpu-16gb",
+            "exec_preset": "4vcpu-4gb",
             "exec_fallback": None,
         }
     )
@@ -805,13 +805,13 @@ async def test_an_exec_job_in_sandboxes_runs_runner_cpu_and_never_falls_back_to_
         sleep=clock.sleep,
     )  # fmt: skip
     result = await step.run(_with(ctx, backend))
-    assert [(s.platform, s.preset) for s in backend.specs] == [("sandbox", "4vcpu-16gb")] * 4
+    assert [(s.platform, s.preset) for s in backend.specs] == [("sandbox", "4vcpu-4gb")] * 4
     assert {s.image_digest_ref for s in backend.specs} == {DIGEST.format("p2p-runner-cpu")}
     assert result.output_ref is not None
     stored = artifacts.get_json(result.output_ref)
     assert stored["hardware"] == {
         "platform": "sandbox",
-        "preset": "4vcpu-16gb",
+        "preset": "4vcpu-4gb",
         "preemptible": False,
     }
     assert stored["manifest"]["image_digest"] == DIGEST.format("p2p-runner-cpu").rsplit("@", 1)[1]

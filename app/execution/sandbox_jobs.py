@@ -51,8 +51,8 @@ from app.execution.sandboxes import SANDBOXES_API
 log = logging.getLogger(__name__)
 
 SANDBOX_PLATFORM = "sandbox"  # the judged hardware the bundle records (config/pricing.yaml)
-# what an instance gets, as a preset (priced in config/pricing.yaml): measured by spike S14
-SANDBOX_PRESET = "4vcpu-16gb"
+# what an instance gets, as a preset (priced in config/pricing.yaml): 4 vCPU, ~3.8 GiB (S14)
+SANDBOX_PRESET = "4vcpu-4gb"
 KINDS = frozenset({JobKind.SMOKE, JobKind.EXEC})
 RUN_MOUNT = "/mnt/run"
 JOB_UID = 10001

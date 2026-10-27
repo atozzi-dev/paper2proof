@@ -156,7 +156,7 @@ Each step that changes the cloud or spends money is the human's.
 PASS, after the import of cloud step 4 and before the commit to deploy is chosen. Its facts go
 in `docs/spikes/RESULTS.md`: uploads, mounted files, `setpriv`, the harvest size, the cancel,
 the cold start, and the backend's own job command on the canary (exit 0, and exit 20 with
-partial results at the watchdog). When its `NPROC` and `MEM_KB` differ from `4vcpu-16gb`, set
+partial results at the watchdog). When its `NPROC` and `MEM_KB` differ from `4vcpu-4gb`, set
 `SANDBOX_PRESET` (`app/execution/sandbox_jobs.py`) in the same commit as the image mapping.
 
 **Gate for GPU jobs (`P2P_EXEC_BACKEND=gpu` only).** Spike S5 `--mode isolated` must PASS on the

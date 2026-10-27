@@ -8,7 +8,7 @@
 | S2 | FAIL → fixed | vision role → `nvidia/Nemotron-3.5-Super-VL` (no Nano Omni listed); keep `structured_output: tool` and the `chat_template_kwargs` toggle |
 | S3 | PASS | Sandboxes enabled: networking off isolates (`lo` only); smoke tests can use Sandboxes |
 | S4 | PASS | L40S job ran; provisioning waited ~16 min for capacity with no error |
-| S5 | FAIL → rerun | job volumes need the bucket **ID**, not its name: rerun the baseline with the ID; fix the Nebius backend |
+| S5 | FAIL → rerun; 2026-10-27 isolated: no verdict | job volumes need the bucket **ID**, not its name: rerun the baseline with the ID; fix the Nebius backend |
 | S6 | FAIL → rerun | quota `compute.instance.non-gpu.vcpu` was 0 (raise requested); endpoints count against it |
 | S7 | PASS | CI deploys use OIDC: GitHub token with audience `sts.nebius.com`, subject with numeric IDs, exchanged by the SDK (`nebius_token.py`) |
 | S8 | PASS | Tavily key works; 4125 credits |
@@ -17,6 +17,7 @@
 | S11 | PARTIAL | names up to 63 chars, no underscore; create ~4.5 s, get-by-name ~0.2 s; mount needs the bucket ID (as S5) |
 | S12 | PASS | pytorch 2.5.1 CUDA image: create → start 3 min 38 s (under 240 s); CUDA available |
 | S13 | pending | — |
+| S14 | PARTIAL (phases 1-4 PASS) | Sandboxes can run an exec job: files API, root-owned read-only mounts, `setpriv` to uid 10001, 8 MiB of stdout, cancel, env echoed. Instances are **4 vCPU, ~3.8 GiB RAM** (`SANDBOX_PRESET = 4vcpu-4gb`). Phase 5 (the job command on the imported runner-cpu) runs after the import |
 
 ## S1 — Token Factory account and credits can be activated from Italy
 
@@ -234,3 +235,47 @@
 - **Verdict:** pending
 - **Facts:**
 - **Decision:**
+
+## S5 — 2026-10-27: `--mode isolated` on gpu-l40s-a (hybrid deploy, no gateway)
+
+- **Command:** `spikes/s5_job_gateway.sh --mode isolated` (exec subnet) and `--mode baseline` (default subnet), `PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb`, VPS, in tmux.
+- **Output (key facts):**
+  ```
+  isolated (3 runs): Job ID printed, then "operation failed [code=13]: Operation failed with internal error";
+    nebius ai job get: {"state": "ERROR"}; nebius ai job logs: NotFound
+  baseline: "NotEnoughResources ... VM schedule timeout, most likely due to insufficient hardware resources" (code 8)
+  run 1 also: "can't get operation ... server closed the stream without sending trailers" after create
+  ```
+- **Verdict:** no verdict. The isolated failure carries no reason, and the baseline never got an L40S, so a subnet problem cannot be told from a capacity problem.
+- **Facts:**
+  - A GPU job in the exec subnet (route `0.0.0.0/0` to an unattached allocation) fails at creation with a bare internal error.
+  - No L40S capacity for `1gpu-8vcpu-32gb` in eu-north1 on 2026-10-27. Failed creations are not billed.
+  - Both are in `docs/FEEDBACK.md`.
+- **Decision:** the hybrid deploy runs smoke and exec jobs in Sandboxes (`P2P_EXEC_BACKEND=sandboxes`, docs/specs/hybrid-deploy.md). GPU jobs stay behind this gate (`gpu`), to retry when capacity returns.
+
+## S14 — An exec job in a Token Factory Sandbox
+
+- **Question:** can a Sandboxes instance run an exec job the way a Nebius job does (inputs, privilege drop, outputs, cancel, get-by-name)?
+- **Command:** `uv run python spikes/s14_sandbox_exec.py` (VPS, 2026-10-27, public python image: phases 1-4)
+- **Output (key facts):**
+  ```
+  limits: instance_max_timeout 3600, instance_max_concurrency 50, instance_max_layer_bytes 12884901888,
+    images_import_max_concurrency 8, images_import_max_timeout 3600
+  upload 64 MiB: 3.1 s; response keys sha256, size, uuid; GET /v1/files/<sha256> finds it (dedup OK)
+  exec: SUCCESS in 4.3 s, exit_code 3 reported, timed_out False; command started 1 s after EXECUTING
+  NPROC 4, MEM_KB 4034744; ID 0:0; mounted file 0:0:444; setpriv present; /root writable
+  uid 10001: can write the results dir, cannot append to or chmod an input
+  stdout 8389015 chars, truncated False; metadata.env echoes P2P_JOB_NAME
+  resources.cost 0.00101893 for a sub-second instance
+  cancel: HTTP 202, CANCELLED 0.3 s later
+  list (unix since, limit 1000, offset 0): HTTP 200, a JSON list; items have no metadata
+  VERDICT: PARTIAL (no --image: phase 5 not run)
+  ```
+- **Verdict:** PARTIAL. Every assumption of `SandboxesJobBackend` checked in phases 1-4 holds; phase 5 needs the imported image.
+- **Facts:**
+  - An instance has **4 vCPU and ~3.8 GiB of RAM**: `SANDBOX_PRESET` is `4vcpu-4gb` (priced in `config/pricing.yaml`), and the Planner is told so.
+  - Uploads with a Content-Length work; deduplication by sha256 works.
+  - Start-up is seconds, not minutes; `HOST_MARGIN_S` (60 s) is ample.
+  - List items carry no `metadata`: a lost spawn is looked up with one GET per recent operation.
+  - Sandboxes does report a per-operation `cost` (`metadata.result.resources.cost`): about $0.001 for a sub-second instance.
+- **Decision:** go on with plan B. Gate: rerun with `--image <imported runner-cpu UUID>` (docs/DEPLOY.md §Hybrid, cloud step 4); it must PASS.

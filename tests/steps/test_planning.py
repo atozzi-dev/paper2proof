@@ -161,9 +161,9 @@ def test_cost_estimate_uses_pricing_yaml() -> None:
     assert on_demand == pytest.approx(0.2 + gpu_hour + provision, abs=1e-4)
     assert spot == pytest.approx(0.2 + spot_hour + provision, abs=1e-4)
     sandboxed = estimate_plan_cost(
-        plan, CLOUD, inference_so_far=0.2, preemptible=True, exec_on=("sandbox", "4vcpu-16gb")
+        plan, CLOUD, inference_so_far=0.2, preemptible=True, exec_on=("sandbox", "4vcpu-4gb")
     )
-    sandbox_hour = 4 * 0.015 + 16 * 0.0045  # priced like cpu-d3, never preemptible
+    sandbox_hour = 4 * 0.015 + 4 * 0.0045  # 4 vCPU, 4 GB (S14), priced like cpu-d3
     assert sandboxed == pytest.approx(0.2 + sandbox_hour + provision, abs=1e-4)
 
 
