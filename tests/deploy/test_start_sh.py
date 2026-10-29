@@ -64,7 +64,7 @@ def test_restore_runs_before_migrations_then_uvicorn_under_litestream(tmp_path: 
     assert commands[2].startswith("litestream replicate ")
     assert commands[2].endswith(
         "-exec uvicorn app.main:app --host 0.0.0.0 --port 8080 --workers 1 --no-server-header"
-        " --timeout-graceful-shutdown 10"
+        " --timeout-graceful-shutdown 10 --loop asyncio"
     )
     assert len(commands) == 3
 

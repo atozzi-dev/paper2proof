@@ -66,6 +66,9 @@ alembic upgrade head
 
 export P2P_REPLICATION=litestream  # with the parent process check, what /readyz reports
 # A bounded graceful shutdown: open SSE streams must not hold litestream's final sync past the
-# platform's kill.
+# platform's kill. The stock asyncio loop, never uvloop: uvloop starts a subprocess (the docker
+# CLI of the local jobs) with a real fork() of this process and its gRPC threads, and the child
+# can hang before exec, freezing the event loop (production, 2026-10-29); asyncio's subprocess
+# uses vfork.
 exec litestream replicate -config "$config" -exec \
-  "uvicorn app.main:app --host $bind --port 8080 --workers 1 --no-server-header --timeout-graceful-shutdown 10$proxy"
+  "uvicorn app.main:app --host $bind --port 8080 --workers 1 --no-server-header --timeout-graceful-shutdown 10 --loop asyncio$proxy"
