@@ -35,6 +35,7 @@ from app.storage.artifacts import ArtifactStore
 from app.verdict.config import DEFAULT_PATH, config_sha256, load_verdict_config
 from app.verdict.engine import decide
 from app.verdict.explanation import NOT_REPRODUCED_LABEL, contradicts, template_explanation
+from app.verdict.facts import judge_facts
 from app.verdict.limitations import limitations
 from app.verdict.results import Analysis
 from app.verdict.scale import MetricUnit, align_to_claim
@@ -94,13 +95,17 @@ class VerdictStep:
         return await asyncio.to_thread(self._artifacts.get_json, key)
 
     async def _explain(
-        self, ctx: RunContext, verdict: Verdict, claim_json: str, limits: str
+        self, ctx: RunContext, verdict: Verdict, claim_json: str, limits: str, facts: str
     ) -> str | None:
+        """The verdict's numbers reach the Judge only through the code-written Facts (no paper
+        text in them), never as raw JSON it could misread."""
+        decided = {"kind": verdict.kind.value, "reason": verdict.reason, "n_seeds": verdict.n_seeds}
         prompt = load_prompt("judge_explain").render(
             verdict_kind=verdict.kind.value,
             verdict_label=LABELS[verdict.kind],
             verdict_enum=", ".join(k.value for k in VerdictKind),
-            verdict=verdict.model_dump_json(indent=1),
+            verdict=json.dumps(decided, indent=1),
+            facts=facts,
             limitations=wrap_untrusted(limits, source="limitations", max_chars=6000),
             claim=wrap_untrusted(claim_json, source="paper", max_chars=4000),
             untrusted_notice=UNTRUSTED_NOTICE,
@@ -223,12 +228,20 @@ class VerdictStep:
             unmeasured_reason=unmeasured.get(claim.id, "") if measured is None else None,
             platform=where[0],
             preset=where[1],
+            measurements=measurements if measured is not None else None,
         )
-        text = (
-            await self._explain(ctx, verdict, json.dumps(claim.model_dump(mode="json")), limits)
-            if measured is not None  # nothing to explain beyond the code's own reason
-            else None
-        )
+        text = None  # unmeasured: nothing to explain beyond the code's own reason
+        if measured is not None:
+            facts = judge_facts(
+                claim,
+                verdict,
+                unit=_UNITS.get(unit or ""),
+                scale_factor=scale_factor,
+                scale_note=scale_note,
+                confidence=self._config.confidence,
+            )
+            claim_json = json.dumps(claim.model_dump(mode="json"))
+            text = await self._explain(ctx, verdict, claim_json, limits, facts)
         if text is None or contradicts(text, verdict.kind):
             text = template_explanation(verdict, claim)
         explanation = f"{text.strip()}\n\n### Limitations\n\n{limits}"

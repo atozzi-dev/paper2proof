@@ -76,7 +76,7 @@ async def test_layout_manifest_and_signature(run: Run, signer: FakeSigner) -> No
         "judge": ["nvidia/nemotron-super"],
         "planner": ["nvidia/nemotron-ultra"],
     }
-    assert manifest["prompts"]["judge_explain"]["version"] == "1"
+    assert manifest["prompts"]["judge_explain"]["version"] == "2"
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["prompts"]["judge_explain"]["sha256"])
     assert manifest["images"] == {"runner": RUNNER.split("@")[0] + "@sha256:" + "0" * 64}
     assert manifest["omitted"] == [] and manifest["redacted"] == []

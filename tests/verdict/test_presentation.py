@@ -6,7 +6,9 @@ from app.domain.contracts import ScaleSpec
 from app.domain.models import (
     Claim,
     ClaimType,
+    Measurements,
     ReasonCode,
+    Scale,
     Verdict,
     VerdictKind,
 )
@@ -183,6 +185,69 @@ def _hardware_line(**kwargs: object) -> str:
 )  # fmt: skip
 def test_the_hardware_line_says_what_the_job_ran_on(kwargs: dict[str, object], line: str) -> None:
     assert _hardware_line(**kwargs) == line
+
+
+SAME_SEED_LINE = (
+    "- All 3 seeds gave exactly the same value: the seed does not seem to change this "
+    "experiment, so the agreement across seeds says nothing about its variability."
+)
+SAME_SEED_RELATIVE_LINE = (
+    "- All 3 seeds gave exactly the same values, for the method and for the baseline: the seed "
+    "does not seem to change this experiment, so the agreement across seeds says nothing about "
+    "its variability."
+)
+
+
+def _seed_lines(measurements: Measurements | None, used: list[int] | None = None) -> list[str]:
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=[0, 1, 2],
+        used_seeds=[0, 1, 2] if used is None else used, gpu="cpu", exit_reason="completed",
+        deviations=[], measurements=measurements,
+    )  # fmt: skip
+    return [line for line in text.split("\n") if "the same value" in line]
+
+
+def test_seeds_that_change_nothing_are_named_after_the_seeds_line() -> None:
+    """KAN (2404.19756): every seed gave the same number, so "3 seeds" were one run."""
+    same = Measurements(scale=Scale.FULL, per_seed=[0.97, 0.97, 0.97])
+    assert _seed_lines(same) == [SAME_SEED_LINE]
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=[0, 1, 2], used_seeds=[0, 1, 2], gpu="cpu",
+        exit_reason="completed", deviations=[], measurements=same,
+    )  # fmt: skip
+    assert text.split("\n")[1:3] == [
+        "- 3 of 3 planned seeds produced usable values.",
+        SAME_SEED_LINE,
+    ]
+
+
+def test_a_relative_claim_needs_both_arms_identical_on_every_seed() -> None:
+    both = Measurements(
+        scale=Scale.FULL, per_seed=[2.5, 2.5, 2.5], baseline_per_seed=[3.0, 3.0, 3.0]
+    )
+    assert _seed_lines(both) == [SAME_SEED_RELATIVE_LINE]
+    baseline_moves = Measurements(
+        scale=Scale.FULL, per_seed=[2.5, 2.5, 2.5], baseline_per_seed=[3.0, 3.1, 3.0]
+    )
+    assert _seed_lines(baseline_moves) == []
+    method_moves = Measurements(
+        scale=Scale.FULL, per_seed=[2.5, 2.6, 2.5], baseline_per_seed=[3.0, 3.0, 3.0]
+    )
+    assert _seed_lines(method_moves) == []
+
+
+@pytest.mark.parametrize(
+    "measurements",
+    [
+        None,  # callers that pass no measurements (an unmeasured claim)
+        Measurements(scale=Scale.FULL, per_seed=[0.97, 0.971, 0.97]),
+        Measurements(scale=Scale.FULL, per_seed=[0.97]),  # one seed proves nothing either way
+        Measurements(scale=Scale.FULL, per_seed=[]),
+    ],
+)
+def test_no_seed_line_without_two_identical_seeds(measurements: Measurements | None) -> None:
+    used = None if measurements is None else list(range(len(measurements.per_seed)))
+    assert _seed_lines(measurements, used) == []
 
 
 def test_no_capacity_names_no_gpu_when_none_was_asked_for() -> None:

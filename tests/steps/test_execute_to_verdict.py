@@ -18,6 +18,7 @@ from app.domain.models import (
     RunStatus,
     Scale,
     StepName,
+    Verdict,
     VerdictKind,
 )
 from app.execution.run_storage import FakeRunStorage
@@ -26,7 +27,7 @@ from app.models.fake import FakeModelClient
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive
 from app.orchestrator.context import RunContext
 from app.orchestrator.steps.analyzing import AnalyzingStep
-from app.orchestrator.steps.verdict import VerdictStep
+from app.orchestrator.steps.verdict import VerdictStep, not_measured
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
@@ -223,6 +224,38 @@ async def test_a_full_scale_failure_is_not_reproduced_in_the_judges_words(
     ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
     assert ready.explanation_md.startswith("Not reproduced under our conditions. The method was")
     assert "full scale" in ready.explanation_md
+
+
+async def test_seeds_that_change_nothing_are_named_in_the_limitations(
+    store: Store, tmp_path: Path
+) -> None:
+    """KAN (2404.19756): identical values on every seed, a CI collapsed to a point."""
+    raw = _results([0.95, 0.95, 0.95], [0.90, 0.90, 0.90], scale=FULL)
+    verdict, events = await _verdict(store, tmp_path, raw, full=True)
+    assert verdict is not None and verdict.std == 0
+    ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
+    line = (
+        "- All 3 seeds gave exactly the same values, for the method and for the baseline: the "
+        "seed does not seem to change this experiment"
+    )
+    assert line in ready.explanation_md
+    record = json.loads((tmp_path / f"runs/{RUN}/verdict.json").read_text(encoding="utf-8"))
+    assert line in record["verdicts"][0]["limitations"]
+
+
+def test_an_unmeasured_claim_keeps_a_reason_other_than_too_few_seeds() -> None:
+    underspecified = Verdict(
+        kind=VerdictKind.INCONCLUSIVE, reason=ReasonCode.UNDERSPECIFIED_CLAIM, n_seeds=0,
+        mean=None, std=None, ci_low=None, ci_high=None, tolerance={},
+    )  # fmt: skip
+    assert not_measured(underspecified) is underspecified
+
+
+async def test_seeds_that_vary_get_no_such_line(store: Store, tmp_path: Path) -> None:
+    raw = _results([0.95, 0.96, 0.95], [0.90, 0.90, 0.90], scale=FULL)
+    _, events = await _verdict(store, tmp_path, raw, full=True)
+    ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
+    assert "exactly the same" not in ready.explanation_md
 
 
 async def test_the_run_summary_comes_from_the_deterministic_verdict(
