@@ -3,9 +3,13 @@ budget and invariants, estimates the cost and decides auto-approval (architectur
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+import httpx
 
 from app.discovery.hf_datasets import DatasetProblem, DatasetReport, RunCpu
+from app.discovery.known_datasets import KnownDataset, named_in
+from app.discovery.pypi_project import authors_package
 from app.domain.discovery import (
     HF_DATASET_ID,
     HF_SPLIT,
@@ -15,7 +19,16 @@ from app.domain.discovery import (
 )
 from app.domain.errors import P2PError
 from app.domain.events import EventType
-from app.domain.models import ClaimType, DatasetReq, PackageReq, Plan, Scale, StepName
+from app.domain.models import (
+    ClaimType,
+    DatasetReq,
+    PackageReq,
+    Plan,
+    PlanMode,
+    Scale,
+    StepName,
+)
+from app.execution.package_policy import normalize
 from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
@@ -52,12 +65,29 @@ def _problems(dropped: list[DatasetProblem]) -> str:
     return "\n".join(f"- {d.id} (split {d.split or 'train'}): {d.reason}" for d in dropped)
 
 
+def _named(
+    claim_ids: Sequence[str], named: Mapping[str, Sequence[KnownDataset]]
+) -> list[KnownDataset]:
+    """The known datasets the planned claims name, once each, in claim order."""
+    found: dict[str, KnownDataset] = {}
+    for claim_id in claim_ids:
+        for known in named.get(claim_id, ()):
+            found.setdefault(known.hf_id, known)
+    return list(found.values())
+
+
 def correct_plan(
-    plan: Plan, *, selected: Mapping[str, ClaimType], gpu_cap: float
+    plan: Plan,
+    *,
+    selected: Mapping[str, ClaimType],
+    gpu_cap: float,
+    named: Mapping[str, Sequence[KnownDataset]] | None = None,
 ) -> tuple[Plan, list[str]]:
     """Deterministic post-checks. Returns the corrected plan and what was changed. `selected`
     maps each selected claim to the type the paper gives it: the Planner picks which claims to
-    test, never their type (the verdict judges the claim as extracted)."""
+    test, never their type (the verdict judges the claim as extracted). `named` maps a claim to
+    the known datasets it names (`named_in`): the plan gets their Hugging Face copies when it
+    has none of them and they fit the caps."""
     notes: list[str] = []
     claim_ids = [c for c in plan.claim_ids if c in selected]
     if len(claim_ids) != len(plan.claim_ids):
@@ -86,6 +116,16 @@ def correct_plan(
             f"dropped datasets that are invalid or over the cap ({MAX_DATASETS} datasets, "
             f"{MAX_DATASETS_BYTES // 2**30} GiB in total)"
         )
+    for known in _named(claim_ids, named or {}):  # the experiment runs offline: no downloads
+        if any(d.id.lower() in known.ids for d in datasets):
+            continue
+        copy = DatasetReq(kind="hf", id=known.hf_id)
+        total = sum(d.max_bytes for d in datasets) + copy.max_bytes
+        if len(datasets) < MAX_DATASETS and total <= MAX_DATASETS_BYTES:
+            datasets.append(copy)
+            notes.append(f"dataset {known.hf_id} added: a claim is on {known.name}")
+        else:
+            notes.append(f"dataset {known.hf_id} for {known.name} not added: over the cap")
     gpu, scale = plan.gpu_minutes_est, plan.scale
     if gpu > gpu_cap:
         gpu, scale = gpu_cap, Scale.REDUCED
@@ -118,6 +158,7 @@ class PlanningStep:
         dataset_check: DatasetCheck | None = None,
         exec_on: tuple[str, str] = (EXEC_PLATFORM, EXEC_PRESET),
         hardware: str = GPU_HARDWARE,
+        http: httpx.AsyncClient | None = None,
     ) -> None:
         self._models = models
         self._artifacts = artifacts
@@ -127,6 +168,7 @@ class PlanningStep:
         self._dataset_check = dataset_check
         self._exec_on = exec_on  # the configured exec platform and preset (the estimate's price)
         self._hardware = hardware  # what the experiment runs on, as the Planner reads it
+        self._http = http  # PyPI (the authors' package); None: a short-lived client per lookup
 
     async def run(self, ctx: RunContext) -> StepResult:
         claims = [c for c, selected in await ctx.store.get_claims(ctx.run_id) if selected]
@@ -165,16 +207,30 @@ class PlanningStep:
             Role.PLANNER, messages, Plan, run_id=ctx.run_id, step=ctx.step.value, prompt=prompt.name
         )
         selected = {c.id: c.claim_type for c in claims}
-        plan, _ = correct_plan(proposed, selected=selected, gpu_cap=limits.gpu_minutes)
+        named = {c.id: named_in(c.dataset, c.text) for c in claims}  # curated names only
+        plan, _ = correct_plan(proposed, selected=selected, gpu_cap=limits.gpu_minutes, named=named)
         if self._dataset_check is not None and plan.datasets:
             history = [*messages, _said(proposed)]
-            plan = await self._fetchable(ctx, self._dataset_check, plan, history, selected)
+            plan = await self._fetchable(ctx, self._dataset_check, plan, history, selected, named)
+        authors = await self._authors_package(ctx, plan, discovery)
+        if authors is not None:  # first: the per-request quota never cuts it
+            plan = plan.model_copy(update={"packages": [authors, *plan.packages]})
         if self._package_check is not None:
             plan = plan.model_copy(update={"packages": await self._package_check(plan.packages)})
         else:
             plan = plan.model_copy(
                 update={"notes": [*plan.notes, "packages are validated at provisioning"]}
             )
+        if authors is not None:
+            kept = authors.name in {normalize(p.name) for p in plan.packages}
+            note = (
+                f"the authors' package {authors.name} was added (its PyPI page links to the "
+                "official repository)"
+                if kept
+                else f"the authors' package {authors.name} links to the official repository "
+                "but the package policy refused it"
+            )
+            plan = plan.model_copy(update={"notes": [*plan.notes, note]})
 
         if plan.scale is Scale.REDUCED and all(
             t is ClaimType.ABSOLUTE for t in plan.claim_types.values()
@@ -214,6 +270,21 @@ class PlanningStep:
         target = StepName.AWAITING_APPROVAL if needs_approval else StepName.PROVISIONING
         return StepResult(next=target, output_ref=key)
 
+    async def _authors_package(
+        self, ctx: RunContext, plan: Plan, discovery: Discovery
+    ) -> PackageReq | None:
+        """The authors' PyPI package, when the plan runs their official repository and the
+        Planner did not plan it (InterpretML: the sources need a compiled library the package
+        ships). A repository found by search could be anybody's: never looked up."""
+        repo = discovery.repo
+        if plan.mode is not PlanMode.REPO_FIRST or repo is None or not repo.official:
+            return None
+        planned = {normalize(p.name) for p in plan.packages}
+        name = await authors_package(
+            repo.url, planned=planned, http=self._http, run_cpu=ctx.run_cpu
+        )
+        return None if name is None else PackageReq(name=name)
+
     async def _fetchable(
         self,
         ctx: RunContext,
@@ -221,6 +292,7 @@ class PlanningStep:
         plan: Plan,
         history: list[Message],
         selected: Mapping[str, ClaimType],
+        named: Mapping[str, Sequence[KnownDataset]],
     ) -> Plan:
         """Datasets that cannot be fetched (a made-up id, gated, no parquet for the split, over
         the cap) get the Planner one more try with code-written reasons; whatever still fails
@@ -247,7 +319,7 @@ class PlanningStep:
             except P2PError:  # no usable second plan: keep the first, minus what cannot run
                 plan = plan.model_copy(update={"datasets": report.kept})
             else:
-                plan, _ = correct_plan(retried, selected=selected, gpu_cap=gpu_cap)
+                plan, _ = correct_plan(retried, selected=selected, gpu_cap=gpu_cap, named=named)
                 kept = {d.id for d in plan.datasets}
                 notes += [
                     f"dataset {d.id} replaced: {d.reason}"
