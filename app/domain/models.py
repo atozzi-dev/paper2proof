@@ -82,7 +82,7 @@ class VerdictConfig(_Strict):
     # broken experiment or unit mismatch, never NOT_REPRODUCED. Defaulted so that configs
     # written before the rule still load.
     # None disables the implausible-gap rule; finite only (verdict.json is strict JSON)
-    implausible_ratio: float | None = Field(default=3.0, gt=1, allow_inf_nan=False)
+    implausible_ratio: float | None = Field(default=2.0, gt=1, allow_inf_nan=False)
 
 
 class Verdict(_Strict):

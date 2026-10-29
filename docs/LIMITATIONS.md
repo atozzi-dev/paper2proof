@@ -10,7 +10,7 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
   confidence interval to fall outside the tolerance band: the larger of 2% of the claimed
   value, the claim's own reported std (×2) and a per-metric absolute tolerance
   (`config/verdict.yaml`). A run with fewer than 3 usable seeds is always **Inconclusive**.
-- **A measured value several times off the paper's** (more than 3 times, either way, same
+- **A measured value several times off the paper's** (more than twice, either way, same
   sign) is **Inconclusive** (`IMPLAUSIBLE_GAP`) instead of "not reproduced" for an absolute
   claim. A wrong claim is typically off by a few to tens of percent; a gap that large more
   likely means broken training or a unit mismatch (a count against a rate, a fraction

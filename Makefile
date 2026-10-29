@@ -44,7 +44,7 @@ dev: ## Migrations + uvicorn --reload on :8000 with P2P_ENV=dev and .env (local 
 	set -a; [ ! -f .env ] || . ./.env; set +a; export P2P_ENV=dev; \
 	$(UV) run alembic upgrade head && \
 	$(UV) run uvicorn app.main:app --reload --reload-dir app --port 8000 \
-	  --timeout-graceful-shutdown 3  # an open SSE stream would block every reload
+	  --timeout-graceful-shutdown 3 --loop asyncio  # SSE would block a reload; asyncio: see start.sh
 
 dev-images-env: ## Print .env lines that point dev jobs (P2P_JOB_BACKEND=docker) at the local images by id
 	@echo "P2P_JOB_BACKEND=docker"

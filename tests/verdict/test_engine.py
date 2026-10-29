@@ -160,9 +160,9 @@ CASES = [
     ),
     # 16 a falsified claim, 0.90 of the paper's value
     (absolute(0.990), m(Scale.FULL, [0.894, 0.895, 0.896]), CFG, VerdictKind.NOT_REPRODUCED, None),
-    # 17 exactly k = 3 times off: inside the band
+    # 17 exactly k = 2 times off: inside the band
     (
-        absolute(3.0, metric="score"),
+        absolute(2.0, metric="score"),
         m(Scale.FULL, [1.0, 1.0, 1.0]),
         CFG,
         VerdictKind.NOT_REPRODUCED,
@@ -294,7 +294,7 @@ def test_a_measured_value_more_than_k_times_off_is_an_implausible_gap(
 
 
 def test_a_wide_interval_far_off_the_paper_names_the_gap_not_the_variance() -> None:
-    claim, values = absolute(0.9), [0.01, 0.02, 0.8]  # mean 0.277: more than 3 times lower
+    claim, values = absolute(0.9), [0.01, 0.02, 0.8]  # mean 0.277: more than twice lower
     assert decide(claim, m(Scale.FULL, values), NO_GAP_RULE).reason is ReasonCode.HIGH_VARIANCE
     assert decide(claim, m(Scale.FULL, values), CFG).reason is ReasonCode.IMPLAUSIBLE_GAP
 
@@ -305,7 +305,7 @@ def test_a_wide_interval_far_off_the_paper_names_the_gap_not_the_variance() -> N
         (absolute(0.5), [-2.0, -2.1, -1.9]),  # opposite signs: no ratio to speak of
         (absolute(0.9), [0.0, 0.0, 0.0]),  # a zero mean
         (absolute(0.0), [-1.0, -1.1, -0.9]),  # a zero paper value
-        (absolute(3.0, metric="score"), [1.0, 1.0, 1.0]),  # exactly k times: inside the band
+        (absolute(2.0, metric="score"), [1.0, 1.0, 1.0]),  # exactly k times: inside the band
     ],
 )
 def test_no_gap_rule_without_a_same_sign_ratio_beyond_k(claim: Claim, values: list[float]) -> None:
@@ -324,14 +324,19 @@ def test_the_gap_rule_leaves_other_outcomes_alone() -> None:
 
 
 def test_the_implausible_ratio_is_configured() -> None:
-    assert VerdictConfig().implausible_ratio == 3.0  # configs written before the rule still load
-    assert decide(absolute(0.9), m(Scale.FULL, [0.4, 0.4, 0.4]), CFG).kind is (
+    assert VerdictConfig().implausible_ratio == 2.0  # configs written before the rule still load
+    assert decide(absolute(0.9), m(Scale.FULL, [0.5, 0.5, 0.5]), CFG).kind is (
         VerdictKind.NOT_REPRODUCED
     )
-    narrow = VerdictConfig(implausible_ratio=2.0)  # 0.9 / 0.4 = 2.25 is outside [1/2, 2]
-    assert decide(absolute(0.9), m(Scale.FULL, [0.4, 0.4, 0.4]), narrow).reason is (
+    narrow = VerdictConfig(implausible_ratio=1.5)  # 0.9 / 0.5 = 1.8 is outside [1/1.5, 1.5]
+    assert decide(absolute(0.9), m(Scale.FULL, [0.5, 0.5, 0.5]), narrow).reason is (
         ReasonCode.IMPLAUSIBLE_GAP
     )
+    # production, 2026-10-29: NMU's 98% success measured at 34% by a reimplementation trained far
+    # less than the paper (ratio 2.9) was an accusation under k = 3
+    assert decide(
+        absolute(98.0, metric="success_rate"), m(Scale.FULL, [30.0, 34.0, 38.0]), CFG
+    ).reason is (ReasonCode.IMPLAUSIBLE_GAP)
     for bad in (1.0, 0.5, -3.0):
         with pytest.raises(ValueError, match="implausible_ratio"):
             VerdictConfig(implausible_ratio=bad)
@@ -340,7 +345,7 @@ def test_the_implausible_ratio_is_configured() -> None:
 def test_load_verdict_config_reads_the_repo_file() -> None:
     cfg = load_verdict_config()
     assert cfg.tol_abs["top1_accuracy"] == 0.005
-    assert cfg.implausible_ratio == 3.0
+    assert cfg.implausible_ratio == 2.0
     assert cfg == load_verdict_config(ROOT / "config" / "verdict.yaml")
 
 
