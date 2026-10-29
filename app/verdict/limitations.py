@@ -35,6 +35,7 @@ def limitations(
     platform: str | None = None,
     preset: str | None = None,
     measurements: Measurements | None = None,
+    stand_in_flags: list[str] | None = None,
 ) -> str:
     """`gpu` is what the job reported (results.json: "cpu" without a GPU); `platform` and
     `preset` are where EXECUTING submitted it (None for runs recorded before they were kept).
@@ -67,6 +68,12 @@ def limitations(
         lines.append(f"Execution: {problem}.")
     if scale_note:  # written by app/verdict/scale.py, never by a model
         lines.append(scale_note)
+    if stand_in_flags:  # code-written workspace/<path>:<line> (VerdictStep checks the shape)
+        lines.append(
+            "The Coder's script first said it used a stand-in for the paper's method or data ("
+            + ", ".join(stand_in_flags)
+            + ") and was changed before the experiment ran: check the code in the Proof Bundle."
+        )
     lines += [f"Deviation: {_plain(d)}" for d in deviations if _plain(d)]
     return "\n".join(f"- {line}" for line in lines)
 

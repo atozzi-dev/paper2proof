@@ -511,6 +511,16 @@ async def test_a_script_that_says_it_uses_a_stand_in_cannot_finish(
     errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
     assert len(errors) == 1
     assert "train.py:2" in errors[0] and "stand-in" in errors[0] and "unmeasured" in errors[0]
+    assert "EBM proxy" not in errors[0]  # path and line only: the excerpt is workspace text
+    from app.domain.events import WarningPayload
+
+    warnings = [
+        p for e in await store.events_after(RUN, 0) if isinstance(p := e.payload, WarningPayload)
+    ]
+    assert [w.code for w in warnings] == ["STAND_IN_FLAGGED"]
+    assert "workspace/train.py:2" in warnings[0].message
+    assert result.output_ref is not None  # the run goes on, but it carries the flag
+    assert artifacts.get_json(result.output_ref)["stand_in_flags"] == ["workspace/train.py:2"]
 
 
 @pytest.mark.parametrize(
@@ -539,6 +549,13 @@ def test_stand_in_wording_is_found(line: str) -> None:
         "baseline = DummyClassifier(strategy='most_frequent')  # the paper's majority baseline",
         "# random Fourier features, as in the paper",
         "# never fake or hard-code a value",
+        "# resample with replacement for the CI",
+        "# Mish, used as a drop-in replacement for ReLU",
+        "# the generator mimics the data distribution",
+        "# fall back to random init when no checkpoint is given",
+        "# grid search instead of random search",
+        "# the validation loss is a proxy for the true objective",
+        "# a GP as a surrogate model, as in the paper",
     ],
 )
 def test_ordinary_wording_is_not_a_stand_in(line: str) -> None:
@@ -708,3 +725,15 @@ async def test_finish_accounts_for_every_planned_claim(store: Store, tmp_path: P
     assert final["unmeasured"] == [
         {"claim_id": "c2", "reason": "the paper's test split is not public"}
     ]
+
+
+async def test_an_unavailable_executor_is_not_a_smoke_run_that_tried(
+    store: Store, tmp_path: Path
+) -> None:
+    """A run_smoke that only met an outage counted as a smoke run, letting the Coder declare
+    everything untestable without any script having run."""
+    from app.orchestrator.steps.smoke_testing import _State
+
+    state = _State({"smoke_runs": 2, "last_smoke": None})
+    assert not state.tried()
+    assert _State({"smoke_runs": 1, "last_smoke": {"exit_code": 1}}).tried()

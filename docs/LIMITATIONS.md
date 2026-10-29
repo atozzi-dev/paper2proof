@@ -15,7 +15,8 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
   claim. A wrong claim is typically off by a few to tens of percent; a gap that large more
   likely means broken training or a unit mismatch (a count against a rate, a fraction
   against a percent). A measured value far *better* than the paper's is still reported as
-  Reproduced, and a mismatch whose numbers happen to be close is not caught.
+  Reproduced, and a mismatch whose numbers happen to be close is not caught; nor is a
+  measured value of zero or of the opposite sign (an accuracy of 0, a negative R²).
 - **Reduced scale.** Most papers train longer than a 30-minute budget allows, so most runs
   are at reduced scale. A relative claim ("A beats B by 1.7 points") can then be
   *Reproduced at reduced scale*. An absolute number ("94.1% top-1") cannot: it is

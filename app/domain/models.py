@@ -81,7 +81,8 @@ class VerdictConfig(_Strict):
     # ABSOLUTE: a mean more than this many times off the paper's value (same sign) is a likely
     # broken experiment or unit mismatch, never NOT_REPRODUCED. Defaulted so that configs
     # written before the rule still load.
-    implausible_ratio: float = Field(default=3.0, gt=1)
+    # None disables the implausible-gap rule; finite only (verdict.json is strict JSON)
+    implausible_ratio: float | None = Field(default=3.0, gt=1, allow_inf_nan=False)
 
 
 class Verdict(_Strict):

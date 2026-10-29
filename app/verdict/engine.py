@@ -52,6 +52,9 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
         return _inconclusive(ReasonCode.UNDERSPECIFIED_CLAIM, n)
     if claim.claim_type is ClaimType.RELATIVE and base is None:
         return _inconclusive(ReasonCode.UNDERSPECIFIED_CLAIM, n)
+    stated = (claim.reported_value, claim.reported_std, claim.claimed_delta)  # untrusted input
+    if not all(x is None or (math.isfinite(x) and abs(x) <= MAX_METRIC_ABS) for x in stated):
+        return _inconclusive(ReasonCode.UNDERSPECIFIED_CLAIM, n)
     if n < cfg.min_seeds:
         return _inconclusive(ReasonCode.INSUFFICIENT_SEEDS, n)
     raw = [*measurements.per_seed, *(base or [])]
@@ -84,7 +87,7 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
             kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.REDUCED_SCALE_ABSOLUTE
         elif mean >= v - w:
             kind, reason = VerdictKind.REPRODUCED, None
-        elif _implausible_gap(mean, v, cfg.implausible_ratio):
+        elif cfg.implausible_ratio is not None and _implausible_gap(mean, v, cfg.implausible_ratio):
             kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP
         elif ci_high < v - w:
             kind, reason = VerdictKind.NOT_REPRODUCED, None

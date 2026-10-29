@@ -270,3 +270,18 @@ def test_no_capacity_names_no_gpu_when_none_was_asked_for() -> None:
         exit_reason="capacity", deviations=[],
     )  # fmt: skip
     assert "- Execution: no capacity was available for the experiment, so it did not run." in text
+
+
+def test_a_stand_in_the_coder_had_to_remove_is_a_limitation() -> None:
+    from app.verdict.limitations import limitations as _limits
+
+    text = _limits(
+        scale=ScaleSpec(full=True),
+        planned_seeds=[0, 1, 2],
+        used_seeds=[0, 1, 2],
+        gpu="cpu",
+        exit_reason="completed",
+        deviations=[],
+        stand_in_flags=["workspace/train.py:64"],
+    )
+    assert "workspace/train.py:64" in text and "stand-in" in text and "Proof Bundle" in text

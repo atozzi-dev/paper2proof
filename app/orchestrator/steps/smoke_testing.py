@@ -112,6 +112,14 @@ class _State:
         last = data.get("last_smoke")
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
         self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
+        flags = data.get("stand_in_flags")
+        self.stand_in_flags: list[str] = (  # every refusal, kept for the run's record
+            [f for f in flags if isinstance(f, str)] if isinstance(flags, list) else []
+        )
+
+    def tried(self) -> bool:
+        """A smoke run of a script happened in this environment (an outage is not one)."""
+        return self.last_smoke is not None
 
     def dump(self, workspace: Workspace) -> dict[str, Any]:
         return {
@@ -119,6 +127,7 @@ class _State:
             "smoke_runs": self.smoke_runs,
             "searches": self.searches,
             "last_smoke": self.last_smoke,
+            "stand_in_flags": self.stand_in_flags,
         }
 
 
@@ -529,7 +538,7 @@ class SmokeTestingStep:
     ) -> StepResult:
         if not args.measures:  # the Coder says nothing can be tested faithfully here
             _check_measures(claims, args, {}, state.difference_warned)  # each claim, once
-            if state.smoke_runs == 0:
+            if not state.tried():
                 raise ToolError(
                     "write the experiment and call run_smoke first: declare claims unmeasured "
                     "only when a smoke run shows the method or its data cannot run here"
@@ -566,12 +575,22 @@ class SmokeTestingStep:
             raise ToolError("the workspace changed since the last passing smoke run: run it again")
         found = await ctx.run_cpu(stand_in, ws.files)
         if found is not None:
-            path, number, line = found
+            where = f"workspace/{found[0]}:{found[1]}"  # the excerpt is workspace text: not shown
+            if where not in state.stand_in_flags:
+                state.stand_in_flags.append(where)
+                await ctx.emit(
+                    EventType.WARNING,
+                    {
+                        "code": "STAND_IN_FLAGGED",
+                        "message": f"the Coder's script said at {where} that it uses a stand-in; "
+                        "the experiment could not run before it was changed",
+                    },
+                )
             raise ToolError(
-                f"workspace/{path}:{number} says the script uses a stand-in ({line[:120]!r}): a "
-                "result for another model or for other data is a false verdict. Measure the "
-                "paper's own method on its own data, or put the claims it serves in `unmeasured` "
-                "with the reason; never fall back to other data or another model"
+                f"{where} says the script uses a stand-in: a result for another model or for "
+                "other data is a false verdict. Measure the paper's own method on its own data, "
+                "or put the claims it serves in `unmeasured` with the reason; never fall back to "
+                "other data or another model"
             )
         check_user_args(args.args)
         if list(args.args) != last.get("args"):
@@ -601,6 +620,7 @@ class SmokeTestingStep:
                 "files": sorted(ws.files),
                 "workspace_sha256": digest,
                 "smoke_runs": state.smoke_runs,
+                "stand_in_flags": state.stand_in_flags,
             },
         )
         await self._put(f"runs/{ctx.run_id}/workspace.json", state.dump(ws))
@@ -625,15 +645,16 @@ def _canonical(name: str) -> str:
 # 2026-10-29: "LogisticRegression as EBM proxy", a fallback to random data in place of MNIST).
 # A tripwire, not a proof: ordinary words ("synthetic data as in the paper", "sampling with
 # replacement", DummyClassifier as the paper's baseline) never match it.
+_DATA = r"(?:data|dataset|inputs?|labels?|images?|features?|samples?|values?)"
 _STAND_IN = re.compile(
-    r"\bas (?:an? |the )?(?:[\w.-]+ ){0,3}(?:proxy|stand-?in|substitute|surrogate|replacement)\b"
-    r"|\b(?:proxy|stand-?in|substitute|replacement) (?:for|model|method)\b"
+    r"\bas (?:an? |the )?(?:[\w.-]+ ){0,3}(?:proxy|stand-?in|substitute)\b"
+    r"|\b(?:stand-?in|substitute) for\b"
     r"|\bplaceholder (?:model|method|data|dataset|values?|results?|implementation)\b"
-    r"|\b(?:dummy|fake|mock) (?:data|dataset|inputs?|labels?|images?|features?)\b"
+    rf"|\b(?:dummy|fake|mock) {_DATA}\b"
     r"|\bsynthetic\b[^\n]{0,40}\b(?:for testing|testing purposes|instead|in place|fall ?back)"
     r"|\b(?:instead of|in place of|fall(?:s|ing)? ?back to)\b[^\n]{0,40}"
-    r"\b(?:synthetic|random|dummy|fake)\b"
-    r"|\bmimics? (?:the )?(?:\w+ ){0,2}(?:data|dataset|characteristics|distribution)\b",
+    rf"\b(?:synthetic|random|dummy|fake) {_DATA}\b"
+    r"|\b(?:synthetic|random|fake)\b[^\n]{0,30}\bmimics?\b",
     re.IGNORECASE,
 )
 

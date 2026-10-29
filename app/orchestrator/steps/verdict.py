@@ -5,6 +5,7 @@ Judge only writes prose, which is discarded if it names any other verdict."""
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +162,9 @@ class VerdictStep:
         smoke = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
         units, unmeasured = _declared(smoke)
         decided = [
-            await self._decide(ctx, claim, analysis, manifest, plan, units, unmeasured, where)
+            await self._decide(
+                ctx, claim, analysis, manifest, plan, units, unmeasured, where, _flags(smoke)
+            )
             for claim, _ in await planned_claims(ctx, plan)
         ]
         stored_verdicts = [v for _, v in await ctx.store.list_verdicts(ctx.run_id)]
@@ -190,6 +193,7 @@ class VerdictStep:
         units: dict[str, str],
         unmeasured: dict[str, str],
         where: tuple[str | None, str | None] = (None, None),
+        flags: list[str] | None = None,
     ) -> dict[str, Any]:
         """One claim: decide() on its measurements (none if it was not measured), the reason
         adjusted by code, the Limitations by code, the Judge's prose only as explanation."""
@@ -229,6 +233,7 @@ class VerdictStep:
             platform=where[0],
             preset=where[1],
             measurements=measurements if measured is not None else None,
+            stand_in_flags=flags,
         )
         text = None  # unmeasured: nothing to explain beyond the code's own reason
         if measured is not None:
@@ -274,6 +279,17 @@ class VerdictStep:
 
 
 _UNITS: dict[str, MetricUnit] = {"fraction": "fraction", "percent": "percent", "raw": "raw"}
+
+
+_FLAG = re.compile(r"workspace/[A-Za-z0-9_./-]{1,200}:[0-9]{1,6}")
+
+
+def _flags(smoke: Any) -> list[str]:
+    """The stand-in refusals SMOKE_TESTING recorded, kept only in their code-written shape."""
+    raw = smoke.get("stand_in_flags") if isinstance(smoke, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [f for f in raw if isinstance(f, str) and _FLAG.fullmatch(f)][:10]
 
 
 def _declared(smoke: Any) -> tuple[dict[str, str], dict[str, str]]:

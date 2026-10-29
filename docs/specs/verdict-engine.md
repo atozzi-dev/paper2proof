@@ -62,7 +62,7 @@ class VerdictConfig(BaseModel):
     rho: float = 0.5
     min_seeds: int = 3
     confidence: float = 0.95
-    implausible_ratio: float = 3.0      # k, > 1; .inf disables the implausible-gap rule
+    implausible_ratio: float | None = 3.0  # k, finite and > 1; None disables the rule
 
 class Verdict(BaseModel):
     kind: VerdictKind

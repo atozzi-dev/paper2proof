@@ -255,7 +255,7 @@ def test_reported_std_widens_the_absolute_tolerance() -> None:
     assert verdict.tolerance["w"] == pytest.approx(0.1)
 
 
-NO_GAP_RULE = VerdictConfig(implausible_ratio=math.inf)  # what the verdict was before the rule
+NO_GAP_RULE = VerdictConfig(implausible_ratio=None)  # what the verdict was before the rule
 PLANTED = [  # the canary set's falsified claims (production eval, 2026-10-29): wrong, not broken
     (absolute(0.990), [0.894, 0.895, 0.896]),
     (absolute(0.920), [0.845, 0.846, 0.847]),
@@ -348,3 +348,37 @@ def test_config_sha256_hashes_the_file_bytes() -> None:
     expected = hashlib.sha256((ROOT / "config" / "verdict.yaml").read_bytes()).hexdigest()
     assert config_sha256() == expected
     assert config_sha256(ROOT / "config" / "verdict.yaml") == expected
+
+
+@pytest.mark.parametrize("ratio", [math.inf, -math.inf, math.nan, 1.0, 0.5])
+def test_the_gap_ratio_must_be_finite_and_above_one(ratio: float) -> None:
+    """None disables the rule; inf would write Infinity (not JSON) into verdict.json."""
+    with pytest.raises(ValueError):
+        VerdictConfig(implausible_ratio=ratio)
+
+
+def test_a_disabled_gap_rule_round_trips_as_json() -> None:
+    import json
+
+    dumped = json.dumps(
+        VerdictConfig(implausible_ratio=None).model_dump(mode="json"), allow_nan=False
+    )
+    assert json.loads(dumped)["implausible_ratio"] is None
+
+
+@pytest.mark.parametrize("field", ["reported_value", "reported_std", "claimed_delta"])
+@pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan, 1e300])
+def test_a_claim_with_a_non_finite_number_is_underspecified(field: str, bad: float) -> None:
+    """The Reader's JSON is untrusted: reported_std 1e999 made the tolerance infinite and
+    gave REPRODUCED for any measurement (security review, 2026-10-29)."""
+    claim = absolute(0.9).model_copy(update={"reported_std": 0.01})
+    if field == "claimed_delta":
+        claim = claim.model_copy(
+            update={"claim_type": ClaimType.RELATIVE, "baseline_name": "b", "claimed_delta": 0.1}
+        )
+    claim = claim.model_copy(update={field: bad})
+    base = [0.0, 0.0, 0.0] if claim.claim_type is ClaimType.RELATIVE else None
+    measured = Measurements(scale=Scale.FULL, per_seed=[0.0, 0.0, 0.0], baseline_per_seed=base)
+    verdict = decide(claim, measured, CFG)
+    assert verdict.kind is VerdictKind.INCONCLUSIVE
+    assert verdict.reason is ReasonCode.UNDERSPECIFIED_CLAIM

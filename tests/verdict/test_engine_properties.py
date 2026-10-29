@@ -17,7 +17,7 @@ from app.domain.models import (
 from app.verdict.engine import decide
 
 CFG = VerdictConfig()
-NO_GAP_RULE = VerdictConfig(implausible_ratio=math.inf)  # the verdict before the gap rule
+NO_GAP_RULE = VerdictConfig(implausible_ratio=None)  # the verdict before the gap rule
 K = CFG.implausible_ratio
 EXAMPLES = settings(max_examples=500, deadline=None)
 
