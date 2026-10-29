@@ -29,15 +29,6 @@
  {
   "tool_calls": [
    {
-    "id": "call_4",
-    "name": "finish",
-    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [], \"unmeasured\": [{\"claim_id\": \"c1\", \"reason\": \"x\"}, {\"claim_id\": \"c2\", \"reason\": \"y\"}]}"
-   }
-  ]
- },
- {
-  "tool_calls": [
-   {
     "id": "call_5",
     "name": "finish",
     "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": null, \"unit\": \"fraction\"}, {\"claim_id\": \"c2\", \"key\": \"top1_accuracy\", \"baseline_key\": null, \"unit\": \"fraction\"}]}"

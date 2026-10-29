@@ -232,9 +232,29 @@ def test_plan_datasets_are_validated_and_capped() -> None:
         datasets=datasets,
         gpu_minutes_est=10,
     )
-    corrected, notes = correct_plan(plan, selected={"c1"}, gpu_cap=30)
+    corrected, notes = correct_plan(plan, selected={"c1": ClaimType.RELATIVE}, gpu_cap=30)
     assert [d.id for d in corrected.datasets] == ["org/d0", "org/d1"]  # a third breaks 20 GiB
     assert any("dataset" in n for n in notes)
+
+
+def test_a_claim_keeps_the_type_the_paper_gives_it() -> None:
+    """The verdict judges a claim by its extracted type: a Planner that tests an ABSOLUTE
+    claim as a comparison would make the Coder measure a baseline the paper never names
+    (seen in production: "NMU vs a linear layer"), and the verdict would ignore it anyway."""
+    plan = Plan(
+        mode=PlanMode.FROM_SCRATCH,
+        claim_ids=["c1", "c2"],
+        claim_types={"c1": ClaimType.RELATIVE, "c2": ClaimType.RELATIVE},
+        scale=Scale.REDUCED,
+        seeds=[0, 1, 2],
+        gpu_minutes_est=10,
+    )
+    paper = {"c1": ClaimType.ABSOLUTE, "c2": ClaimType.RELATIVE}
+    corrected, notes = correct_plan(plan, selected=paper, gpu_cap=30)
+    assert corrected.claim_types == paper
+    assert notes == ["claim types follow the paper: c1 is tested as ABSOLUTE"]
+    unchanged, none = correct_plan(corrected, selected=paper, gpu_cap=30)
+    assert unchanged.claim_types == paper and none == []
 
 
 ON_HF = {"uoft-cs/cifar10", "scikit-learn/iris"}
@@ -366,3 +386,23 @@ async def test_the_budget_running_out_on_the_retry_fails_the_step(
     models = _RetryOverBudget(LLM_FIXTURES, case="made_up_dataset")
     with pytest.raises(BudgetExceeded):  # never swallowed like an unusable answer
         await _plan(store, tmp_path, "made_up_dataset", dataset_check=_on_hf, models=models)
+
+
+async def test_planned_claims_take_the_type_the_paper_gives(store: Store, tmp_path: Path) -> None:
+    """A plan stored before correct_plan kept types (or any path around it) cannot change the
+    type the verdict judges a claim by."""
+    from app.orchestrator.steps.common import planned_claims
+    from tests.steps.conftest import ctx_at
+
+    ctx = await ctx_at(store, StepName.PLANNING, previous=[(StepName.INGESTING, "i")])
+    await store.save_claims(RUN, [_claim("c2", ClaimType.ABSOLUTE)], selected={"c2"})
+    plan = Plan(
+        mode=PlanMode.FROM_SCRATCH,
+        claim_ids=["c2"],
+        claim_types={"c2": ClaimType.RELATIVE},
+        scale=Scale.REDUCED,
+        seeds=[0, 1, 2],
+        gpu_minutes_est=10,
+    )
+    [(claim, kind)] = await planned_claims(ctx, plan)
+    assert claim.id == "c2" and kind is ClaimType.ABSOLUTE

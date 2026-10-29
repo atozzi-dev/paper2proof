@@ -1,8 +1,10 @@
-"""EXTRACTING_CLAIMS: Reader extracts claims, Vision/LaTeX tables fill missing numbers,
-metric names are normalized, claims are ranked and the top 3 (or the hinted ones) selected."""
+"""EXTRACTING_CLAIMS: Reader extracts claims (the user's claim hint, as untrusted data, says
+which first), Vision/LaTeX tables fill missing numbers, metric names are normalized, claims are
+ranked and the top 3 (or the hinted ones) selected."""
 
 import asyncio
 import base64
+import hashlib
 import re
 
 from pydantic import BaseModel, Field
@@ -22,6 +24,8 @@ from app.storage.artifacts import ArtifactStore
 VISION_SKIPPED = "VISION_PAGE_SKIPPED"
 
 MAX_PAPER_CHARS = 300_000
+MAX_HINT_CHARS = 500  # the API's limit on claim_hint
+HINT_SOURCE = "claim-hint"  # the Reader prompt names this block
 READER_PROMPT = "reader_extract_claims"
 MAX_CLAIMS = 15
 SELECTED = 3
@@ -135,15 +139,19 @@ def _score(claim: Claim) -> int:
     )
 
 
-def reader_messages(paper: IngestedPaper) -> list[Message]:
-    """The Reader request for a paper: the prompt plus the paper wrapped as untrusted data.
+def reader_messages(paper: IngestedPaper, hint: str | None = None) -> list[Message]:
+    """The Reader request for a paper: the prompt plus the paper wrapped as untrusted data, and
+    the user's claim hint (if any) after it in its own untrusted block: it is user-typed text.
+    One user message, so models whose chat template wants alternating roles still accept it.
     Shared with the extraction eval (eval/run_set_c.py), so the eval measures this prompt."""
     prompt = load_prompt(READER_PROMPT)
     text = "\n\n".join(f"## {s.title}\n{s.text}" for s in paper.sections)
-    document = wrap_untrusted(text, source=f"arxiv:{paper.arxiv_id}", max_chars=MAX_PAPER_CHARS)
+    user = wrap_untrusted(text, source=f"arxiv:{paper.arxiv_id}", max_chars=MAX_PAPER_CHARS)
+    if hint:
+        user += "\n\n" + wrap_untrusted(hint, source=HINT_SOURCE, max_chars=MAX_HINT_CHARS)
     return [
         Message(role="system", content=f"{prompt.body}\n{UNTRUSTED_NOTICE}"),
-        Message(role="user", content=document),
+        Message(role="user", content=user),
     ]
 
 
@@ -181,10 +189,12 @@ class ExtractingClaimsStep:
         self._models = models
         self._artifacts = artifacts
 
-    async def _read(self, ctx: RunContext, paper: IngestedPaper) -> list[ReaderClaim]:
+    async def _read(
+        self, ctx: RunContext, paper: IngestedPaper, hint: str | None
+    ) -> list[ReaderClaim]:
         output = await self._models.structured(
             Role.READER,
-            reader_messages(paper),
+            reader_messages(paper, hint),
             ReaderOutput,
             run_id=ctx.run_id,
             step=ctx.step.value,
@@ -251,7 +261,9 @@ class ExtractingClaimsStep:
     async def run(self, ctx: RunContext) -> StepResult:
         key = await output_of(ctx, StepName.INGESTING)
         paper = IngestedPaper.model_validate(await asyncio.to_thread(self._artifacts.get_json, key))
-        drafts = await self._read(ctx, paper)
+        run = await ctx.store.get_run(ctx.run_id)
+        hint = run.claim_hint if run else None
+        drafts = await self._read(ctx, paper, hint)
         if not drafts:
             raise P2PError(ErrorCode.NO_CLAIMS, "no testable quantitative claims found")
 
@@ -270,15 +282,16 @@ class ExtractingClaimsStep:
             )
             claims.append(fill_from_tables(claim, table_rows))
 
-        run = await ctx.store.get_run(ctx.run_id)
-        chosen = select(claims, run.claim_hint if run else None)
+        chosen = select(claims, hint)
         await ctx.store.save_claims(ctx.run_id, claims, selected=chosen)
         for claim in claims:
             await ctx.emit(EventType.CLAIM_EXTRACTED, {"claim": claim.model_dump(mode="json")})
         out = f"runs/{ctx.run_id}/claims.json"
-        payload = {
+        payload = {  # the hint shapes what the Reader extracts: kept with the claims
             "claims": [c.model_dump(mode="json") for c in claims],
             "selected": sorted(chosen),
+            "claim_hint": hint or None,
+            "claim_hint_sha256": hashlib.sha256(hint.encode("utf-8")).hexdigest() if hint else None,
         }
         await asyncio.to_thread(self._artifacts.put_json, out, payload)
         return StepResult(next=StepName.DISCOVERING, output_ref=out)

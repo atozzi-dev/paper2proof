@@ -527,6 +527,30 @@ class SmokeTestingStep:
         claims: list[tuple[Claim, ClaimType]],
         args: Finish,
     ) -> StepResult:
+        if not args.measures:  # the Coder says nothing can be tested faithfully here
+            _check_measures(claims, args, {}, state.difference_warned)  # each claim, once
+            reasons = [
+                {"claim_id": u.claim_id, "reason": printable(u.reason).strip()}
+                for u in args.unmeasured
+            ]
+            await self._put(  # kept for the audit: the Coder alone ended the run
+                f"runs/{ctx.run_id}/untestable.json",
+                {"unmeasured": reasons, "smoke_runs": state.smoke_runs},
+            )
+            for r in reasons:
+                await ctx.emit(
+                    EventType.WARNING,
+                    {
+                        "code": "CLAIM_NOT_MEASURED",
+                        "message": f"{r['claim_id']} was not measured (the Coder's reason, "
+                        f"model text: {r['reason']})",
+                    },
+                )
+            raise P2PError(
+                ErrorCode.NO_CLAIMS,
+                "the Coder reported that no claim can be tested faithfully here (its reasons, "
+                "model text, are in the warnings)",
+            )
         script = args.entrypoint.removeprefix("workspace/")
         if script not in ws.files:
             raise ToolError(f"workspace/{script} does not exist")
@@ -655,7 +679,8 @@ def _check_measures(
     warned: set[str],
 ) -> None:
     """Every planned claim exactly once, measured (with keys the smoke run wrote, in a unit
-    that fits) or declared unmeasured; at least one measured (execution-contracts §6)."""
+    that fits) or declared unmeasured (execution-contracts §6); finish with none measured
+    ends the run as untestable."""
     kinds = {claim.id: kind for claim, kind in claims}
     named = [m.claim_id for m in args.measures] + [u.claim_id for u in args.unmeasured]
     unknown = sorted(set(named) - kinds.keys())

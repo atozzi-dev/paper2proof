@@ -5,6 +5,10 @@ the Planner invented Hugging Face ids for scikit-learn's digits and wine)."""
 from app.models.prompt_files import load_prompt
 
 
+def test_the_reader_prompt_version_moved_with_its_text() -> None:
+    assert load_prompt("reader_extract_claims").version == "2"
+
+
 def test_the_planner_plans_no_dataset_for_bundled_or_generated_data() -> None:
     body = load_prompt("planner_experiment_plan").body
     assert "load_digits" in body and "make_" in body
@@ -18,5 +22,5 @@ def test_the_coder_loads_bundled_data_in_code_and_has_a_smoke_subset_only_when_p
 
 
 def test_prompt_versions_moved_with_their_text() -> None:
-    assert load_prompt("planner_experiment_plan").version == "5"
-    assert load_prompt("coder_system").version == "5"
+    assert load_prompt("planner_experiment_plan").version == "6"
+    assert load_prompt("coder_system").version == "6"

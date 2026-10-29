@@ -4,7 +4,9 @@ overlay: it is the only job that writes the shared cache, and its inputs are the
 PyPI wheels. The fetch job clones the repository and downloads the datasets (untrusted bytes:
 parquet parsing, git) without the cache mount. The overlay digest is read and trusted before the
 fetch job exists, so nothing those bytes can do reaches the cache or the trust table (A-06).
-Manifests are injected (read-only, <= 64 KiB) instead of being written to the bucket."""
+Manifests are injected (read-only, <= 64 KiB) instead of being written to the bucket.
+A repository GitHub reports over the provisioner's 1 GiB cap is left out of the fetch job (a
+warning, and the experiment is written without it) instead of failing the run at its clone."""
 
 import asyncio
 import contextlib
@@ -14,6 +16,9 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
+
+from app.discovery.github import MAX_REPO_BYTES, repo_size_kib
 from app.domain.discovery import Discovery
 from app.domain.errors import P2PError
 from app.domain.events import EventType
@@ -139,6 +144,7 @@ class ProvisioningStep:
         poll_s: float = 15,
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        http: httpx.AsyncClient | None = None,
     ) -> None:
         self._policy = policy
         self._storage = storage
@@ -148,6 +154,7 @@ class ProvisioningStep:
         self._poll_s = poll_s
         self._clock = clock
         self._sleep = sleep
+        self._http = http  # GitHub's repository size; None: a short-lived client per check
 
     async def _json(self, key: str) -> dict[str, object]:
         data: dict[str, object] = await asyncio.to_thread(self._artifacts.get_json, key)
@@ -318,6 +325,7 @@ class ProvisioningStep:
         """The fetch job, with what is left of the provisioning budget. Only the run bucket is
         mounted: what the repository or a dataset could do stays in this run. None when the
         run was cancelled."""
+        repo = await self._repo_to_fetch(ctx, plan, discovery)  # before the job's clock starts
         name = job_name(JobKind.FETCH, ctx.run_id, ctx.attempt)
         submitted, fresh = await self._submitted(ctx, name)
         left_s = int((deadline + DEADLINE_MARGIN - submitted).total_seconds())
@@ -328,11 +336,7 @@ class ProvisioningStep:
             "schema": "p2p.provision/v2",
             "phase": "fetch",
             "run_id": ctx.run_id,
-            "repo": (  # a from-scratch plan never uses it: no clone, no 1 GiB failure
-                {"url": discovery.repo.url, "ref": None}
-                if discovery.repo and plan.mode is PlanMode.REPO_FIRST
-                else None
-            ),
+            "repo": {"url": repo, "ref": None} if repo else None,
             "datasets": [d.model_dump(mode="json") for d in plan.datasets],
             "smoke_subset": (
                 {"dataset": plan.datasets[0].id, "rows": SMOKE_ROWS} if plan.datasets else None
@@ -348,6 +352,34 @@ class ProvisioningStep:
         if report is None:
             return None
         return {"schema": "p2p.fetch-report/v1", "run_id": ctx.run_id, **report}
+
+    async def _repo_to_fetch(self, ctx: RunContext, plan: Plan, discovery: Discovery) -> str | None:
+        """The repository URL for the fetch job, or None. A from-scratch plan never uses it
+        (no clone, no 1 GiB failure). One GitHub reports over the provisioner's cap is left
+        out: the Coder writes the experiment without it rather than the run failing at the
+        clone. The decision is stored before the job exists, so a restarted step hands the
+        job the same manifest and warns once, whatever GitHub answers by then."""
+        if discovery.repo is None or plan.mode is not PlanMode.REPO_FIRST:
+            return None
+        url = discovery.repo.url
+        key = f"runs/{ctx.run_id}/repo_check.json"
+        check = await self._stored(key)
+        if check is None:
+            size_kib = await repo_size_kib(url, self._http)  # None: unknown, the job checks
+            check = {"url": url, "size_kib": size_kib, "skip": False}
+            if size_kib is not None and size_kib * 1024 > MAX_REPO_BYTES:
+                what = "official repository" if discovery.repo.official else "repository"
+                await ctx.emit(  # before the decision is stored: a crash repeats it, never loses it
+                    EventType.WARNING,
+                    {
+                        "code": "REPO_TOO_LARGE",
+                        "message": f"the {what} is larger than 1 GiB ({size_kib // 1024} MiB "
+                        "on GitHub): the experiment is written without it",
+                    },
+                )
+                check["skip"] = True
+            await asyncio.to_thread(self._artifacts.put_json, key, check)
+        return None if check.get("skip") is True else url
 
     async def _submitted(self, ctx: RunContext, name: str) -> tuple[datetime, bool]:
         """When the job was first submitted, and whether it is a new one."""

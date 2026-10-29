@@ -456,6 +456,47 @@ async def test_after_provisioning_again_the_coder_is_told_to_run_smoke_first(
     assert "provisioned again" in task and "run_smoke first" in task
 
 
+async def test_no_claim_testable_faithfully_ends_the_run_as_untestable(
+    store: Store, tmp_path: Path
+) -> None:
+    """The method or the data cannot run here: every claim unmeasured, with its reason, ends
+    the run cleanly instead of an experiment on a stand-in (a different model under the
+    method's name gave a false Reproduced in production)."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, _ = _step("finish_all_unmeasured", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage())
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.NO_CLAIMS
+    assert "the Coder reported" in str(err.value) and "faithfully" in str(err.value)
+
+
+async def test_an_untestable_finish_is_checked_audited_and_labelled_as_model_text(
+    store: Store, tmp_path: Path
+) -> None:
+    """The Coder alone ends such a run: its claims are checked like any finish, its reasons
+    are kept for the audit and shown as model text, never as the code's own finding."""
+    from app.domain.events import WarningPayload
+
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "finish_untestable_audited", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage()
+    )
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.NO_CLAIMS
+    first = _tool_results(models)[-1]
+    assert first.startswith("ERROR:") and "c9" in first  # refused like any finish
+    warnings = [
+        p for e in await store.events_after(RUN, 0) if isinstance(p := e.payload, WarningPayload)
+    ]
+    assert len(warnings) == 1  # none from the refused call
+    assert "model text" in warnings[0].message and "native library missing" in warnings[0].message
+    assert "\u001b" not in warnings[0].message and "\u202e" not in warnings[0].message
+    audit = artifacts.get_json(f"runs/{RUN}/untestable.json")
+    assert audit["unmeasured"] == [{"claim_id": "c1", "reason": "[31mnative library missing"}]
+    assert audit["smoke_runs"] == 1
+
+
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:
     ctx, artifacts = await _setup(store, tmp_path)
     step, models = _step("big_request", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
@@ -582,9 +623,9 @@ async def test_one_experiment_measures_every_planned_claim(store: Store, tmp_pat
 
 
 async def test_finish_accounts_for_every_planned_claim(store: Store, tmp_path: Path) -> None:
-    """Forgotten, all unmeasured, a RELATIVE claim without its baseline key, a key the smoke
-    run never wrote, a baseline key equal to the claim's key: refused. A claim declared
-    unmeasured with a reason: accepted."""
+    """Forgotten, a RELATIVE claim without its baseline key, a key the smoke run never wrote,
+    a baseline key equal to the claim's key: refused. A claim declared unmeasured with a
+    reason: accepted."""
     ctx, artifacts = await _setup(store, tmp_path, two_claims=True)
     step, models = _step(
         "finish_claims_errors", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage()
@@ -592,12 +633,11 @@ async def test_finish_accounts_for_every_planned_claim(store: Store, tmp_path: P
     result = await step.run(ctx)
     assert result.next is StepName.EXECUTING and result.output_ref is not None
     errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
-    assert len(errors) == 5
+    assert len(errors) == 4
     assert "c2" in errors[0]
-    assert "measures" in errors[1]
-    assert "baseline_key" in errors[2]
-    assert "missing/key" in errors[3]
-    assert "baseline_key must differ from key" in errors[4]  # a delta of 0 by construction
+    assert "baseline_key" in errors[1]
+    assert "missing/key" in errors[2]
+    assert "baseline_key must differ from key" in errors[3]  # a delta of 0 by construction
     final = artifacts.get_json(result.output_ref)
     assert [m["claim_id"] for m in final["measures"]] == ["c1"]
     assert final["unmeasured"] == [

@@ -115,8 +115,21 @@ async def _setup(
     return await ctx_at(store, StepName.PROVISIONING, previous=previous), artifacts
 
 
+def _no_github() -> httpx.AsyncClient:
+    """GitHub never answers (as in an outage): the repository is fetched, as before the size
+    pre-check. No test reaches the network."""
+    return httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503)))
+
+
+_DEFAULT_HTTP: Any = object()
+
+
 def _step(
-    store: Store, artifacts: LocalArtifactStore, storage: FakeRunStorage, clock: FakeClock
+    store: Store,
+    artifacts: LocalArtifactStore,
+    storage: FakeRunStorage,
+    clock: FakeClock,
+    http: httpx.AsyncClient | None = _DEFAULT_HTTP,
 ) -> ProvisioningStep:
     policy = PackagePolicy(load_policy_config(ROOT / "config"), PyPIClient(store), now=lambda: NOW)
     return ProvisioningStep(
@@ -128,6 +141,7 @@ def _step(
         poll_s=15,
         clock=clock,
         sleep=clock.sleep,
+        http=_no_github() if http is _DEFAULT_HTTP else http,
     )
 
 
@@ -237,18 +251,144 @@ async def test_provision_job_is_submitted_safely_and_succeeds(store: Store, tmp_
     assert ("prov", FETCH) not in kinds
 
 
+GITHUB = "https://api.github.com/repos/org/repo"
+REPO_CHECK = f"runs/{RUN}/repo_check.json"
+
+
+@respx.mock
 async def test_a_from_scratch_plan_never_clones_the_repository(
     store: Store, tmp_path: Path
 ) -> None:
     """The plan reimplements the method: cloning would only cost time, and a huge repository
     (over the 1 GiB cap) would fail the run for nothing."""
+    route = respx.get(GITHUB).mock(return_value=httpx.Response(200, json={"size": 1}))
     ctx, artifacts = await _setup(store, tmp_path, packages=[], mode=PlanMode.FROM_SCRATCH)
     storage, clock = FakeRunStorage(), FakeClock()
     jobs = FakeJobBackend(on_submit=_writes_report(storage))
     ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
-    result = await _step(store, artifacts, storage, clock).run(ctx)
+    result = await _step(store, artifacts, storage, clock, http=None).run(ctx)
     assert result.next is StepName.SMOKE_TESTING
     assert _manifest(ctx, JobKind.FETCH)["repo"] is None
+    assert not route.called  # nothing to check on GitHub either
+
+
+# --- a repository over the provisioner's 1 GiB cap is skipped, not a failed run --------------
+# (RepoRef only admits canonical github.com URLs: tests/discovery/test_github.py covers others)
+
+
+async def _warnings(store: Store) -> list[WarningPayload]:
+    return [
+        e.payload for e in await store.events_after(RUN, 0) if isinstance(e.payload, WarningPayload)
+    ]
+
+
+@respx.mock
+@pytest.mark.parametrize("official", [True, False])
+@pytest.mark.parametrize("size_kib", [2**20 + 1, 1_739_568])
+async def test_a_repository_over_the_cap_is_written_without(
+    store: Store, tmp_path: Path, size_kib: int, official: bool
+) -> None:
+    """CatBoost (1706.09516, 1.7 GB on GitHub): the fetch job refused its clone and the run
+    failed. GitHub's size is read first: the experiment is written without the repository."""
+    route = respx.get(GITHUB).mock(return_value=httpx.Response(200, json={"size": size_kib}))
+    ctx, artifacts = await _setup(store, tmp_path, packages=[], official=official)
+    storage = FakeRunStorage()
+    on_submit = _writes_report(storage, fetch={"repo": False, "requirement_files": {}})
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    result = await _step(store, artifacts, storage, FakeClock(), http=None).run(ctx)
+    assert result.next is StepName.SMOKE_TESTING
+    assert route.call_count == 1
+    assert _manifest(ctx, JobKind.FETCH)["repo"] is None
+    [warning] = await _warnings(store)
+    assert warning.code == "REPO_TOO_LARGE"
+    assert "larger than 1 GiB" in warning.message
+    assert "written without it" in warning.message
+    assert ("official" in warning.message) is official
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["repo"] is False
+    assert artifacts.get_json(REPO_CHECK)["skip"] is True
+
+
+@respx.mock
+@pytest.mark.parametrize("size_kib", [6_994, 2**20])
+async def test_a_repository_within_the_cap_is_fetched(
+    store: Store, tmp_path: Path, size_kib: int
+) -> None:
+    respx.get(GITHUB).mock(return_value=httpx.Response(200, json={"size": size_kib}))
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock(), http=None).run(ctx)
+    assert _manifest(ctx, JobKind.FETCH)["repo"] == {
+        "url": "https://github.com/org/repo",
+        "ref": None,
+    }
+    assert not await _warnings(store)
+    assert artifacts.get_json(REPO_CHECK)["skip"] is False
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.Response(403), httpx.Response(500), httpx.ConnectTimeout("slow")],
+    ids=["rate-limited", "outage", "timeout"],
+)
+async def test_an_unknown_size_fetches_the_repository_as_before(
+    store: Store, tmp_path: Path, answer: httpx.Response | Exception
+) -> None:
+    """Only a size GitHub reports skips the repository: the fetch job still enforces the cap."""
+    route = respx.get(GITHUB)
+    if isinstance(answer, Exception):
+        route.mock(side_effect=answer)
+    else:
+        route.mock(return_value=answer)
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    result = await _step(store, artifacts, storage, FakeClock(), http=None).run(ctx)
+    assert result.next is StepName.SMOKE_TESTING
+    assert _manifest(ctx, JobKind.FETCH)["repo"] == {
+        "url": "https://github.com/org/repo",
+        "ref": None,
+    }
+    assert not await _warnings(store)
+
+
+class _DiesAtFetch(FakeJobBackend):
+    """The control plane dies as it submits the fetch job (once)."""
+
+    died = False
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        if spec.kind is JobKind.FETCH and not self.died:
+            self.died = True
+            raise RuntimeError("control plane died")
+        return await super().submit(spec)
+
+
+@respx.mock
+@pytest.mark.parametrize("skip", [True, False])
+async def test_a_restarted_step_keeps_its_repository_decision(
+    store: Store, tmp_path: Path, skip: bool
+) -> None:
+    """GitHub may answer differently after a restart (or not at all): the stored decision is
+    the one the fetch job gets, with no second question and no second warning."""
+    first = httpx.Response(200, json={"size": 2**21 if skip else 1})
+    route = respx.get(GITHUB).mock(return_value=first)
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    report = _writes_report(storage, fetch={"repo": not skip})
+    ctx = RunContext(**{**ctx.__dict__, "jobs": _DiesAtFetch(on_submit=report)})
+    step = _step(store, artifacts, storage, FakeClock(), http=None)
+    with pytest.raises(RuntimeError):
+        await step.run(ctx)
+    route.mock(return_value=httpx.Response(200, json={"size": 1 if skip else 2**21}))
+    result = await step.run(ctx)
+    assert result.next is StepName.SMOKE_TESTING
+    assert route.call_count == 1
+    expected = None if skip else {"url": "https://github.com/org/repo", "ref": None}
+    assert _manifest(ctx, JobKind.FETCH)["repo"] == expected
+    assert [w.code for w in await _warnings(store)] == (["REPO_TOO_LARGE"] if skip else [])
 
 
 @respx.mock
@@ -961,3 +1101,86 @@ async def test_a_planted_packages_report_is_deleted_before_a_new_provision_job(
     assert err.value.code is ErrorCode.PROVISION_FAILED
     assert (RUN, "staging/packages_report.json") not in storage.objects
     assert await store.trusted_overlays() == {}
+
+
+# --- what is left of the step's failure paths --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "files",
+    [["requirements.txt"], {"../setup.py": "torch\n"}, {"requirements.txt": 5}],
+    ids=["list", "path", "not-text"],
+)
+async def test_a_fetch_report_with_odd_requirement_files_fails(
+    store: Store, tmp_path: Path, files: object
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+    on_submit = _writes_report(storage, fetch={"requirement_files": files})
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=on_submit)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+
+
+@respx.mock
+async def test_a_malformed_earlier_report_exempts_no_package(store: Store, tmp_path: Path) -> None:
+    respx.get("https://pypi.org/pypi/torchao/json").mock(return_value=_pypi())
+    ctx, artifacts = await _setup(store, tmp_path, packages=["torchao"])
+    artifacts.put_json(f"runs/{RUN}/provision_report.json", {"requirement_files": "torchao\n"})
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert _manifest(ctx)["packages"] == []
+
+
+async def test_an_invalid_stored_fetch_report_fails_closed(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    artifacts.put_json(f"runs/{RUN}/fetch_report.json", {"schema": "other", "run_id": RUN})
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert "stored" in err.value.message
+    assert list(jobs.jobs) == [PROV]  # never replaced by a fresh fetch
+
+
+class _FetchRuns(FakeJobBackend):
+    async def status(self, handle: JobHandle) -> JobState:
+        return JobState.RUNNING if handle.name == FETCH else JobState.SUCCEEDED
+
+
+async def test_cancelling_the_run_during_the_fetch_job(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage, clock = FakeRunStorage(), FakeClock()
+    jobs = _FetchRuns(on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    step = _step(store, artifacts, storage, clock)
+
+    async def sleep_then_cancel(seconds: float) -> None:
+        clock.t += seconds
+        await store.cancel_run(RUN)
+
+    step._sleep = sleep_then_cancel
+    result = await step.run(ctx)
+    assert result.next is RunStatus.CANCELLED
+    assert jobs.cancelled == [FETCH]
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(f"runs/{RUN}/fetch_report.json")
+
+
+async def test_an_oversized_error_file_is_not_read(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, packages=[])
+    storage = FakeRunStorage()
+
+    def fail(spec: JobSpec) -> None:
+        body = json.dumps({"error": "x" * 9000}).encode()
+        storage.objects[(RUN, "staging/provision_error.json")] = body
+
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(JobState.FAILED, on_submit=fail)})
+    with pytest.raises(P2PError) as err:
+        await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert err.value.message == "provisioning failed"

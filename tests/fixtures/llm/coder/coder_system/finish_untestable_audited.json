@@ -1,0 +1,38 @@
+[
+ {
+  "tool_calls": [
+   {
+    "id": "call_1",
+    "name": "write_file",
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('ok')\\n\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_2",
+    "name": "run_smoke",
+    "arguments": "{\"script\": \"train.py\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_3",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [], \"unmeasured\": [{\"claim_id\": \"c9\", \"reason\": \"not a planned claim\"}]}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_4",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [], \"unmeasured\": [{\"claim_id\": \"c1\", \"reason\": \"\\u001b[31mnative library missing\\u202e\"}]}"
+   }
+  ]
+ }
+]

@@ -40,6 +40,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   CLAIM_NOT_MEASURED: 'Claim not measured',
   PACKAGES_REQUESTED: 'Packages requested',
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
+  REPO_TOO_LARGE: 'Repository too large to fetch',
   VISION_PAGE_SKIPPED: 'A page could not be read',
   JOB_PREEMPTED: 'GPU job preempted',
   NO_GPU_CAPACITY: 'No capacity for the experiment',
@@ -58,6 +59,7 @@ const DEVIATION_WARNINGS = new Set([
   'PACKAGE_REJECTED',
   'DATASET_UNAVAILABLE',
   'REPO_SNAPSHOT_UNAVAILABLE',
+  'REPO_TOO_LARGE',
   'JOB_PREEMPTED',
   'DISCOVERY_DEGRADED',
 ])

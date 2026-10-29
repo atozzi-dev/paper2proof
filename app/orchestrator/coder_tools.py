@@ -82,7 +82,7 @@ class Finish(_Args):
     entrypoint: str = Field(max_length=200)
     args: list[str] = Field(default_factory=list, max_length=20)
     expected_outputs: list[str] = Field(default_factory=list, max_length=10)
-    measures: list[Measure] = Field(min_length=1, max_length=MAX_CLAIMS_PER_JOB)
+    measures: list[Measure] = Field(default_factory=list, max_length=MAX_CLAIMS_PER_JOB)
     unmeasured: list[Unmeasured] = Field(default_factory=list, max_length=MAX_CLAIMS_PER_JOB)
 
 
@@ -112,7 +112,9 @@ _DESCRIPTIONS = {
     "`key` of its value (and `baseline_key` of the baseline's value, RELATIVE claims only) and "
     "the `unit` the values use: fraction (0.941 means 94.1%), percent (94.1, or 0.9 for a 0.9% "
     "error rate) or raw (not a share: loss, BLEU, reward); or in `unmeasured` with a short "
-    "reason, only if the experiment truly cannot measure it. At least one claim is measured.",
+    "reason, only if the experiment truly cannot measure it. If no claim can be tested "
+    "faithfully here (the method or its data cannot run), list every claim in `unmeasured`: "
+    "the run then ends as untestable instead of testing a stand-in.",
 }
 TOOL_DEFS = [
     ToolDef(name=name, description=_DESCRIPTIONS[name], parameters=model.model_json_schema())

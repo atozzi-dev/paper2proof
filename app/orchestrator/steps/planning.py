@@ -3,7 +3,7 @@ budget and invariants, estimates the cost and decides auto-approval (architectur
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from app.discovery.hf_datasets import DatasetProblem, DatasetReport, RunCpu
 from app.domain.discovery import (
@@ -47,12 +47,22 @@ def _problems(dropped: list[DatasetProblem]) -> str:
     return "\n".join(f"- {d.id} (split {d.split or 'train'}): {d.reason}" for d in dropped)
 
 
-def correct_plan(plan: Plan, *, selected: set[str], gpu_cap: float) -> tuple[Plan, list[str]]:
-    """Deterministic post-checks. Returns the corrected plan and what was changed."""
+def correct_plan(
+    plan: Plan, *, selected: Mapping[str, ClaimType], gpu_cap: float
+) -> tuple[Plan, list[str]]:
+    """Deterministic post-checks. Returns the corrected plan and what was changed. `selected`
+    maps each selected claim to the type the paper gives it: the Planner picks which claims to
+    test, never their type (the verdict judges the claim as extracted)."""
     notes: list[str] = []
     claim_ids = [c for c in plan.claim_ids if c in selected]
     if len(claim_ids) != len(plan.claim_ids):
         notes.append("dropped claims that were not selected")
+    retyped = [c for c in claim_ids if plan.claim_types.get(c, selected[c]) is not selected[c]]
+    if retyped:
+        notes.append(
+            "claim types follow the paper: "
+            + ", ".join(f"{c} is tested as {selected[c].value}" for c in retyped)
+        )
     seeds = list(plan.seeds)
     if len(seeds) < MIN_SEEDS:
         extra = [s for s in range(100) if s not in seeds][: MIN_SEEDS - len(seeds)]
@@ -78,7 +88,7 @@ def correct_plan(plan: Plan, *, selected: set[str], gpu_cap: float) -> tuple[Pla
     corrected = plan.model_copy(
         update={
             "claim_ids": claim_ids,
-            "claim_types": {c: plan.claim_types[c] for c in claim_ids},
+            "claim_types": {c: selected[c] for c in claim_ids},
             "seeds": seeds,
             "datasets": datasets,
             "gpu_minutes_est": gpu,
@@ -141,7 +151,7 @@ class PlanningStep:
         proposed = await self._models.structured(
             Role.PLANNER, messages, Plan, run_id=ctx.run_id, step=ctx.step.value, prompt=prompt.name
         )
-        selected = {c.id for c in claims}
+        selected = {c.id: c.claim_type for c in claims}
         plan, _ = correct_plan(proposed, selected=selected, gpu_cap=limits.gpu_minutes)
         if self._dataset_check is not None and plan.datasets:
             history = [*messages, _said(proposed)]
@@ -197,7 +207,7 @@ class PlanningStep:
         check: DatasetCheck,
         plan: Plan,
         history: list[Message],
-        selected: set[str],
+        selected: Mapping[str, ClaimType],
     ) -> Plan:
         """Datasets that cannot be fetched (a made-up id, gated, no parquet for the split, over
         the cap) get the Planner one more try with code-written reasons; whatever still fails
