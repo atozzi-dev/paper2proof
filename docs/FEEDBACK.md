@@ -26,7 +26,7 @@ summary comes first, ranked by impact.
    endpoint, but metrics need an extra collector, and alerts cover only VMs and buckets.
 
 **Smaller gaps:** GPU jobs wait for capacity with no state detail; Sandboxes pricing is not
-documented; the model catalog and `/v1/models` disagree, and `/v1/models` has no context
+documented, and its files API answers a large upload with a bare 502; the model catalog and `/v1/models` disagree, and `/v1/models` has no context
 length; Super ignores `response_format: json_schema`, and the thinking switch works only through
 `chat_template_kwargs`; the Batch API wire format is not shown in full; the Python SDK needs an
 undeclared package on Windows; tracing ingest is gRPC-only.
@@ -54,6 +54,14 @@ which worked on the first call.
 - **Expected:** an import by digest, the only reference that pins an image, or a clear "references by digest are not supported" error.
 - **Impact:** about an hour. We now import by tag, after checking that the tag resolves to the digest, and record the UUID under the digest.
 - **Suggestion:** resolve `@sha256:` references (indexes included) in the importer, and document the supported reference forms in the import API.
+- **Severity:** major
+
+### 2026-10-29 — The files API answers 502 to a large upload, with no hint whether it was stored
+- **Context:** A-30, production eval on Sandboxes: a smoke run whose package overlay held CatBoost, LightGBM and XGBoost (hundreds of MB), sent with `POST /v1/files` and a Content-Length.
+- **What happened:** the upload answered HTTP 502 with an HTML gateway page. Nothing says whether the file was stored, whether a size limit applies, or whether to retry.
+- **Expected:** a documented maximum upload size, a 413 with that size when it is exceeded, and a JSON error body; or resumable/multipart uploads for large archives.
+- **Impact:** the run failed with an internal error until we added retries with a lookup by sha256 between them; about an hour of diagnosis.
+- **Suggestion:** document the upload size limit and the retry semantics of `/v1/files`, and answer 413 rather than 502 above it.
 - **Severity:** major
 
 ### 2026-10-29 — A wrong `Project` header gives HTTP 200 with every permission false, then 403

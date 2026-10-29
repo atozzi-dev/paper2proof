@@ -23,7 +23,7 @@ import re
 import secrets
 import stat
 import tarfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import Executor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,6 +50,11 @@ from app.execution.sandboxes import SANDBOXES_API
 
 log = logging.getLogger(__name__)
 
+
+class _Transient(JobBackendError):
+    """An upload the gateway or the service failed (429, 5xx, transport): worth a resend."""
+
+
 SANDBOX_PLATFORM = "sandbox"  # the judged hardware the bundle records (config/pricing.yaml)
 # what an instance gets, as a preset (priced in config/pricing.yaml): 4 vCPU, ~3.8 GiB (S14)
 SANDBOX_PRESET = "4vcpu-4gb"
@@ -67,6 +72,8 @@ INSTANCE_LOG_BYTES = 64 * 1024  # the stderr tail kept next to the results (untr
 LIST_PAGE = 1000
 MAX_PAGES = 10  # a lookup past this, or a page seen twice, is an outage
 CHUNK = 1 << 20
+UPLOAD_BACKOFF_S = (5.0, 15.0)  # between the attempts at an upload (3 in all)
+_TRANSIENT = {429, 500, 502, 503, 504}  # the gateway or the service, not the request
 LOOKBACK = timedelta(minutes=5)  # a lost spawn is looked for from its intent minus this
 STALE_INTENT = timedelta(minutes=10)  # an intent with no operation after this never spawned
 KiB = 1024
@@ -243,6 +250,7 @@ class SandboxesJobBackend:
         cpu_pool: Executor | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         http: httpx.AsyncClient | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._key = api_key
         self._project = project_id
@@ -254,6 +262,7 @@ class SandboxesJobBackend:
         self._pool = cpu_pool
         self._clock = clock
         self._http = http
+        self._sleep = sleep
         self._hashes: dict[tuple[int, int, int, int], str] = {}  # (dev, ino, size, mtime) -> sha
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -316,7 +325,9 @@ class SandboxesJobBackend:
         try:
             response = await self._request("POST", "/v1/files", content=content, headers=headers)
         except httpx.HTTPError as err:
-            raise JobBackendError(f"Sandboxes upload: {type(err).__name__}") from None
+            raise _Transient(f"Sandboxes upload: {type(err).__name__}") from None
+        if response.status_code in _TRANSIENT:
+            raise _Transient(f"Sandboxes upload: HTTP {response.status_code}")
         if response.status_code not in (200, 201):
             raise JobBackendError(f"Sandboxes upload: HTTP {response.status_code}")
         body = response.json() or {}
@@ -324,9 +335,24 @@ class SandboxesJobBackend:
             raise JobBackendError("Sandboxes stored another sha256 than the one sent")
         return str(body["uuid"])
 
+    async def _retrying(self, send: Callable[[], Awaitable[str]], sha: str) -> str:
+        """An upload, sent again after a transient failure (production, 2026-10-29: a 502 on a
+        large overlay). Content-addressed, so a resend is safe, and a 502 can hide a file that
+        was stored: it is looked up before each new attempt."""
+        for wait in UPLOAD_BACKOFF_S:
+            try:
+                return await send()
+            except _Transient:
+                log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+            await self._sleep(wait)
+            found = await self._known(sha)
+            if found:
+                return found
+        return await send()
+
     async def _upload_bytes(self, data: bytes) -> str:
         sha = await asyncio.to_thread(lambda: hashlib.sha256(data).hexdigest())
-        return await self._known(sha) or await self._send(data, sha)
+        return await self._known(sha) or await self._retrying(lambda: self._send(data, sha), sha)
 
     async def _upload_local(self, fd: int) -> str:
         info = os.fstat(fd)
@@ -339,23 +365,27 @@ class SandboxesJobBackend:
         found = await self._known(sha)
         if found:
             return found
-        sent = hashlib.sha256()
 
-        async def chunks() -> AsyncIterator[bytes]:
-            os.lseek(fd, 0, os.SEEK_SET)
-            left = info.st_size
-            while left > 0:
-                chunk = await asyncio.to_thread(os.read, fd, min(CHUNK, left))
-                if not chunk:
-                    break
-                sent.update(chunk)
-                left -= len(chunk)
-                yield chunk
+        async def send() -> str:  # each attempt reads the file again, from its start
+            sent = hashlib.sha256()
 
-        uuid = await self._send(chunks(), sha, info.st_size)
-        if sent.hexdigest() != sha:  # rewritten between the hash and the send
-            raise JobBackendError("a run input changed during its upload")
-        return uuid
+            async def chunks() -> AsyncIterator[bytes]:
+                os.lseek(fd, 0, os.SEEK_SET)
+                left = info.st_size
+                while left > 0:
+                    chunk = await asyncio.to_thread(os.read, fd, min(CHUNK, left))
+                    if not chunk:
+                        break
+                    sent.update(chunk)
+                    left -= len(chunk)
+                    yield chunk
+
+            uuid = await self._send(chunks(), sha, info.st_size)
+            if sent.hexdigest() != sha:  # rewritten between the hash and the send
+                raise JobBackendError("a run input changed during its upload")
+            return uuid
+
+        return await self._retrying(send, sha)
 
     def _open_local(self, run_id: str, key: str) -> int | None:
         """The local run copy's file for `key`, never through a link; None if it isn't there."""

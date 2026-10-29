@@ -350,3 +350,23 @@ async def test_the_smoke_platform_comes_from_the_config_and_is_priced_as_such(
     assert smoke.usd_per_hour == cloud.hourly("gpu-l40s-a", "1gpu-8vcpu-32gb")
     assert SpendKind.GPU_MINUTES in reserved  # checked against the GPU caps before the job
     assert CFG.smoke_platform == "cpu-d3" and CFG.smoke_preset == "4vcpu-16gb"  # the default
+
+
+class BrokenBackend(FakeJobBackend):
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        from app.execution.nebius_backend import JobBackendError
+
+        raise JobBackendError("Sandboxes upload: HTTP 502")
+
+
+async def test_a_backend_that_cannot_start_the_job_makes_the_executor_unavailable(
+    store: Store,
+) -> None:
+    """The Coder hears the executor is unavailable and may try again; the run never ends with
+    an internal error for an outage of the job backend."""
+    storage = FakeRunStorage()
+    smoke, ctx = await _executor(store, BrokenBackend(), storage)
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    with pytest.raises(SmokeUnavailable, match="HTTP 502"):
+        await smoke.run(env, ARGV, {}, 60)
+    assert not ctx.budget._inflight

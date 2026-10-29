@@ -164,7 +164,15 @@ def _backend(
         local_buckets=local,
         index_dir=tmp_path / "sandbox-jobs",
         clock=lambda: times[-1],
+        sleep=_no_wait,
     )
+
+
+SLEPT: list[float] = []
+
+
+async def _no_wait(seconds: float) -> None:
+    SLEPT.append(seconds)
 
 
 class Api:
@@ -182,6 +190,10 @@ class Api:
         self.cancel_error: int | None = None
         self.list_error: int | None = None
         self.lost_reply: type[Exception] | None = None  # the spawn happens, its reply is lost
+        self.upload_errors: list[int] = []  # HTTP status the next uploads answer, in order
+        self.stored_despite_error = False  # a 502 from the gateway after the file was stored
+        self.posts = 0
+        self.upload_drops = 0  # uploads whose connection is dropped
 
     def install(self, router: respx.Router) -> None:
         router.get(url__regex=rf"{FILES}/[0-9a-f]{{64}}$").mock(side_effect=self._file)
@@ -208,6 +220,14 @@ class Api:
         assert request.headers["project"] == "project-e00test"
         data = request.read()
         sha = hashlib.sha256(data).hexdigest()
+        self.posts += 1
+        if self.upload_drops:
+            self.upload_drops -= 1
+            raise httpx.ReadTimeout("the gateway dropped the upload", request=request)
+        if self.upload_errors:
+            if self.stored_despite_error:
+                self.files[sha] = data
+            return httpx.Response(self.upload_errors.pop(0), text="<html>Bad Gateway</html>")
         self.files[sha] = data
         self.uploads += 1
         claimed = self.stored_sha or sha
@@ -845,3 +865,54 @@ async def test_a_list_that_ignores_its_offset_never_loops(
     api.spawn_error = None
     with pytest.raises(JobStatusUnavailable, match="last page"):
         await backend.submit(_spec())  # the exec intent's lookup sees only the smoke op
+
+
+async def test_a_transient_upload_error_is_retried(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    """Production, 2026-10-29: a 502 from the files API on a large overlay failed the run with
+    an internal error. A content-addressed upload is safe to send again."""
+    SLEPT.clear()
+    api.upload_errors = [502, 503]
+    await _backend(tmp_path, local, storage).submit(_spec())
+    assert len(api.spawns) == 1
+    assert len(SLEPT) == 2 and sorted(SLEPT) == SLEPT  # backing off
+
+
+async def test_an_upload_that_landed_behind_a_502_is_not_sent_again(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    api.upload_errors = [502]
+    api.stored_despite_error = True
+    before = api.posts
+    await _backend(tmp_path, local, storage).submit(_spec())
+    first_input_posts = 1  # the failed POST; the lookup then finds the stored file
+    assert len(api.spawns) == 1
+    assert api.posts - before == api.uploads + first_input_posts
+
+
+async def test_a_lasting_upload_error_fails_the_submit_without_a_spawn(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    api.upload_errors = [502] * 10
+    with pytest.raises(JobBackendError, match="HTTP 502"):
+        await _backend(tmp_path, local, storage).submit(_spec())
+    assert api.spawns == []
+    assert api.posts == 3  # UPLOAD_ATTEMPTS
+
+
+async def test_a_refused_upload_is_not_retried(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    api.upload_errors = [413]
+    with pytest.raises(JobBackendError, match="HTTP 413"):
+        await _backend(tmp_path, local, storage).submit(_spec())
+    assert api.posts == 1
+
+
+async def test_a_dropped_upload_connection_is_retried(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    api.upload_drops = 1
+    await _backend(tmp_path, local, storage).submit(_spec())
+    assert len(api.spawns) == 1

@@ -22,6 +22,7 @@ from app.domain.contracts import ArchiveDigests
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
+from app.execution.nebius_backend import JobBackendError
 from app.execution.run_storage import RunStorage
 from app.execution.smoke import (
     SmokeContractError,
@@ -157,16 +158,19 @@ class JobSmokeExecutor:
             watchdog_s=timeout_s + SMOKE_SETUP_S,
         )
         started = time.monotonic()
-        outcome = await run_job(
-            ctx,
-            spec,
-            usd_per_hour=self.usd_per_hour,
-            poll_s=self._poll_s,
-            clock=self._clock,
-            sleep=self._sleep,
-            queue_cap_s=SMOKE_QUEUE_CAP_S,
-            gpu=self._config.smoke_platform.startswith("gpu-"),  # GPU minutes too (invariant 7)
-        )
+        try:
+            outcome = await run_job(
+                ctx,
+                spec,
+                usd_per_hour=self.usd_per_hour,
+                poll_s=self._poll_s,
+                clock=self._clock,
+                sleep=self._sleep,
+                queue_cap_s=SMOKE_QUEUE_CAP_S,
+                gpu=self._config.smoke_platform.startswith("gpu-"),  # GPU minutes (invariant 7)
+            )
+        except JobBackendError as err:  # an outage of the job backend, not the Coder's script
+            raise SmokeUnavailable(f"the sandbox could not start the smoke job ({err})") from None
         if outcome.run_cancelled:
             raise SmokeUnavailable("the run was cancelled")
         if outcome.queue_timed_out:
