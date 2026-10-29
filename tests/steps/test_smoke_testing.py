@@ -497,6 +497,71 @@ async def test_an_untestable_finish_is_checked_audited_and_labelled_as_model_tex
     assert audit["smoke_runs"] == 1
 
 
+async def test_a_script_that_says_it_uses_a_stand_in_cannot_finish(
+    store: Store, tmp_path: Path
+) -> None:
+    """Production, 2026-10-29: "LogisticRegression as EBM proxy" gave a false Reproduced, and a
+    silent fallback to random data in place of MNIST a false Not reproduced."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "finish_stand_in", artifacts, FakeSmokeExecutor([PASS, PASS]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert len(errors) == 1
+    assert "train.py:2" in errors[0] and "stand-in" in errors[0] and "unmeasured" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# using LogisticRegression as EBM proxy since EBM impl not available",
+        'print("Could not load MNIST. Using synthetic data for testing.")',
+        "# Generate simple synthetic data that mimics MNIST characteristics",
+        "# a GradientBoostingClassifier as a stand-in for the EBM",
+        "X = dummy data until the loader works",
+        "# fall back to random inputs instead of the real dataset",
+    ],
+)
+def test_stand_in_wording_is_found(line: str) -> None:
+    from app.orchestrator.steps.smoke_testing import stand_in
+
+    assert stand_in({"train.py": f"import os\n{line}\n".encode()}) == ("train.py", 2, line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# Generate synthetic data as specified in the paper",  # the paper's own generated data
+        "X, y = make_classification(n_samples=2000, random_state=0)  # synthetic task",
+        "idx = rng.choice(len(X), size=50, replace=True)  # sampling with replacement",
+        "baseline = DummyClassifier(strategy='most_frequent')  # the paper's majority baseline",
+        "# random Fourier features, as in the paper",
+        "# never fake or hard-code a value",
+    ],
+)
+def test_ordinary_wording_is_not_a_stand_in(line: str) -> None:
+    from app.orchestrator.steps.smoke_testing import stand_in
+
+    assert stand_in({"train.py": f"{line}\n".encode()}) is None
+
+
+async def test_claims_are_declared_untestable_only_after_trying(
+    store: Store, tmp_path: Path
+) -> None:
+    """Production: the Coder gave up on KAN without writing a line ("no example script")."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "untestable_without_trying", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage()
+    )
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.NO_CLAIMS
+    first = _tool_results(models)[0]
+    assert first.startswith("ERROR:") and "run_smoke" in first
+
+
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:
     ctx, artifacts = await _setup(store, tmp_path)
     step, models = _step("big_request", artifacts, FakeSmokeExecutor([]), FakeRunStorage())

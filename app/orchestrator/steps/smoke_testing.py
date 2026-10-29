@@ -529,6 +529,11 @@ class SmokeTestingStep:
     ) -> StepResult:
         if not args.measures:  # the Coder says nothing can be tested faithfully here
             _check_measures(claims, args, {}, state.difference_warned)  # each claim, once
+            if state.smoke_runs == 0:
+                raise ToolError(
+                    "write the experiment and call run_smoke first: declare claims unmeasured "
+                    "only when a smoke run shows the method or its data cannot run here"
+                )
             reasons = [
                 {"claim_id": u.claim_id, "reason": printable(u.reason).strip()}
                 for u in args.unmeasured
@@ -559,6 +564,15 @@ class SmokeTestingStep:
             raise ToolError(f"run_smoke on {script} must pass right before finish")
         if last.get("workspace_sha256") != await ctx.run_cpu(_workspace_sha256, ws.files):
             raise ToolError("the workspace changed since the last passing smoke run: run it again")
+        found = await ctx.run_cpu(stand_in, ws.files)
+        if found is not None:
+            path, number, line = found
+            raise ToolError(
+                f"workspace/{path}:{number} says the script uses a stand-in ({line[:120]!r}): a "
+                "result for another model or for other data is a false verdict. Measure the "
+                "paper's own method on its own data, or put the claims it serves in `unmeasured` "
+                "with the reason; never fall back to other data or another model"
+            )
         check_user_args(args.args)
         if list(args.args) != last.get("args"):
             raise ToolError("finish args must match the last passing smoke run's args")
@@ -607,6 +621,32 @@ def _canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+# Wording with which a script admits to testing something else than the paper (production,
+# 2026-10-29: "LogisticRegression as EBM proxy", a fallback to random data in place of MNIST).
+# A tripwire, not a proof: ordinary words ("synthetic data as in the paper", "sampling with
+# replacement", DummyClassifier as the paper's baseline) never match it.
+_STAND_IN = re.compile(
+    r"\bas (?:an? |the )?(?:[\w.-]+ ){0,3}(?:proxy|stand-?in|substitute|surrogate|replacement)\b"
+    r"|\b(?:proxy|stand-?in|substitute|replacement) (?:for|model|method)\b"
+    r"|\bplaceholder (?:model|method|data|dataset|values?|results?|implementation)\b"
+    r"|\b(?:dummy|fake|mock) (?:data|dataset|inputs?|labels?|images?|features?)\b"
+    r"|\bsynthetic\b[^\n]{0,40}\b(?:for testing|testing purposes|instead|in place|fall ?back)"
+    r"|\b(?:instead of|in place of|fall(?:s|ing)? ?back to)\b[^\n]{0,40}"
+    r"\b(?:synthetic|random|dummy|fake)\b"
+    r"|\bmimics? (?:the )?(?:\w+ ){0,2}(?:data|dataset|characteristics|distribution)\b",
+    re.IGNORECASE,
+)
+
+
+def stand_in(files: dict[str, bytes]) -> tuple[str, int, str] | None:
+    """The first line of the Coder's files that says it uses a stand-in, as (path, line, text)."""
+    for path in sorted(files):
+        for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
+            if _STAND_IN.search(line):
+                return path, number, line.strip()
+    return None
+
+
 MAX_COMPARED = 1000  # metrics.json keys; real experiments write tens
 _DIFFERENCE_WORDS = {"diff", "difference", "delta", "improvement", "vs"}  # "gap" is a metric
 
@@ -648,8 +688,9 @@ def _smoke_hint(outcome: SmokeResult) -> list[str]:
         ]
     return [
         "note: this smoke run passed. Its values come from a small subset and are not expected "
-        "to match the paper: do not tune the experiment toward the paper's numbers. If every "
-        "claim's value is in metrics.json, call finish now."
+        "to match the paper: do not tune the experiment toward the paper's numbers. A value at "
+        "chance level or the same for every input means the script is broken: fix it. "
+        "Otherwise, if every claim's value is in metrics.json, call finish now."
     ]
 
 
