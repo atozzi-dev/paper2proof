@@ -152,8 +152,9 @@ algorithm is in [`docs/specs/verdict-engine.md`](specs/verdict-engine.md). In sh
 - **Units:** the Coder declares whether the metric is a fraction, a percent or raw. The
   conversion is deterministic, printed as a "Scale:" line and recorded in `verdict.json`.
 
-The Judge model writes the explanation from the verdict. An explanation that names a different
-verdict is discarded and replaced by a template. The UI always shows a negative result as
+The Judge model writes the explanation from the verdict and a code-written Facts block (what
+each number means, its sign, its unit and which side it favours), and quotes numbers only from
+it. An explanation that names a different verdict is discarded and replaced by a template. The UI always shows a negative result as
 **"Not reproduced under our conditions"**, with the conditions next to it.
 
 ## 6. Containers
