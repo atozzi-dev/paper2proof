@@ -24,7 +24,12 @@ from app.orchestrator.budget import SpendKind
 from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import EXEC_PLATFORM, EXEC_PRESET, estimate_plan_cost
 from app.orchestrator.fsm import StepResult
-from app.orchestrator.steps.common import output_of
+from app.orchestrator.steps.common import (
+    PAPER_EXCERPT_CHARS,
+    ingested_paper,
+    output_of,
+    paper_excerpt,
+)
 from app.storage.artifacts import ArtifactStore
 
 MIN_SEEDS = 3
@@ -131,6 +136,7 @@ class PlanningStep:
         )
         limits = ctx.limits.per_run
         prompt = load_prompt("planner_experiment_plan")
+        paper = await ingested_paper(ctx, self._artifacts)
         budget = json.dumps({"experiment_minutes": limits.gpu_minutes, "min_seeds": MIN_SEEDS})
         user = prompt.render(
             hardware=self._hardware,
@@ -143,6 +149,13 @@ class PlanningStep:
             discovery=wrap_untrusted(
                 discovery.model_dump_json(indent=1), source="discovery", max_chars=10_000
             ),
+            paper=wrap_untrusted(
+                await ctx.run_cpu(paper_excerpt, paper, PAPER_EXCERPT_CHARS),
+                source=f"arxiv:{paper.arxiv_id}",
+                max_chars=PAPER_EXCERPT_CHARS,
+            )
+            if paper is not None
+            else "(not available)",
         )
         messages = [
             Message(role="system", content=UNTRUSTED_NOTICE),
