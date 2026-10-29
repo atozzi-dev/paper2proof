@@ -62,7 +62,7 @@ class VerdictConfig(BaseModel):
     rho: float = 0.5
     min_seeds: int = 3
     confidence: float = 0.95
-    implausible_ratio: float | None = 3.0  # k, finite and > 1; None disables the rule
+    implausible_ratio: float | None = 2.0  # k, finite and > 1; None disables the rule
 
 class Verdict(BaseModel):
     kind: VerdictKind
@@ -228,7 +228,7 @@ Table-driven examples, all with `cfg` defaults unless stated:
 | 14 | ABSOLUTE v=94.1 (percent) | FULL [0.940, 0.941, 0.939] (a fraction: 100 times off) | INCONCLUSIVE/IMPLAUSIBLE_GAP |
 | 15 | ABSOLUTE v=0.9 | FULL [0.01, 0.02, 0.8] (mean 0.277, wide CI) | INCONCLUSIVE/IMPLAUSIBLE_GAP |
 | 16 | ABSOLUTE v=0.990 (a falsified claim) | FULL [0.894, 0.895, 0.896] (ratio 0.90) | NOT_REPRODUCED |
-| 17 | ABSOLUTE v=3.0 | FULL [1.0, 1.0, 1.0] (exactly k = 3 times: inside the band) | NOT_REPRODUCED |
+| 17 | ABSOLUTE v=2.0 | FULL [1.0, 1.0, 1.0] (exactly k = 2 times: inside the band) | NOT_REPRODUCED |
 | 18 | ABSOLUTE v=0.5 | FULL [-2.0, -2.1, -1.9] (opposite signs) | NOT_REPRODUCED |
 
 Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`):
