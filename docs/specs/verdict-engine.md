@@ -33,6 +33,7 @@ class ReasonCode(StrEnum):
     HIGH_VARIANCE = "HIGH_VARIANCE"
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
+    IMPLAUSIBLE_GAP = "IMPLAUSIBLE_GAP"  # ABSOLUTE, more than implausible_ratio times off
     NOT_MEASURED = "NOT_MEASURED"  # set by VERDICT, never by decide()
 
 class Claim(BaseModel):
@@ -61,6 +62,7 @@ class VerdictConfig(BaseModel):
     rho: float = 0.5
     min_seeds: int = 3
     confidence: float = 0.95
+    implausible_ratio: float = 3.0      # k, > 1; .inf disables the implausible-gap rule
 
 class Verdict(BaseModel):
     kind: VerdictKind
@@ -74,6 +76,8 @@ class Verdict(BaseModel):
 ```
 
 Config is loaded from `config/verdict.yaml`; its SHA-256 is stored with every verdict.
+Every field has a default, so a config written before a field existed still loads; the
+repository file states every field, so the hashed bytes pin the whole rule.
 
 ## Algorithm
 
@@ -101,9 +105,45 @@ v = reported_value
 w = max(2 * (reported_std or 0), cfg.tol_rel * abs(v), cfg.tol_abs.get(metric, cfg.default_tol_abs))
 if scale == REDUCED:            return INCONCLUSIVE(REDUCED_SCALE_ABSOLUTE)   # numbers still returned
 if mean >= v - w:               return REPRODUCED
+if implausible_gap(mean, v):    return INCONCLUSIVE(IMPLAUSIBLE_GAP)          # numbers still returned
 if ci_high < v - w:             return NOT_REPRODUCED
 return INCONCLUSIVE(HIGH_VARIANCE)
 ```
+
+#### Implausible gap
+
+The experiment is written by a model, and a broken one must not accuse the paper. With
+`k = cfg.implausible_ratio`:
+
+```
+implausible_gap(mean, v) = mean != 0 and v != 0 and sign(mean) == sign(v)
+                           and (|mean| > k * |v| or |v| > k * |mean|)
+```
+
+i.e. the ratio `mean / v` is outside `[1/k, k]` (computed by multiplication: no division,
+no overflow). A genuinely wrong claim is off by a few to tens of percent (the canary set's
+falsified claims: 0.990 vs 0.895, 0.920 vs 0.846, RMSE 1.300 vs 1.429, 0.900 vs 0.80, 0.910
+vs 0.83, ratios 0.89 to 1.10); a gap of several times is broken training (a run at chance
+level) or a unit mismatch (a count against a rate, a fraction against a percent the scale
+alignment could not fix). Such a gap is evidence about the experiment, not about the claim.
+
+- **Only NOT_REPRODUCED and HIGH_VARIANCE are replaced.** For HIGH_VARIANCE the gap is the
+  more useful reason (more seeds would not fix a broken experiment), and the reason then
+  depends on the mean only, so spreading the values never changes it (P2).
+- **REPRODUCED is never replaced.** On the side worse than the paper, REPRODUCED and the
+  gap coincide only when `w >= (1 - 1/k) * |v|`: never through `tol_rel` (2% against 67%
+  for k = 3), only when the paper's own std (x2) or the metric's `tol_abs` is that wide, and
+  then the configured tolerance accepts the gap by definition. On the better side the window
+  is one-sided, so a mean k times better than the paper is REPRODUCED: P3 (better is never
+  worse) keeps it so. A broken experiment that looks far better than the paper is not
+  caught by this rule.
+- **REDUCED scale** keeps REDUCED_SCALE_ABSOLUTE: it is already inconclusive and says why.
+- **RELATIVE claims are unchanged**: a planted reversal legitimately differs from the
+  claimed delta by several times (and usually has the opposite sign).
+- **Opposite signs, or a zero mean or paper value**: no ratio, no change.
+
+Known limit: a mismatch whose numbers happen to be close is not caught. A claim of 74 test
+errors (a count) measured as an 89% error rate has a ratio of 1.2 and stays NOT_REPRODUCED.
 
 ### RELATIVE
 
@@ -185,6 +225,11 @@ Table-driven examples, all with `cfg` defaults unless stated:
 | 11 | any | 2 seeds | INCONCLUSIVE/INSUFFICIENT_SEEDS |
 | 12 | ABSOLUTE v=None | any | INCONCLUSIVE/UNDERSPECIFIED_CLAIM |
 | 13 | any | contains NaN | INCONCLUSIVE/RUNTIME_ERROR |
+| 14 | ABSOLUTE v=94.1 (percent) | FULL [0.940, 0.941, 0.939] (a fraction: 100 times off) | INCONCLUSIVE/IMPLAUSIBLE_GAP |
+| 15 | ABSOLUTE v=0.9 | FULL [0.01, 0.02, 0.8] (mean 0.277, wide CI) | INCONCLUSIVE/IMPLAUSIBLE_GAP |
+| 16 | ABSOLUTE v=0.990 (a falsified claim) | FULL [0.894, 0.895, 0.896] (ratio 0.90) | NOT_REPRODUCED |
+| 17 | ABSOLUTE v=3.0 | FULL [1.0, 1.0, 1.0] (exactly k = 3 times: inside the band) | NOT_REPRODUCED |
+| 18 | ABSOLUTE v=0.5 | FULL [-2.0, -2.1, -1.9] (opposite signs) | NOT_REPRODUCED |
 
 Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`):
 
@@ -194,3 +239,10 @@ Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`)
 - **P4 (direction symmetry):** negating every measurement, every baseline measurement, `reported_value` and `claimed_delta`, and flipping `higher_is_better`, yields the same `kind`.
 - **P5 (purity):** two calls with equal inputs return equal outputs.
 - **P6:** `reason is not None` if and only if `kind == INCONCLUSIVE`.
+- **P7 (no accusation from an implausible gap):** for any ABSOLUTE claim whose measured
+  mean and `reported_value` have the same sign, are both non-zero and are more than
+  `implausible_ratio` times apart (either way), at any scale, `kind != NOT_REPRODUCED`.
+- **P8 (the gap rule only replaces an accusation or high variance):** compared with
+  `implausible_ratio = inf` (the rule disabled), a verdict either is unchanged or was
+  NOT_REPRODUCED or INCONCLUSIVE/HIGH_VARIANCE and is now INCONCLUSIVE/IMPLAUSIBLE_GAP, for
+  an ABSOLUTE claim at full scale, with the same numbers.
