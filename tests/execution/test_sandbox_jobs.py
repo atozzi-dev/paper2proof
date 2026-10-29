@@ -1,6 +1,7 @@
 """SandboxesJobBackend against a respx mock of the Sandboxes REST API (docs/specs/hybrid-deploy.md,
 "Experiments in Sandboxes"; request shapes from the API reference, to be confirmed by S14)."""
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -194,6 +195,8 @@ class Api:
         self.stored_despite_error = False  # a 502 from the gateway after the file was stored
         self.posts = 0
         self.upload_drops = 0  # uploads whose connection is dropped
+        self.lookup_errors: list[int] = []  # HTTP status the next GET /v1/files answers
+        self.lookup_fails_after_an_error = False  # the gateway outage hits the lookup too
 
     def install(self, router: respx.Router) -> None:
         router.get(url__regex=rf"{FILES}/[0-9a-f]{{64}}$").mock(side_effect=self._file)
@@ -207,6 +210,8 @@ class Api:
         return f"{sha[:8]}-0000-0000-0000-{sha[8:20]}"
 
     def _file(self, request: httpx.Request) -> httpx.Response:
+        if self.lookup_errors:
+            return httpx.Response(self.lookup_errors.pop(0), text="<html>Bad Gateway</html>")
         sha = request.url.path.rsplit("/", 1)[-1]
         if sha not in self.files:
             return httpx.Response(404, json={"error": "not found"})
@@ -227,6 +232,8 @@ class Api:
         if self.upload_errors:
             if self.stored_despite_error:
                 self.files[sha] = data
+            if self.lookup_fails_after_an_error:
+                self.lookup_errors = [502]  # the lookup right after this failed upload
             return httpx.Response(self.upload_errors.pop(0), text="<html>Bad Gateway</html>")
         self.files[sha] = data
         self.uploads += 1
@@ -916,3 +923,50 @@ async def test_a_dropped_upload_connection_is_retried(
     api.upload_drops = 1
     await _backend(tmp_path, local, storage).submit(_spec())
     assert len(api.spawns) == 1
+
+
+async def test_a_lookup_the_gateway_fails_between_attempts_does_not_end_the_retries(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    backend = _backend(tmp_path, local, storage)
+    api.upload_errors = [502]
+    api.lookup_fails_after_an_error = True
+    await backend.submit(_spec())
+    assert len(api.spawns) == 1
+
+
+async def test_an_input_that_shrinks_during_its_upload_is_changed_not_retried(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.execution import sandbox_jobs
+
+    hash_fd = sandbox_jobs._hash_fd
+
+    def hash_then_truncate(fd: int, size: int) -> str:
+        sha = hash_fd(fd, size)
+        for path in local.rglob("*"):  # rewritten between the hash and the send
+            if path.is_file() and path.stat().st_size:
+                os.truncate(path, path.stat().st_size // 2)
+        return sha
+
+    monkeypatch.setattr(sandbox_jobs, "_hash_fd", hash_then_truncate)
+    with pytest.raises(JobBackendError, match="changed during its upload"):
+        await _backend(tmp_path, local, storage).submit(_spec())
+    assert api.posts <= 1 and api.spawns == []
+
+
+async def test_the_retries_have_a_total_deadline(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upload time counts against the job's queue cap and watchdog: the retries are bounded."""
+    from app.execution import sandbox_jobs
+    from app.execution.nebius_backend import InputUploadError
+
+    monkeypatch.setattr(sandbox_jobs, "UPLOAD_TOTAL_S", 0.05)
+    api.upload_errors = [502] * 10
+    backend = _backend(tmp_path, local, storage)
+    backend._sleep = asyncio.sleep  # a real wait, longer than the deadline
+    monkeypatch.setattr(sandbox_jobs, "UPLOAD_BACKOFF_S", (1.0, 1.0))
+    with pytest.raises(InputUploadError, match="within"):
+        await backend.submit(_spec())
+    assert api.spawns == []

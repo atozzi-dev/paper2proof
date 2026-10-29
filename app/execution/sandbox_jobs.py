@@ -43,7 +43,7 @@ from app.execution.backend import (
 )
 from app.execution.hybrid import open_no_follow
 from app.execution.naming import bucket_name, run_slug
-from app.execution.nebius_backend import JobBackendError
+from app.execution.nebius_backend import InputUploadError, JobBackendError
 from app.execution.run_storage import RunStorage
 from app.execution.s3 import check_run_key
 from app.execution.sandboxes import SANDBOXES_API
@@ -51,7 +51,7 @@ from app.execution.sandboxes import SANDBOXES_API
 log = logging.getLogger(__name__)
 
 
-class _Transient(JobBackendError):
+class _Transient(InputUploadError):
     """An upload the gateway or the service failed (429, 5xx, transport): worth a resend."""
 
 
@@ -73,6 +73,8 @@ LIST_PAGE = 1000
 MAX_PAGES = 10  # a lookup past this, or a page seen twice, is an outage
 CHUNK = 1 << 20
 UPLOAD_BACKOFF_S = (5.0, 15.0)  # between the attempts at an upload (3 in all)
+UPLOAD_TOTAL_S = 300.0  # all attempts: the upload counts against the job's queue cap
+_DROPPED = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 _TRANSIENT = {429, 500, 502, 503, 504}  # the gateway or the service, not the request
 LOOKBACK = timedelta(minutes=5)  # a lost spawn is looked for from its intent minus this
 STALE_INTENT = timedelta(minutes=10)  # an intent with no operation after this never spawned
@@ -220,6 +222,17 @@ def _text(stream: Any) -> str:
     return value
 
 
+def _json_dict(response: httpx.Response, what: str) -> dict[str, Any]:
+    """The answer's JSON object; a malformed one is an error, never an internal crash."""
+    try:
+        body = response.json()
+    except ValueError:
+        raise JobBackendError(f"{what}: the answer is not JSON") from None
+    if not isinstance(body, dict):
+        raise JobBackendError(f"{what}: the answer is not a JSON object")
+    return body
+
+
 def _hash_fd(fd: int, size: int) -> str:
     """sha256 of the first `size` bytes of `fd` from its start (blocking: call it in a thread)."""
     os.lseek(fd, 0, os.SEEK_SET)
@@ -307,13 +320,17 @@ class SandboxesJobBackend:
     async def _known(self, sha: str) -> str | None:
         try:
             response = await self._request("GET", f"/v1/files/{sha}")
+        except _DROPPED as err:
+            raise _Transient(f"Sandboxes files: {type(err).__name__}") from None
         except httpx.HTTPError as err:
             raise JobBackendError(f"Sandboxes files: {type(err).__name__}") from None
         if response.status_code == 404:
             return None
+        if response.status_code in _TRANSIENT:
+            raise _Transient(f"Sandboxes files: HTTP {response.status_code}")
         if response.status_code != 200:
             raise JobBackendError(f"Sandboxes files: HTTP {response.status_code}")
-        uuid = (response.json() or {}).get("uuid")
+        uuid = _json_dict(response, "Sandboxes files").get("uuid")
         return str(uuid) if uuid else None
 
     async def _send(
@@ -324,13 +341,15 @@ class SandboxesJobBackend:
             headers["Content-Length"] = str(size)
         try:
             response = await self._request("POST", "/v1/files", content=content, headers=headers)
-        except httpx.HTTPError as err:
+        except _DROPPED as err:
             raise _Transient(f"Sandboxes upload: {type(err).__name__}") from None
+        except httpx.HTTPError as err:
+            raise JobBackendError(f"Sandboxes upload: {type(err).__name__}") from None
         if response.status_code in _TRANSIENT:
             raise _Transient(f"Sandboxes upload: HTTP {response.status_code}")
         if response.status_code not in (200, 201):
             raise JobBackendError(f"Sandboxes upload: HTTP {response.status_code}")
-        body = response.json() or {}
+        body = _json_dict(response, "Sandboxes upload")
         if body.get("sha256") != sha or not body.get("uuid"):
             raise JobBackendError("Sandboxes stored another sha256 than the one sent")
         return str(body["uuid"])
@@ -339,16 +358,25 @@ class SandboxesJobBackend:
         """An upload, sent again after a transient failure (production, 2026-10-29: a 502 on a
         large overlay). Content-addressed, so a resend is safe, and a 502 can hide a file that
         was stored: it is looked up before each new attempt."""
-        for wait in UPLOAD_BACKOFF_S:
-            try:
+        try:
+            async with asyncio.timeout(UPLOAD_TOTAL_S):
+                for wait in UPLOAD_BACKOFF_S:
+                    try:
+                        return await send()
+                    except _Transient:
+                        log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+                    await self._sleep(wait)
+                    try:
+                        found = await self._known(sha)
+                    except JobBackendError:  # the same outage: send again, it is safe
+                        found = None
+                    if found:
+                        return found
                 return await send()
-            except _Transient:
-                log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
-            await self._sleep(wait)
-            found = await self._known(sha)
-            if found:
-                return found
-        return await send()
+        except TimeoutError:
+            raise InputUploadError(
+                f"Sandboxes upload: no success within {UPLOAD_TOTAL_S:g} s"
+            ) from None
 
     async def _upload_bytes(self, data: bytes) -> str:
         sha = await asyncio.to_thread(lambda: hashlib.sha256(data).hexdigest())
@@ -374,8 +402,8 @@ class SandboxesJobBackend:
                 left = info.st_size
                 while left > 0:
                     chunk = await asyncio.to_thread(os.read, fd, min(CHUNK, left))
-                    if not chunk:
-                        break
+                    if not chunk:  # shorter than hashed: never a transient failure
+                        raise JobBackendError("a run input changed during its upload")
                     sent.update(chunk)
                     left -= len(chunk)
                     yield chunk

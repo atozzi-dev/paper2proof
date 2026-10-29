@@ -353,10 +353,12 @@ async def test_the_smoke_platform_comes_from_the_config_and_is_priced_as_such(
 
 
 class BrokenBackend(FakeJobBackend):
-    async def submit(self, spec: JobSpec) -> JobHandle:
-        from app.execution.nebius_backend import JobBackendError
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
 
-        raise JobBackendError("Sandboxes upload: HTTP 502")
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        raise self.error
 
 
 async def test_a_backend_that_cannot_start_the_job_makes_the_executor_unavailable(
@@ -365,8 +367,32 @@ async def test_a_backend_that_cannot_start_the_job_makes_the_executor_unavailabl
     """The Coder hears the executor is unavailable and may try again; the run never ends with
     an internal error for an outage of the job backend."""
     storage = FakeRunStorage()
-    smoke, ctx = await _executor(store, BrokenBackend(), storage)
+    from app.execution.nebius_backend import InputUploadError
+
+    error = InputUploadError("Sandboxes upload: HTTP 502")
+    smoke, ctx = await _executor(store, BrokenBackend(error), storage)
     env = await smoke.prepare(RUN, {"train.py": b"a"})
     with pytest.raises(SmokeUnavailable, match="HTTP 502"):
         await smoke.run(env, ARGV, {}, 60)
     assert not ctx.budget._inflight
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Sandboxes spawn unconfirmed: HTTP 502",  # the instance may exist
+        "Sandboxes stored another sha256 than the one sent",  # integrity: never retried
+        "a run input changed during its upload",
+    ],
+)
+async def test_a_backend_error_after_the_inputs_still_fails_the_step(
+    store: Store, message: str
+) -> None:
+    """A job that may exist is never retried under another name (it would run outside the
+    ledger), and an integrity error is never hidden as an outage."""
+    from app.execution.nebius_backend import JobBackendError
+
+    smoke, _ = await _executor(store, BrokenBackend(JobBackendError(message)), FakeRunStorage())
+    env = await smoke.prepare(RUN, {"train.py": b"a"})
+    with pytest.raises(JobBackendError, match=message[:20]):
+        await smoke.run(env, ARGV, {}, 60)

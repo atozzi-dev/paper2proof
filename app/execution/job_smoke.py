@@ -22,7 +22,7 @@ from app.domain.contracts import ArchiveDigests
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
-from app.execution.nebius_backend import JobBackendError
+from app.execution.nebius_backend import InputUploadError
 from app.execution.run_storage import RunStorage
 from app.execution.smoke import (
     SmokeContractError,
@@ -169,7 +169,8 @@ class JobSmokeExecutor:
                 queue_cap_s=SMOKE_QUEUE_CAP_S,
                 gpu=self._config.smoke_platform.startswith("gpu-"),  # GPU minutes (invariant 7)
             )
-        except JobBackendError as err:  # an outage of the job backend, not the Coder's script
+        except InputUploadError as err:  # before any job existed: safe to try again; once a
+            # job may exist (an unconfirmed spawn) the step fails and the reaper finds it
             raise SmokeUnavailable(f"the sandbox could not start the smoke job ({err})") from None
         if outcome.run_cancelled:
             raise SmokeUnavailable("the run was cancelled")

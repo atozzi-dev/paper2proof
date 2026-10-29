@@ -83,6 +83,11 @@ class JobBackendError(RuntimeError):
     """A Nebius request failed in a way the orchestrator can't recover by retrying."""
 
 
+class InputUploadError(JobBackendError):
+    """A job's input could not be sent, before any job was created: trying again later is
+    safe. Anything raised once a job may exist stays a plain JobBackendError."""
+
+
 class GatewayUnavailable(JobBackendError):
     """The egress gateway VM could not be brought to RUNNING."""
 
