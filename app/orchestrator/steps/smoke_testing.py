@@ -527,19 +527,29 @@ class SmokeTestingStep:
         claims: list[tuple[Claim, ClaimType]],
         args: Finish,
     ) -> StepResult:
-        if not args.measures:  # nothing can be tested faithfully: no experiment at all
+        if not args.measures:  # the Coder says nothing can be tested faithfully here
             _check_measures(claims, args, {}, state.difference_warned)  # each claim, once
-            for u in args.unmeasured:
+            reasons = [
+                {"claim_id": u.claim_id, "reason": printable(u.reason).strip()}
+                for u in args.unmeasured
+            ]
+            await self._put(  # kept for the audit: the Coder alone ended the run
+                f"runs/{ctx.run_id}/untestable.json",
+                {"unmeasured": reasons, "smoke_runs": state.smoke_runs},
+            )
+            for r in reasons:
                 await ctx.emit(
                     EventType.WARNING,
                     {
                         "code": "CLAIM_NOT_MEASURED",
-                        "message": f"{u.claim_id}: {printable(u.reason).strip()}",
+                        "message": f"{r['claim_id']} was not measured (the Coder's reason, "
+                        f"model text: {r['reason']})",
                     },
                 )
             raise P2PError(
                 ErrorCode.NO_CLAIMS,
-                "no claim can be tested faithfully here: the method or its data cannot run",
+                "the Coder reported that no claim can be tested faithfully here (its reasons, "
+                "model text, are in the warnings)",
             )
         script = args.entrypoint.removeprefix("workspace/")
         if script not in ws.files:

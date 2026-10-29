@@ -1,6 +1,7 @@
 """What GitHub reports as a repository's size: read before a fetch job is billed for cloning a
 repository the provisioner would refuse. Any doubt is "unknown", never a reason to skip."""
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -126,3 +127,41 @@ async def test_the_request_has_a_short_timeout() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         assert await repo_size_kib(REPO, http) == 1
     assert seen and all(v == github.TIMEOUT_S for v in seen.values())
+
+
+@respx.mock
+async def test_a_redirect_off_the_api_is_not_followed() -> None:
+    elsewhere = "https://example.com/repos/catboost/catboost"
+    respx.get(API).mock(return_value=httpx.Response(301, headers={"location": elsewhere}))
+    other = respx.get(elsewhere).mock(return_value=httpx.Response(200, json={"size": 1}))
+    assert await repo_size_kib(REPO) is None
+    assert not other.called
+
+
+@respx.mock
+async def test_a_second_move_is_not_followed() -> None:
+    first, second = f"{GITHUB_API}/repositories/42", f"{GITHUB_API}/repositories/43"
+    respx.get(API).mock(return_value=httpx.Response(301, headers={"location": first}))
+    respx.get(first).mock(return_value=httpx.Response(301, headers={"location": second}))
+    last = respx.get(second).mock(return_value=httpx.Response(200, json={"size": 1}))
+    assert await repo_size_kib(REPO) is None
+    assert not last.called
+
+
+@respx.mock
+async def test_an_oversized_answer_is_an_unknown_size() -> None:
+    padding = "x" * (github.MAX_BODY_BYTES + 1)
+    respx.get(API).mock(return_value=httpx.Response(200, json={"size": 7, "pad": padding}))
+    assert await repo_size_kib(REPO) is None
+
+
+@respx.mock
+async def test_a_slow_answer_is_cut_by_a_total_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(github, "TIMEOUT_S", 0.05)
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(2)
+        return httpx.Response(200, json={"size": 1})
+
+    respx.get(API).mock(side_effect=slow)
+    assert await repo_size_kib(REPO) is None

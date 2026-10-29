@@ -467,7 +467,34 @@ async def test_no_claim_testable_faithfully_ends_the_run_as_untestable(
     with pytest.raises(P2PError) as err:
         await step.run(ctx)
     assert err.value.code is ErrorCode.NO_CLAIMS
-    assert "faithfully" in str(err.value)
+    assert "the Coder reported" in str(err.value) and "faithfully" in str(err.value)
+
+
+async def test_an_untestable_finish_is_checked_audited_and_labelled_as_model_text(
+    store: Store, tmp_path: Path
+) -> None:
+    """The Coder alone ends such a run: its claims are checked like any finish, its reasons
+    are kept for the audit and shown as model text, never as the code's own finding."""
+    from app.domain.events import WarningPayload
+
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "finish_untestable_audited", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage()
+    )
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.NO_CLAIMS
+    first = _tool_results(models)[-1]
+    assert first.startswith("ERROR:") and "c9" in first  # refused like any finish
+    warnings = [
+        p for e in await store.events_after(RUN, 0) if isinstance(p := e.payload, WarningPayload)
+    ]
+    assert len(warnings) == 1  # none from the refused call
+    assert "model text" in warnings[0].message and "native library missing" in warnings[0].message
+    assert "\u001b" not in warnings[0].message and "\u202e" not in warnings[0].message
+    audit = artifacts.get_json(f"runs/{RUN}/untestable.json")
+    assert audit["unmeasured"] == [{"claim_id": "c1", "reason": "[31mnative library missing"}]
+    assert audit["smoke_runs"] == 1
 
 
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:

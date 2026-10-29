@@ -386,3 +386,23 @@ async def test_the_budget_running_out_on_the_retry_fails_the_step(
     models = _RetryOverBudget(LLM_FIXTURES, case="made_up_dataset")
     with pytest.raises(BudgetExceeded):  # never swallowed like an unusable answer
         await _plan(store, tmp_path, "made_up_dataset", dataset_check=_on_hf, models=models)
+
+
+async def test_planned_claims_take_the_type_the_paper_gives(store: Store, tmp_path: Path) -> None:
+    """A plan stored before correct_plan kept types (or any path around it) cannot change the
+    type the verdict judges a claim by."""
+    from app.orchestrator.steps.common import planned_claims
+    from tests.steps.conftest import ctx_at
+
+    ctx = await ctx_at(store, StepName.PLANNING, previous=[(StepName.INGESTING, "i")])
+    await store.save_claims(RUN, [_claim("c2", ClaimType.ABSOLUTE)], selected={"c2"})
+    plan = Plan(
+        mode=PlanMode.FROM_SCRATCH,
+        claim_ids=["c2"],
+        claim_types={"c2": ClaimType.RELATIVE},
+        scale=Scale.REDUCED,
+        seeds=[0, 1, 2],
+        gpu_minutes_est=10,
+    )
+    [(claim, kind)] = await planned_claims(ctx, plan)
+    assert claim.id == "c2" and kind is ClaimType.ABSOLUTE

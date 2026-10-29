@@ -4,6 +4,7 @@ ranked and the top 3 (or the hinted ones) selected."""
 
 import asyncio
 import base64
+import hashlib
 import re
 
 from pydantic import BaseModel, Field
@@ -286,9 +287,11 @@ class ExtractingClaimsStep:
         for claim in claims:
             await ctx.emit(EventType.CLAIM_EXTRACTED, {"claim": claim.model_dump(mode="json")})
         out = f"runs/{ctx.run_id}/claims.json"
-        payload = {
+        payload = {  # the hint shapes what the Reader extracts: kept with the claims
             "claims": [c.model_dump(mode="json") for c in claims],
             "selected": sorted(chosen),
+            "claim_hint": hint or None,
+            "claim_hint_sha256": hashlib.sha256(hint.encode("utf-8")).hexdigest() if hint else None,
         }
         await asyncio.to_thread(self._artifacts.put_json, out, payload)
         return StepResult(next=StepName.DISCOVERING, output_ref=out)
