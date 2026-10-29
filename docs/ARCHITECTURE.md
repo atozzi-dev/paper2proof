@@ -1,7 +1,15 @@
 # Paper2Proof architecture
 
-This document describes how Paper2Proof is built today: the components, the trust boundaries,
-and the reasons behind the main decisions. The normative contracts live in
+This document describes how Paper2Proof is built: the components, the trust boundaries, and
+the reasons behind the main decisions.
+
+> **The live service runs the hybrid deploy** ([specs/hybrid-deploy.md](specs/hybrid-deploy.md)).
+> Our hackathon tenant never received the CPU quota the design below needs (the Serverless
+> endpoint and the egress gateway), and L40S capacity was not available when we tested isolated
+> GPU jobs. So the control plane runs on a host of ours behind TLS, provisioning runs in a
+> locked-down container there, and the Coder's smoke runs and the experiment run in Nebius Token
+> Factory Sandboxes with no network, on CPU. Buckets, the registry and the signing key stay on
+> Nebius AI Cloud. The design described here is implemented and can be switched back on. The normative contracts live in
 [`docs/specs/`](specs/), and the platform facts we verified on Nebius live in
 [`docs/spikes/RESULTS.md`](spikes/RESULTS.md). When they disagree with this page, they win.
 

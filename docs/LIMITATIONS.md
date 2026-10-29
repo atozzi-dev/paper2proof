@@ -10,7 +10,7 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
   confidence interval to fall outside the tolerance band: the larger of 2% of the claimed
   value, the claim's own reported std (×2) and a per-metric absolute tolerance
   (`config/verdict.yaml`). A run with fewer than 3 usable seeds is always **Inconclusive**.
-- **Reduced scale.** Most papers train longer than a 30-minute GPU budget allows, so most runs
+- **Reduced scale.** Most papers train longer than a 30-minute budget allows, so most runs
   are at reduced scale. A relative claim ("A beats B by 1.7 points") can then be
   *Reproduced at reduced scale*. An absolute number ("94.1% top-1") cannot: it is
   **Inconclusive** (`REDUCED_SCALE_ABSOLUTE`), and the measured values are shown for reference.
@@ -42,11 +42,14 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
 - Input is an **arXiv ID only**: no URLs, no PDF uploads, no other preprint servers.
 - **Datasets** come from Hugging Face, with a size cap. Packages pass an allowlist policy. A plan
   that needs anything else is rejected or runs without it, and says so.
-- **One GPU** (NVIDIA L40S) per run, about 30 GPU-minutes, $1 of inference: large-scale training
-  and LLM pre-training papers are out of reach except at reduced scale.
-- **Capacity.** With no GPU available (the platform refuses, or the job is still queued after 20
-  minutes) the run ends **Inconclusive (capacity)**. A used-up project quota ends the run with a
-  message naming the quota.
+- **CPU only in the live service.** Experiments run in a Nebius Token Factory sandbox with
+  4 vCPUs and about 4 GB of memory, for at most 30 minutes, with $1 of inference. Anything that
+  needs a GPU (deep-network training, LLM papers) runs only at a much reduced scale, or ends
+  Inconclusive. The GPU path (one NVIDIA L40S per run) is implemented but not enabled: see
+  [specs/hybrid-deploy.md](specs/hybrid-deploy.md). Every verdict lists the hardware it ran on.
+- **Capacity.** With no capacity available for the experiment (the platform refuses, or the job
+  is still queued after 20 minutes) the run ends **Inconclusive (capacity)**. A used-up project
+  quota ends the run with a message naming the quota.
 
 ## Security boundaries
 
