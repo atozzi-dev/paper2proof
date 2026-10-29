@@ -24,6 +24,22 @@ from eval.results import RunInfo
 RUN_ID = re.compile(RUN_ID_PATTERN)
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")  # invariant 11
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})  # plain http is allowed only here
+INVITE_ENV = "P2P_EVAL_INVITE"  # an invite code with a daily quota large enough for the set
+# POST /api/session: 401 a wrong invite code, 429 its limiter (after a few wrong ones)
+INVITE_REFUSED = frozenset({401, 429})
+
+
+class InviteRefused(Exception):
+    """The deployment refused the invite code: every case of the set would fail the same way
+    (and the limiter would answer 429 after a few), so the set stops instead of recording them.
+    The message never holds the code, nor anything the server sent back."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        later = " (and wait a minute: too many attempts)" if status_code == 429 else ""
+        super().__init__(
+            f"the invite code was refused (HTTP {status_code}): check {INVITE_ENV}{later}"
+        )
 
 
 class PipelineClaim(BaseModel):
@@ -77,6 +93,8 @@ class HttpPipeline:
         response = await self._http.post(
             "/api/session", json={"invite_code": self._invite.get_secret_value()}
         )
+        if response.status_code in INVITE_REFUSED:
+            raise InviteRefused(response.status_code)
         response.raise_for_status()
         url = self._http.base_url
         if url.scheme == "http" and url.host in _LOCAL_HOSTS:
@@ -154,7 +172,6 @@ class HttpPipeline:
 
 # --- CLI plumbing shared by run_set_a and run_set_b ------------------------------------------
 
-INVITE_ENV = "P2P_EVAL_INVITE"  # an invite code with a daily quota large enough for the set
 _LOCAL = re.compile(r"^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/?$")
 
 
@@ -196,9 +213,12 @@ async def attempt(
 ) -> tuple[RunInfo, PipelineRun | None]:
     """Run one paper; a harness failure (network, timeout) is recorded, not raised, so one bad
     paper never loses the rest of the set. Only the exception type is kept, plus the status
-    code of an HTTP error (never a message or a body: they may echo the invite)."""
+    code of an HTTP error (never a message or a body: they may echo the invite). A refused
+    invite code is raised: it is no paper's failure, and every other case would repeat it."""
     try:
         run = await pipeline.run(arxiv_id, claim_hint=claim_hint)
+    except InviteRefused:
+        raise
     except Exception as err:
         error = type(err).__name__
         if isinstance(err, httpx.HTTPStatusError):

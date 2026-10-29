@@ -25,6 +25,7 @@ from app.domain.models import ReasonCode, VerdictKind
 from eval.pipeline import (
     ARXIV_ID,
     HttpPipeline,
+    InviteRefused,
     Pipeline,
     add_pipeline_args,
     attempt,
@@ -112,7 +113,11 @@ def main(argv: list[str] | None = None) -> int:
         async with httpx.AsyncClient(base_url=base_url, timeout=30) as http:
             return await run_set_b(HttpPipeline(http, invite, approve=args.approve), config)
 
-    result = asyncio.run(go())
+    try:
+        result = asyncio.run(go())
+    except InviteRefused as err:  # every case would fail: the last results file is kept
+        print(err, file=sys.stderr)
+        return 1
     write_result(args.out, result)
     print(f"wrote {args.out}: inconclusive rate {result.inconclusive_rate}")
     return 0

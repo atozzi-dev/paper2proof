@@ -23,6 +23,7 @@ from app.domain.models import Claim
 from eval.canaries import build
 from eval.pipeline import (
     HttpPipeline,
+    InviteRefused,
     Pipeline,
     PipelineRun,
     add_pipeline_args,
@@ -126,7 +127,11 @@ def main(argv: list[str] | None = None) -> int:
         async with httpx.AsyncClient(base_url=base_url, timeout=30) as http:
             return await run_set_a(HttpPipeline(http, invite, approve=args.approve), canaries)
 
-    result = asyncio.run(go())
+    try:
+        result = asyncio.run(go())
+    except InviteRefused as err:  # every case would fail: the last results file is kept
+        print(err, file=sys.stderr)
+        return 1
     write_result(args.out, result)
     score = result.verdicts
     print(

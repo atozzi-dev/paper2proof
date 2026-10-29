@@ -1,6 +1,9 @@
 """Set A (canaries) and set B (real papers) runners on a fake pipeline, and the HTTP pipeline."""
 
 import json
+import runpy
+import sys
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,7 @@ from eval.canaries import build
 from eval.pipeline import (
     INVITE_ENV,
     HttpPipeline,
+    InviteRefused,
     PipelineClaim,
     PipelineRun,
     attempt,
@@ -439,3 +443,132 @@ async def test_an_http_status_failure_records_the_status_code_too() -> None:
     info, run = await attempt(Refused(), "0000.00001")
     assert run is None and info.error == "HTTPStatusError 401"
     assert "invite" not in info.model_dump_json()
+
+
+# --- a refused invite code stops the whole set ------------------------------------------------
+# A wrong P2P_EVAL_INVITE (2026-10-29): every case got 401 from POST /api/session, then 429 from
+# the limiter, and the set "finished" in a second with accuracy 0 over the last results file.
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [401, 429])
+async def test_a_refused_invite_raises_without_the_code(status: int) -> None:
+    respx.post(f"{API}/api/session").mock(
+        return_value=httpx.Response(status, json={"detail": "invite-not-real"})
+    )
+    create = respx.post(f"{API}/api/runs")
+    async with httpx.AsyncClient(base_url=API) as http:
+        pipeline = HttpPipeline(http, SecretStr("invite-not-real"), approve=False)
+        with pytest.raises(InviteRefused) as err:
+            await pipeline.run("2410.01234")
+        with pytest.raises(InviteRefused):  # attempt never records it as one failed case
+            await attempt(pipeline, "2410.01234")
+    assert err.value.status_code == status
+    assert f"the invite code was refused (HTTP {status}): check {INVITE_ENV}" in str(err.value)
+    assert "invite-not-real" not in str(err.value)
+    assert not create.called
+
+
+@respx.mock
+@pytest.mark.parametrize(("which", "status"), [("a", 401), ("b", 401), ("a", 429), ("b", 429)])
+def test_a_refused_invite_stops_the_set_and_keeps_the_results(
+    which: str,
+    status: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(INVITE_ENV, "invite-not-real")
+    session = respx.post(f"{API}/api/session").mock(return_value=httpx.Response(status))
+    create = respx.post(f"{API}/api/runs")
+    out = tmp_path / "results.json"
+    out.write_text('{"previous": "results"}\n', encoding="utf-8")
+    main = run_set_a.main if which == "a" else run_set_b.main
+    code = main(["--api-url", API, "--confirm-spend", "--out", str(out)])
+    printed = capsys.readouterr()
+    assert code != 0
+    assert session.call_count == 1  # stopped at once, not once per case
+    assert not create.called
+    assert f"the invite code was refused (HTTP {status}): check {INVITE_ENV}" in printed.err
+    assert "invite-not-real" not in printed.err + printed.out
+    assert out.read_text(encoding="utf-8") == '{"previous": "results"}\n'
+
+
+@respx.mock
+async def test_other_session_failures_stay_per_case() -> None:
+    session = respx.post(f"{API}/api/session").mock(return_value=httpx.Response(503))
+    config = run_set_b.SetB.model_validate(
+        {"papers": [{"arxiv_id": "2410.00001"}, {"arxiv_id": "2410.00002"}]}
+    )
+    async with httpx.AsyncClient(base_url=API) as http:
+        pipeline = HttpPipeline(http, SecretStr("x"), approve=False, sleep=Sleeps())
+        result = await run_set_b.run_set_b(pipeline, config)
+    assert [c.run.error for c in result.cases] == ["HTTPStatusError 503"] * 2
+    assert result.failed_runs == 2
+    assert session.call_count == 2
+
+
+# --- the command lines --------------------------------------------------------------------------
+
+
+def _one_finished_run() -> respx.Route:
+    """The deployment answers one session and finished runs; returns the session route."""
+    session = respx.post(f"{API}/api/session").mock(return_value=httpx.Response(204))
+    respx.post(f"{API}/api/runs").mock(
+        return_value=httpx.Response(202, json={"run_id": RUN, "events_url": "x"})
+    )
+    respx.get(f"{API}/api/runs/{RUN}").mock(
+        return_value=httpx.Response(200, json=_view("COMPLETED", done=True))
+    )
+    respx.get(f"{API}/api/runs/{RUN}/events.json").mock(
+        return_value=httpx.Response(200, json=_events())
+    )
+    return session
+
+
+@respx.mock
+def test_a_finished_set_writes_its_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(INVITE_ENV, "invite-not-real")
+    session = _one_finished_run()
+    out_a, out_b = tmp_path / "a.json", tmp_path / "b.json"
+    set_b = tmp_path / "set_b.yaml"
+    set_b.write_text('papers:\n  - arxiv_id: "2410.00001"\n  - arxiv_id: "2410.00002"\n')
+    args = ["--api-url", API, "--confirm-spend"]
+    names = [CANARIES[0].name, CANARIES[1].name]
+    assert run_set_a.main([*args, "--out", str(out_a), "--only", *names]) == 0
+    assert run_set_b.main([*args, "--out", str(out_b), "--set", str(set_b)]) == 0
+    assert session.call_count == 2  # one session per set, kept for the following cases
+    assert len(json.loads(out_a.read_text(encoding="utf-8"))["cases"]) == 2
+    assert len(json.loads(out_b.read_text(encoding="utf-8"))["cases"]) == 2
+    printed = capsys.readouterr().out
+    assert f"wrote {out_a}: accuracy" in printed and f"wrote {out_b}: inconclusive" in printed
+
+
+@pytest.mark.parametrize("main", [run_set_a.main, run_set_b.main], ids=["a", "b"])
+def test_a_set_never_spends_without_confirmation(
+    main: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "results.json"
+    assert main(["--api-url", API, "--out", str(out)]) == 2
+    assert "--confirm-spend" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_an_empty_set_b_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    empty = tmp_path / "set_b.yaml"
+    empty.write_text("papers: []\n")
+    assert run_set_b.main(["--api-url", API, "--confirm-spend", "--set", str(empty)]) == 2
+    assert "lists no papers" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("module", ["a", "b"])
+def test_the_modules_run_as_scripts(module: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = f"{run_set_a.__name__[:-1]}{module}"
+    monkeypatch.setattr(sys, "argv", [name, "--api-url", API])  # no --confirm-spend: exits 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # already imported by this test module
+        with pytest.raises(SystemExit) as exit_:
+            runpy.run_module(name, run_name="__main__")
+    assert exit_.value.code == 2
