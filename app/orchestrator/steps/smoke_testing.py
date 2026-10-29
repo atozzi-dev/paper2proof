@@ -457,6 +457,13 @@ class SmokeTestingStep:
             raise ToolError(str(err)) from None
         if script not in ws.files:
             raise ToolError(f"workspace/{script} does not exist")
+        launched = await ctx.run_cpu(launches_processes, ws.files)
+        if launched is not None:  # refused before the sandbox: no smoke run is spent
+            raise ToolError(
+                f"workspace/{launched[0]}:{launched[1]} starts a process or runs another file: "
+                "run_smoke runs your script itself, so write the experiment as that script (no "
+                "subprocess, os.system, exec of a file or runpy)"
+            )
         state.smoke_runs += 1
         try:
             outcome = await executor.run(env, argv, ws.files, self._timeout)
@@ -691,6 +698,25 @@ _STAND_IN = re.compile(
     r"|\b(?:synthetic|random|fake)\b[^\n]{0,30}\bmimics?\b",
     re.IGNORECASE,
 )
+
+
+# Code that starts processes or runs other files (production, 2026-10-29: wrappers that
+# subprocess or exec the experiment under guessed paths, burning the Coder's smoke runs).
+# Matched on code only, not on what follows a "#".
+_LAUNCH = re.compile(
+    r"\bimport\s+subprocess\b|\bfrom\s+subprocess\b|\bsubprocess\.|\bos\.(?:system|popen|"
+    r"exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?)\s*\(|\bexec\s*\(\s*(?:open|compile)\b|"
+    r"\bimport\s+runpy\b|\brunpy\.|\bpty\.spawn\b"
+)
+
+
+def launches_processes(files: dict[str, bytes]) -> tuple[str, int] | None:
+    """The first line of the Coder's files that starts a process or runs another file."""
+    for path in sorted(files):
+        for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
+            if _LAUNCH.search(line.split("#", 1)[0]):
+                return path, number
+    return None
 
 
 def stand_in(files: dict[str, bytes]) -> tuple[str, int, str] | None:
