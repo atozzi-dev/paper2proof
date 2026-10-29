@@ -204,9 +204,17 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
    ```
    read -rs NEBIUS_API_KEY && export NEBIUS_API_KEY
    export TF_PROJECT_ID=<Token Factory project>
-   P2P_REGISTRY_PASSWORD="$(nebius iam get-access-token --profile <registry-viewer>)" \
-     uv run python scripts/sandbox_import.py --username iam --image <registry>/p2p-runner-cpu@sha256:…
+   docker buildx imagetools inspect <registry>/p2p-runner-cpu:<tag> | head -3   # Digest: the pushed one
+   P2P_REGISTRY_PASSWORD=<static key> \
+     uv run python scripts/sandbox_import.py --username iam --image <registry>/p2p-runner-cpu@sha256:… --pull-tag <tag>
    ```
+   The importer refuses an image referenced by digest (an OCI index answers `NAME_UNKNOWN`):
+   `--pull-tag` imports the tag the push created, and the UUID is recorded under the digest
+   once `imagetools inspect` has shown that the tag resolves to it. The registry password is a
+   7-day `CONTAINER_REGISTRY` static key of `sa-registry-pull`, a service account in a group
+   with `viewer` on the p2p-sandbox registry only (`nebius iam static-key issue
+   --account-service-account-id … --service CONTAINER_REGISTRY`; the token is its `token`
+   field).
    That machine also needs `zstd` for the S14 gate (`apt install zstd`; on Windows, use WSL).
    The script checks the imported image offline, as the job runs (root, then uid 10001:
    runner files, `setpriv`, `setsid`, `timeout`, a writable `/root`, torch), and writes the

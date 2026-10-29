@@ -17,7 +17,7 @@
 | S11 | PARTIAL | names up to 63 chars, no underscore; create ~4.5 s, get-by-name ~0.2 s; mount needs the bucket ID (as S5) |
 | S12 | PASS | pytorch 2.5.1 CUDA image: create → start 3 min 38 s (under 240 s); CUDA available |
 | S13 | pending | — |
-| S14 | PARTIAL (phases 1-4 PASS) | Sandboxes can run an exec job: files API, root-owned read-only mounts, `setpriv` to uid 10001, 8 MiB of stdout, cancel, env echoed. Instances are **4 vCPU, ~3.8 GiB RAM** (`SANDBOX_PRESET = 4vcpu-4gb`). Phase 5 (the job command on the imported runner-cpu) runs after the import |
+| S14 | **PASS** (2026-10-29, on the imported runner-cpu) | Sandboxes can run an exec job: files API, root-owned read-only mounts, `setpriv` to uid 10001, 8 MiB of stdout, cancel, env echoed. Instances are **4 vCPU, ~3.8 GiB RAM** (`SANDBOX_PRESET = 4vcpu-4gb`). Phase 5 (the job command on the imported runner-cpu) runs after the import |
 
 ## S1 — Token Factory account and credits can be activated from Italy
 
@@ -279,3 +279,20 @@
   - List items carry no `metadata`: a lost spawn is looked up with one GET per recent operation.
   - Sandboxes does report a per-operation `cost` (`metadata.result.resources.cost`): about $0.001 for a sub-second instance.
 - **Decision:** go on with plan B. Gate: rerun with `--image <imported runner-cpu UUID>` (docs/DEPLOY.md §Hybrid, cloud step 4); it must PASS.
+
+### S14 gate run (2026-10-29): PASS on the imported runner-cpu
+
+- **Command:** `uv run python spikes/s14_sandbox_exec.py --image c61e10a5-0b1f-3bd3-8171-afa91f51bc9b` (VPS).
+- **Image:** `p2p-runner-cpu@sha256:4f4c1deb33969065aa534a4bfaefb4061d3d690e5f99f86da0478433befc6f52` (an OCI index: amd64 image `5ce14f40...` plus a build attestation), pushed as tag `cf50c98` to the p2p-sandbox registry and imported into Sandboxes as `c61e10a5-0b1f-3bd3-8171-afa91f51bc9b`.
+- **Output (key facts):**
+  ```
+  phases 1-4 as on 2026-10-27; cold start 2.9 s, command started 0 s after EXECUTING
+  job normal:   SUCCESS in 2.5 s, exit code 0, harvested env.json live.log results.json stderr.log stdout.log,
+                completed, seeds [0, 1, 2] (accepted by analyze_results)
+  job watchdog: SUCCESS in 40.7 s, exit code 20, same files harvested, budget_timeout, seeds [0]
+  VERDICT: PASS
+  ```
+- **Facts:**
+  - The Sandboxes importer fails on the image referenced by digest: `HTTP 404 NAME_UNKNOWN ... Entity Folder not found for registry`. It imports the same image by tag (about 1-2 minutes). Before recording, `docker buildx imagetools inspect <registry>/p2p-runner-cpu:cf50c98` showed `Digest: sha256:4f4c1deb...`, so the UUID is the digest's image (invariant 8). `scripts/sandbox_import.py --pull-tag` does this.
+  - Registry credentials for the import: a CONTAINER_REGISTRY static key (7 days) of `sa-registry-pull`, in a group with `viewer` on the p2p-sandbox registry only. That is enough to pull (`docker manifest inspect` works with it).
+- **Decision:** the gate passes: `P2P_EXEC_BACKEND=sandboxes` may run. The mapping is in `config/sandbox_images.yaml`.

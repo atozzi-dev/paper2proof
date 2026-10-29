@@ -2,6 +2,9 @@
 (docs/specs/hybrid-deploy.md, "Experiments in Sandboxes"; docs/DEPLOY.md §Hybrid).
 
 Run:   uv run python scripts/sandbox_import.py --image <registry>/p2p-runner-cpu@sha256:<digest>
+       [--pull-tag <tag>]   (the importer refuses an OCI index referenced by digest: pass the
+       tag that `docker buildx imagetools inspect <registry>/p2p-runner-cpu:<tag>` shows with
+       that digest; the UUID is still recorded under the digest)
 Needs: NEBIUS_API_KEY and TF_PROJECT_ID. For a private registry: --username (the Nebius
        registry takes `iam`) and the password in P2P_REGISTRY_PASSWORD (an IAM access token);
        Sandboxes uses it for this import only. Nothing secret is printed or written.
@@ -30,6 +33,7 @@ import yaml
 
 API = "https://api.tokenfactory.nebius.com/sandboxes"
 IMAGE_REF = re.compile(r"^[a-z0-9.\-/:]+@(sha256:[0-9a-f]{64})$")
+TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 NON_TERMINAL = {"PENDING", "ASSIGNED", "EXECUTING"}
 # what the job command needs, run as the job runs it (root, then uid 10001 through setpriv)
 CHECK = (
@@ -136,12 +140,27 @@ def main(argv: Sequence[str] | None = None, client: httpx.Client | None = None) 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--image", required=True, help="<registry>/p2p-runner-cpu@sha256:...")
     parser.add_argument("--username", help="registry user (the Nebius registry takes `iam`)")
+    parser.add_argument(
+        "--pull-tag",
+        help="import <registry>/<name>:<tag> instead (the importer refuses an OCI index by "
+        "digest); check first that the tag resolves to --image's digest",
+    )
     parser.add_argument("--config", type=Path, default=Path("config/sandbox_images.yaml"))
     args = parser.parse_args(argv)
     match = IMAGE_REF.fullmatch(args.image)
     if match is None:
         print("--image must be referenced by digest: <registry>/<name>@sha256:<64 hex>")
         return 2
+    pull = args.image
+    if args.pull_tag is not None:
+        if not TAG.fullmatch(args.pull_tag):
+            print("--pull-tag is not a valid tag")
+            return 2
+        pull = f"{args.image.split('@', 1)[0]}:{args.pull_tag}"
+        print(
+            f"importing {pull}: it must resolve to {match.group(1)} "
+            "(check with docker buildx imagetools inspect)"
+        )
     key, project = os.environ.get("NEBIUS_API_KEY"), os.environ.get("TF_PROJECT_ID")
     if not key or not project:
         print("NEBIUS_API_KEY and TF_PROJECT_ID are required")
@@ -155,7 +174,7 @@ def main(argv: Sequence[str] | None = None, client: httpx.Client | None = None) 
         credentials = {"username": args.username, "password": password}
     with client or httpx.Client(timeout=60) as http:
         try:
-            uuid = import_image(Sandboxes(key, project, http), args.image, credentials)
+            uuid = import_image(Sandboxes(key, project, http), pull, credentials)
         except (ImportFailed, httpx.HTTPError) as err:
             print(f"FAILED: {err}")
             return 1

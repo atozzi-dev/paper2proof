@@ -48,6 +48,28 @@ which worked on the first call.
 
 ## Token Factory Sandboxes
 
+### 2026-10-29 — The Sandboxes image import fails on an image referenced by digest
+- **Context:** importing `p2p-runner-cpu` from our Nebius Container Registry into Sandboxes (H-03, plan B of the hybrid deploy).
+- **What happened:** `POST /v1/images/import` with `docker://cr.eu-north1.nebius.cloud/<registry>/p2p-runner-cpu@sha256:<digest>` ended `FAILED` with `HTTP 404 Not Found ... NAME_UNKNOWN ... Entity Folder not found for registry`. The same credentials could read that digest with `docker manifest inspect`, and the import of the same image by tag worked. The image is an OCI index (docker's default build attestation). The operation's `error` is the only diagnostic, and the import script's 300-character excerpt hid the cause.
+- **Expected:** an import by digest, the only reference that pins an image, or a clear "references by digest are not supported" error.
+- **Impact:** about an hour. We now import by tag, after checking that the tag resolves to the digest, and record the UUID under the digest.
+- **Suggestion:** resolve `@sha256:` references (indexes included) in the importer, and document the supported reference forms in the import API.
+- **Severity:** major
+
+### 2026-10-29 — A wrong `Project` header gives HTTP 200 with every permission false, then 403
+- **Context:** the same import, after a shell restart, with a placeholder in `TF_PROJECT_ID`.
+- **What happened:** `GET /v1/whoami` answered 200 with all permissions `false`, and the import answered 403, with no hint that the project ID was unknown.
+- **Expected:** 404 or 400 "unknown project" from `whoami`.
+- **Impact:** minor, a few minutes.
+- **Suggestion:** reject an unknown `Project` header explicitly.
+- **Severity:** minor
+
+### 2026-10-27 — Sandboxes can run a whole exec job offline (praise)
+- **Context:** spike S14: a disposable instance with networking disabled, inputs uploaded and mounted, the job command as uid 10001, the outputs returned on stdout.
+- **What happened:** uploads with deduplication, root-owned read-only mounts, 8 MiB of stdout, cancellation in 0.2 s, and the env echoed in the operation metadata all worked as documented. Start-up takes seconds.
+- **Impact:** it replaced GPU jobs for our live runs in a day (no CPU quota, no GPU capacity).
+- **Severity:** praise
+
 ### 2026-10-15 — Billing model of Sandboxes is not documented
 - **Context:** A-02, writing spike S3 (Sandboxes access, limits, networking disabled).
 - **What happened:** The limits/retention page lists concurrency and output limits but does not say whether Sandboxes usage is charged against Token Factory credits, nor any price; the operation `cost` field is described as diagnostics only.
