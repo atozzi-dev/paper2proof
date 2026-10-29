@@ -4,7 +4,15 @@ is written with %/percent/points. The factor follows from those two facts, never
 
 import pytest
 
-from app.domain.models import Claim, ClaimType, Measurements, Scale, VerdictConfig, VerdictKind
+from app.domain.models import (
+    Claim,
+    ClaimType,
+    Measurements,
+    ReasonCode,
+    Scale,
+    VerdictConfig,
+    VerdictKind,
+)
 from app.verdict.engine import decide
 from app.verdict.scale import align_to_claim, claim_in_percent, unit_mismatch
 
@@ -43,7 +51,8 @@ def _m(values: list[float], baseline: list[float] | None = None) -> Measurements
 def test_a_percent_claim_measured_as_a_declared_fraction_is_reproduced() -> None:
     claim = _claim("ResNet-50 reaches 94.1% top-1 accuracy.")
     measured = _m([0.940, 0.941, 0.939])
-    assert decide(claim, measured, VerdictConfig()).kind is VerdictKind.NOT_REPRODUCED  # the bug
+    unaligned = decide(claim, measured, VerdictConfig())  # the bug was a false accusation...
+    assert unaligned.reason is ReasonCode.IMPLAUSIBLE_GAP  # ...now caught as 100 times off
     aligned, factor, note = align_to_claim(claim, measured, "fraction")
     assert factor == 100 and note is not None and "100" in note
     assert aligned.per_seed == pytest.approx([94.0, 94.1, 93.9])
@@ -123,11 +132,14 @@ def test_consistent_scales_are_left_alone() -> None:
     assert align_to_claim(fraction, _m([0.94]), "fraction") == (_m([0.94]), 1, None)
 
 
-def test_a_collapsed_run_stays_a_failure_after_scaling() -> None:
-    """A diverged run (0.1 = chance on 10 classes) must not look closer to 94.1% once scaled."""
+def test_a_collapsed_run_is_never_reproduced_after_scaling() -> None:
+    """A diverged run (0.1 = chance on 10 classes) must not look closer to 94.1% once scaled.
+    It is a broken experiment, not evidence against the paper: 10 is 9 times off 94.1."""
     claim = _claim("It reaches 94.1% top-1.")
     aligned, _, _ = align_to_claim(claim, _m([0.1, 0.1, 0.1]), "fraction")
-    assert decide(claim, aligned, VerdictConfig()).kind is VerdictKind.NOT_REPRODUCED
+    verdict = decide(claim, aligned, VerdictConfig())
+    assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
+    assert verdict.mean == pytest.approx(10.0)
 
 
 def test_a_small_relative_delta_without_a_marker_is_never_divided() -> None:

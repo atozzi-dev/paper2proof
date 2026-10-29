@@ -36,6 +36,15 @@ def _inconclusive(reason: ReasonCode, n_seeds: int) -> Verdict:
     )
 
 
+def _implausible_gap(mean: float, reported: float, k: float) -> bool:
+    """Same sign, both non-zero, and one more than k times the other. A wrong claim is off by a
+    few to tens of percent; a gap of several times is a broken experiment or a unit mismatch
+    (count vs rate, fraction vs percent). Multiplied, not divided: no overflow, no zero."""
+    if mean == 0 or reported == 0 or (mean > 0) != (reported > 0):
+        return False
+    return abs(mean) > k * abs(reported) or abs(reported) > k * abs(mean)
+
+
 def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verdict:
     n = len(measurements.per_seed)
     base = measurements.baseline_per_seed
@@ -75,6 +84,8 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
             kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.REDUCED_SCALE_ABSOLUTE
         elif mean >= v - w:
             kind, reason = VerdictKind.REPRODUCED, None
+        elif _implausible_gap(mean, v, cfg.implausible_ratio):
+            kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP
         elif ci_high < v - w:
             kind, reason = VerdictKind.NOT_REPRODUCED, None
         else:
