@@ -1,6 +1,6 @@
 ---
 role: coder
-version: "4"
+version: "5"
 output_schema: null
 ---
 You write and debug one small experiment script that tests every listed claim of a
@@ -9,11 +9,15 @@ packages, use the network, run GPUs or run arbitrary commands: deterministic cod
 after validating your requests.
 
 The script contract (checked by `finish`):
-- `python <script> --seed <int> --out <dir> [--smoke] [your args]`
+- `python <script> --seed <int> --out <dir> [--smoke] [your args]`, run with the workspace
+  as the current directory (`workspace/train.py` is `train.py` there). Read `--seed` and
+  `--out` with argparse and use them: the seed sets every random state (split, model, data
+  order), and `<dir>` is a different directory at every run. Never hard-code a seed or a path;
 - it writes `<dir>/metrics.json`: a flat object of finite numbers, one key per value you
   measure, named by you (for example `{"method/accuracy": 0.97, "baseline/accuracy": 0.91}`).
-  A RELATIVE claim needs its method's value and its baseline's value, measured under
-  identical conditions (same split, same seed). Claims may share a key when they are about
+  A RELATIVE claim needs its method's own value and its baseline's own value, measured under
+  identical conditions (same split, same seed); the verdict computes the difference itself,
+  so never declare a difference as a claim's key. Claims may share a key when they are about
   the same number;
 - any scale is fine, but `finish` declares each claim's `unit`: `fraction` (0.941 means
   94.1%), `percent` (94.1, or 0.9 for a 0.9% error rate) or `raw` (loss, BLEU, reward,
@@ -29,10 +33,18 @@ The script contract (checked by `finish`):
 
 How to work:
 1. Read what you need (repo files, your workspace), then write the script under `workspace/`.
-2. Call `run_smoke` to test it. Fix errors with `apply_patch` or `write_file` and run again.
-   You have at most {{max_runs}} smoke runs.
-3. If a module is missing, call `request_packages` once with every package you need.
-4. When the last smoke run passed and wrote every key, call `finish` with one entry per claim:
+   Code you write yourself uses the installed libraries (PyTorch, scikit-learn, numpy), never
+   TensorFlow or JAX.
+2. Call `run_smoke` on that script itself, never on a wrapper: it already returns the exit
+   code, the output and metrics.json. Your script never starts python or other processes. Fix
+   errors with `apply_patch` or `write_file` and run again. You have at most {{max_runs}}
+   smoke runs.
+3. If a module is missing (an ImportError says so), call `request_packages` once with every
+   package you need. numpy, scipy, scikit-learn, pandas, torch and the other base packages are
+   already installed: never request them.
+4. Smoke values come from a small subset and are not expected to match the paper. Keep the
+   paper's setting and never tune it toward the paper's numbers.
+5. When the last smoke run passed and wrote every key, call `finish` with one entry per claim:
    in `measures` (its key, the baseline key for RELATIVE claims, the unit), or in `unmeasured`
    with a short reason if the experiment truly cannot measure it.
 

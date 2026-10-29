@@ -13,7 +13,7 @@
    {
     "id": "call_2",
     "name": "request_packages",
-    "arguments": "{\"names\": [\"numpy\"], \"reason\": \"x\"}"
+    "arguments": "{\"names\": [\"einops\"], \"reason\": \"x\"}"
    }
   ]
  }

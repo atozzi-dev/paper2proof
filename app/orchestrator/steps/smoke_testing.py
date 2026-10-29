@@ -11,6 +11,7 @@ the model only through wrap_untrusted (invariant 6).
 import asyncio
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable
 from typing import Any
@@ -110,6 +111,7 @@ class _State:
         self.searches = int(data.get("searches", 0))
         last = data.get("last_smoke")
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
+        self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
 
     def dump(self, workspace: Workspace) -> dict[str, Any]:
         return {
@@ -254,6 +256,7 @@ class SmokeTestingStep:
         ws: Workspace,
         state: _State,
         runs: int,
+        reprovisioned: bool = False,
     ) -> list[Message]:
         system = load_prompt("coder_system").render(
             max_runs=str(runs), untrusted_notice=UNTRUSTED_NOTICE
@@ -308,6 +311,11 @@ class SmokeTestingStep:
                         max_chars=CONTEXT_FILE_CHARS,
                     )
                 )
+        if reprovisioned:
+            context.append(
+                "The packages you requested were provisioned again: call run_smoke first to see "
+                "whether the error is gone, and never request the same package twice."
+            )
         if state.last_smoke and state.last_smoke.get("exit_code") != 0:
             context += [
                 "Last smoke run failed:",
@@ -332,7 +340,7 @@ class SmokeTestingStep:
         max_runs = ctx.limits.per_run.fix_iterations
         executor = self._smoke(ctx, await self._archives(ctx))
         env: str | None = None
-        messages = self._messages(claims, plan, ws, state, max_runs)
+        messages = self._messages(claims, plan, ws, state, max_runs, ctx.attempt > 1)
         state_key = f"runs/{ctx.run_id}/workspace.json"
 
         async def save() -> None:
@@ -435,6 +443,7 @@ class SmokeTestingStep:
             [
                 f"exit code: {outcome.exit_code} ({outcome.duration_s:.1f} s)",
                 f"metrics.json: {json.dumps(outcome.metrics) if outcome.metrics else 'missing'}",
+                *_smoke_hint(outcome),
                 "stdout (tail):",
                 wrap_untrusted(outcome.stdout[-4000:], source="smoke", max_chars=4000),
                 "stderr (tail):",
@@ -485,6 +494,13 @@ class SmokeTestingStep:
                 packages.append(PackageReq(name=match.group(1), specifier=match.group(2) or None))
             except ValidationError:
                 raise ToolError(f"invalid package request: {raw[:100]!r}") from None
+        installed = [p.name for p in packages if not p.specifier and _canonical(p.name) in BASE]
+        if installed:
+            raise ToolError(
+                f"already installed in the runner image: {', '.join(installed)}; request only "
+                "what an ImportError names (or a version the repository pins)"
+            )
+        state.last_smoke = None  # ran in the old environment: its ImportError is being fixed
         await save()
         key = f"runs/{ctx.run_id}/package_request_{ctx.attempt}.json"
         await self._put(
@@ -523,7 +539,7 @@ class SmokeTestingStep:
         if list(args.args) != last.get("args"):
             raise ToolError("finish args must match the last passing smoke run's args")
         metrics = last.get("metrics") or {}
-        _check_measures(claims, args, metrics)
+        _check_measures(claims, args, metrics, state.difference_warned)
         try:
             validate_argv(["python", script, *args.args])
         except SmokeContractError as err:
@@ -553,8 +569,90 @@ class SmokeTestingStep:
         return StepResult(next=StepName.EXECUTING, output_ref=key)
 
 
+# In both runner images (images/runner*/pyproject.toml): an unpinned request would only spend
+# a provisioning round. PEP 503 names.
+BASE = frozenset(
+    {
+        "torch", "torchvision", "numpy", "scipy", "scikit-learn", "sklearn", "transformers",
+        "datasets", "timm", "accelerate", "evaluate", "pandas", "pyarrow",
+    }
+)  # fmt: skip
+
+
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+MAX_COMPARED = 1000  # metrics.json keys; real experiments write tens
+_DIFFERENCE_WORDS = {"diff", "difference", "delta", "improvement", "vs"}  # "gap" is a metric
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _named_as_difference(key: str) -> bool:
+    return bool(_DIFFERENCE_WORDS & set(re.split(r"[/_.\-]+", key.lower())))
+
+
+def _difference_of(key: str, baseline_key: str, metrics: dict[str, Any]) -> str | None:
+    """Another key whose value minus the baseline's (either way round) is `key`'s value: a
+    hint that `key` holds the difference. Only a hint: small smoke subsets give round values
+    that can collide, so a baseline of 0 or a zero value is never compared."""
+    value, base = _number(metrics.get(key)), _number(metrics.get(baseline_key))
+    if value is None or base is None or value == 0 or base == 0 or len(metrics) > MAX_COMPARED:
+        return None
+    for other, raw in metrics.items():
+        number = _number(raw)
+        if other in (key, baseline_key) or number is None:
+            continue
+        if any(math.isclose(value, d, rel_tol=1e-9) for d in (number - base, base - number)):
+            return other
+    return None
+
+
+def _smoke_hint(outcome: SmokeResult) -> list[str]:
+    """What a passing run means, so the Coder finishes instead of tuning toward the paper."""
+    if outcome.exit_code != 0:
+        return []
+    if not outcome.metrics:
+        return [
+            "note: the script exited 0 but wrote no metrics.json: write it into the directory "
+            "given by --out (the runner passes a different one at every run)"
+        ]
+    return [
+        "note: this smoke run passed. Its values come from a small subset and are not expected "
+        "to match the paper: do not tune the experiment toward the paper's numbers. If every "
+        "claim's value is in metrics.json, call finish now."
+    ]
+
+
+def _check_own_value(
+    claim_id: str, key: str, baseline_key: str, metrics: dict[str, Any], warned: set[str]
+) -> None:
+    """A RELATIVE claim's `key` must not hold method - baseline already: refused when its name
+    says so; when its value looks like it, refused once (the same finish then passes)."""
+    own = "key must be the method's own value, not its difference from the baseline: the "
+    own += "verdict subtracts baseline_key itself"
+    if _named_as_difference(key):
+        raise ToolError(f"{claim_id}: {own}")
+    other = _difference_of(key, baseline_key, metrics)
+    hint = f"{claim_id}:{key}"
+    if other is not None and hint not in warned:
+        warned.add(hint)
+        raise ToolError(
+            f"{claim_id}: {key} equals {other} minus {baseline_key}. {own}. If {key} really "
+            "is the method's own value, call finish again unchanged"
+        )
+
+
 def _check_measures(
-    claims: list[tuple[Claim, ClaimType]], args: Finish, metrics: dict[str, Any]
+    claims: list[tuple[Claim, ClaimType]],
+    args: Finish,
+    metrics: dict[str, Any],
+    warned: set[str],
 ) -> None:
     """Every planned claim exactly once, measured (with keys the smoke run wrote, in a unit
     that fits) or declared unmeasured; at least one measured (execution-contracts §6)."""
@@ -582,5 +680,7 @@ def _check_measures(
         missing = [k for k in keys if k not in metrics]
         if missing:
             raise ToolError(f"metrics.json lacks {', '.join(missing)} ({measure.claim_id})")
+        if measure.baseline_key is not None:
+            _check_own_value(measure.claim_id, measure.key, measure.baseline_key, metrics, warned)
         if wrong := unit_mismatch(measure.unit, {k: metrics[k] for k in keys}):
             raise ToolError(f"{measure.claim_id}: {wrong}")

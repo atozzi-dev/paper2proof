@@ -79,10 +79,11 @@ async def _setup(
     packages: list[str],
     smoke_request: list[str] | None = None,
     official: bool = True,
+    mode: PlanMode = PlanMode.REPO_FIRST,
 ) -> tuple[RunContext, LocalArtifactStore]:
     artifacts = LocalArtifactStore(tmp_path)
     plan = Plan(
-        mode=PlanMode.REPO_FIRST,
+        mode=mode,
         claim_ids=["c1"],
         claim_types={"c1": ClaimType.RELATIVE},
         scale=Scale.REDUCED,
@@ -234,6 +235,20 @@ async def test_provision_job_is_submitted_safely_and_succeeds(store: Store, tmp_
     kinds = {(p.kind, p.name) for p in events if isinstance(p, JobStatusPayload)}
     assert ("fetch", FETCH) in kinds
     assert ("prov", FETCH) not in kinds
+
+
+async def test_a_from_scratch_plan_never_clones_the_repository(
+    store: Store, tmp_path: Path
+) -> None:
+    """The plan reimplements the method: cloning would only cost time, and a huge repository
+    (over the 1 GiB cap) would fail the run for nothing."""
+    ctx, artifacts = await _setup(store, tmp_path, packages=[], mode=PlanMode.FROM_SCRATCH)
+    storage, clock = FakeRunStorage(), FakeClock()
+    jobs = FakeJobBackend(on_submit=_writes_report(storage))
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    result = await _step(store, artifacts, storage, clock).run(ctx)
+    assert result.next is StepName.SMOKE_TESTING
+    assert _manifest(ctx, JobKind.FETCH)["repo"] is None
 
 
 @respx.mock

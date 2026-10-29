@@ -36,8 +36,9 @@ GPU_HARDWARE = "one L40S GPU (48 GB)"
 # the hybrid deploy without GPU capacity (docs/specs/hybrid-deploy.md)
 CPU_HARDWARE = (
     "a CPU only (no GPU): one Token Factory Sandboxes microVM with 4 vCPUs and 4 GB of RAM, "
-    "without network, the experiment at most 30 minutes in all; scale GPU training down to what "
-    "that CPU and memory finish in that time (small models, small batches, a data subset)"
+    "offline while the experiment runs (provisioning fetches packages, the repository and data "
+    "before), the experiment at most 30 minutes in all; scale down only GPU-sized training "
+    "that this CPU and memory cannot finish in that time"
 )
 
 
