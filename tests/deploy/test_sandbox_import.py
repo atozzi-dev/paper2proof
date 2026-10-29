@@ -149,3 +149,24 @@ def test_a_failed_import_or_check_records_nothing(
         _mock(router, check_code=check_code, import_status=status)
         assert tool.main(["--image", IMAGE, "--config", str(config)]) == 1
     assert not config.exists()
+
+
+def test_an_index_is_imported_by_its_tag_and_recorded_by_its_digest(tmp_path: Path) -> None:
+    """The Sandboxes importer answers NAME_UNKNOWN for an OCI index pulled by digest and
+    accepts its tag (2026-10-29): the tag is checked against the digest beforehand."""
+    config = tmp_path / "i.yaml"
+    with respx.mock as router:
+        bodies = _mock(router)
+        argv = ["--image", IMAGE, "--pull-tag", "cf50c98", "--config", str(config)]
+        assert tool.main(argv) == 0
+    url = IMAGE.split("@")[0] + ":cf50c98"
+    assert bodies[0]["registry"] == {"url": f"docker://{url}"}
+    assert load_sandbox_image(config, IMAGE) == UUID  # keyed by the index digest
+
+
+@pytest.mark.parametrize("tag", ["", "a/b", ".x", "x" * 200])
+def test_a_bad_tag_stops_before_any_call(tmp_path: Path, tag: str) -> None:
+    with respx.mock as router:
+        argv = ["--image", IMAGE, "--pull-tag", tag, "--config", str(tmp_path / "i.yaml")]
+        assert tool.main(argv) == 2
+        assert not router.calls
