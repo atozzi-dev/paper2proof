@@ -315,6 +315,147 @@ async def test_the_declared_metric_unit_must_fit_the_smoke_values(
     assert artifacts.get_json(result.output_ref)["measures"][0]["unit"] == "percent"
 
 
+async def test_a_relative_claim_key_holding_a_difference_is_refused(
+    store: Store, tmp_path: Path
+) -> None:
+    """The verdict subtracts the baseline itself: a key that already holds method - baseline
+    (by its name, or by its value under any name) would subtract it twice."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    with_diff = PASS.model_copy(
+        update={
+            "metrics": {
+                "top1_accuracy": 0.72,
+                "baseline/top1_accuracy": 0.68,
+                "method/vs_baseline/top1_accuracy_diff": 0.04,
+                "renamed": 0.04,
+            }
+        }
+    )
+    step, models = _step(
+        "finish_difference_key", artifacts, FakeSmokeExecutor([with_diff]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert len(errors) == 2
+    assert all("own value" in e and "c1" in e for e in errors)
+    assert "renamed equals top1_accuracy minus baseline/top1_accuracy" in errors[1]
+    assert artifacts.get_json(result.output_ref)["measures"][0]["key"] == "top1_accuracy"
+
+
+@pytest.mark.parametrize(
+    ("metrics", "refusals"),
+    [  # a value that looks like a difference by chance: refused once, then accepted
+        ({"top1_accuracy": 0.5, "baseline/top1_accuracy": 0.25, "method/f1": 0.75}, 1),
+        # a zero baseline makes every equal value look like a difference: never compared
+        ({"top1_accuracy": 1.0, "baseline/top1_accuracy": 0.0, "method/precision": 1.0}, 0),
+    ],
+)
+async def test_a_value_only_looking_like_a_difference_is_a_hint_not_a_rule(
+    store: Store, tmp_path: Path, metrics: dict[str, float], refusals: int
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS.model_copy(update={"metrics": metrics})])
+    step, models = _step("finish_repeated", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert len(errors) == refusals
+    assert all("method/f1" in e and "call finish again unchanged" in e for e in errors)
+
+
+def test_a_huge_metrics_file_is_not_compared_key_by_key() -> None:
+    from app.orchestrator.steps.smoke_testing import MAX_COMPARED, _difference_of
+
+    metrics = {f"k{i}": float(i) for i in range(MAX_COMPARED)}
+    metrics |= {"m": 2.0, "b": 1.0}  # k3 - b == m, but past the cap nothing is compared
+    assert _difference_of("m", "b", metrics) is None
+    assert _difference_of("m", "b", {"m": 2.0, "b": 1.0, "k3": 3.0}) == "k3"
+
+
+async def test_a_passing_smoke_run_says_to_finish_and_not_to_tune(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "planted_bug", artifacts, FakeSmokeExecutor([FAIL, PASS]), FakeRunStorage()
+    )
+    await step.run(ctx)
+    failed, passed = _tool_results(models)[1], _tool_results(models)[3]
+    assert "call finish" not in failed
+    assert "call finish" in passed and "not expected to match the paper" in passed
+
+
+async def test_a_smoke_run_without_metrics_points_at_the_out_directory(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    no_metrics = PASS.model_copy(update={"metrics": None})
+    smoke = FakeSmokeExecutor([no_metrics] * 8)
+    step, models = _step("finish_early_then_exhaust", artifacts, smoke, FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    assert any("--out" in r and "metrics.json" in r for r in _tool_results(models)[2:])
+
+
+async def test_unpinned_base_packages_are_refused_without_provisioning_again(
+    store: Store, tmp_path: Path
+) -> None:
+    """They are in the runner image already: asking for them would only spend a provisioning
+    round. A pinned version (a repository's requirement) still goes through."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "request_base_packages", artifacts, FakeSmokeExecutor([]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.PROVISIONING and result.output_ref is not None
+    first = _tool_results(models)[0]
+    assert first.startswith("ERROR:") and "scikit-learn" in first and "NumPy" in first
+    assert "pykan" not in first
+    request = artifacts.get_json(result.output_ref)
+    assert [p["name"] for p in request["requested_packages"]] == ["pykan", "scikit_learn"]
+    assert result.output_ref.endswith("package_request_1.json")  # the refusal stored nothing
+
+
+@pytest.mark.parametrize("name", ["sklearn", "Scikit_Learn", "scikit.learn", "PyArrow"])
+def test_base_package_names_are_matched_in_any_spelling(name: str) -> None:
+    from app.orchestrator.steps.smoke_testing import BASE, _canonical
+
+    assert _canonical(name) in BASE
+
+
+async def test_a_package_request_forgets_the_smoke_run_of_the_old_environment(
+    store: Store, tmp_path: Path
+) -> None:
+    """Its ImportError is fixed by the request: shown again in the next attempt, it made the
+    Coder request the same packages again until the quota ran out."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    artifacts.put_json(
+        f"runs/{RUN}/workspace.json",
+        {
+            "files": {"train.py": "import kan\n"},
+            "smoke_runs": 1,
+            "searches": 0,
+            "last_smoke": {"script": "train.py", "exit_code": 1, "stderr": "No module named kan"},
+        },
+    )
+    step, _ = _step("escape_then_request", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    assert (await step.run(ctx)).next is StepName.PROVISIONING
+    assert artifacts.get_json(f"runs/{RUN}/workspace.json")["last_smoke"] is None
+
+
+async def test_after_provisioning_again_the_coder_is_told_to_run_smoke_first(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, provisioning_attempts=2)
+    step, models = _step("chatty", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    _, messages = models.requests[0]
+    task = str(messages[1].content)
+    assert "provisioned again" in task and "run_smoke first" in task
+
+
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:
     ctx, artifacts = await _setup(store, tmp_path)
     step, models = _step("big_request", artifacts, FakeSmokeExecutor([]), FakeRunStorage())

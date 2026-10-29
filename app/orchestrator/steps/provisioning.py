@@ -17,7 +17,7 @@ from typing import Any
 from app.domain.discovery import Discovery
 from app.domain.errors import P2PError
 from app.domain.events import EventType
-from app.domain.models import ErrorCode, PackageReq, Plan, RunStatus, StepName
+from app.domain.models import ErrorCode, PackageReq, Plan, PlanMode, RunStatus, StepName
 from app.execution.backend import CACHE_BUCKET, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -328,7 +328,11 @@ class ProvisioningStep:
             "schema": "p2p.provision/v2",
             "phase": "fetch",
             "run_id": ctx.run_id,
-            "repo": {"url": discovery.repo.url, "ref": None} if discovery.repo else None,
+            "repo": (  # a from-scratch plan never uses it: no clone, no 1 GiB failure
+                {"url": discovery.repo.url, "ref": None}
+                if discovery.repo and plan.mode is PlanMode.REPO_FIRST
+                else None
+            ),
             "datasets": [d.model_dump(mode="json") for d in plan.datasets],
             "smoke_subset": (
                 {"dataset": plan.datasets[0].id, "rows": SMOKE_ROWS} if plan.datasets else None
