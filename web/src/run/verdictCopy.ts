@@ -42,7 +42,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
   VISION_PAGE_SKIPPED: 'A page could not be read',
   JOB_PREEMPTED: 'GPU job preempted',
-  NO_GPU_CAPACITY: 'No GPU available',
+  NO_GPU_CAPACITY: 'No capacity for the experiment',
   BUNDLE_UNSIGNED: 'Proof Bundle not signed',
   BUNDLE_FAILED: 'No Proof Bundle',
 }
@@ -96,6 +96,8 @@ function scaleText(scale: Scale, factor: RunConditions['scale'] | null): string 
   return parts.length ? `Reduced scale: ${parts.join(', ')}` : NO_SCALE_FACTOR
 }
 
+const SANDBOX_PLATFORM = 'sandbox' // app/execution/sandbox_jobs.py
+
 function hardwareText(
   recorded: RunConditions['hardware'] | null,
   jobs: Readonly<Record<string, EventPayloads['job.status']>>,
@@ -104,12 +106,15 @@ function hardwareText(
   if (recorded?.platform) {
     const preset = recorded.preset ? `, preset ${recorded.preset}` : ''
     const mode = recorded.preemptible === null ? '' : recorded.preemptible ? ' (preemptible)' : ' (on demand)'
-    parts.push(`Nebius AI Cloud ${recorded.platform}${preset}${mode}`)
+    // the hybrid deploy runs experiments in Token Factory Sandboxes, CPU only (no GPU)
+    const service = recorded.platform === SANDBOX_PLATFORM ? 'Nebius Token Factory Sandboxes' : `Nebius AI Cloud ${recorded.platform}`
+    parts.push(`${service}${preset}${mode}`)
   }
-  if (recorded?.gpu) parts.push(`GPU reported by the job: ${recorded.gpu}`)
+  const gpu = recorded?.gpu
+  if (gpu) parts.push(['cpu', 'unknown'].includes(gpu.toLowerCase()) ? 'CPU only, no GPU' : `GPU reported by the job: ${gpu}`)
   if (parts.length) return parts.join(' · ')
   const exec = Object.values(jobs).filter((j) => j.kind === 'exec')
-  return exec.length ? `Nebius AI Cloud GPU job ${exec.map((j) => j.name).join(', ')}` : 'Not reported for this run'
+  return exec.length ? `Nebius job ${exec.map((j) => j.name).join(', ')}` : 'Not reported for this run'
 }
 
 /** The conditions a verdict was reached under: scale, seeds, hardware, code, deviations. */

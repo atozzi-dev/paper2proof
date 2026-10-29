@@ -1,12 +1,12 @@
 # Paper2Proof
 
 **Do the numbers in this paper hold up?** Paper2Proof takes an arXiv ID, extracts the paper's
-quantitative claims, re-runs one of them in an isolated experiment on a Nebius GPU, and returns a
-**deterministic verdict** with a signed, re-runnable **Proof Bundle**.
+quantitative claims, re-runs the experiment in an isolated, offline Nebius Token Factory sandbox,
+and returns a **deterministic verdict** with a signed, re-runnable **Proof Bundle**.
 
 Built for the Nebius × NVIDIA Global AI Hackathon, *Coding and Agentic Engineering* track.
 
-- **Live demo:** [DEMO_URL]
+- **Live demo:** <https://146-59-83-160.sslip.io>
 - **Video (3 min):** [VIDEO_URL]
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   **Limitations:** [docs/LIMITATIONS.md](docs/LIMITATIONS.md) ·
@@ -27,16 +27,16 @@ You need nothing but a browser for the first three. Each takes under two minutes
 
 1. **Watch a full run in about a minute.** On the home page, under *Recent verdicts*, press
    **▶ Replay** on any run. It replays the recorded events at 10× speed: ingestion, claim
-   extraction, discovery, planning, provisioning, the Coder's smoke runs, the GPU job and the
+   extraction, discovery, planning, provisioning, the Coder's smoke runs, the experiment and the
    verdict. Nothing is executed and nothing is spent.
 2. **Read a verdict.** Press **Open** on a gallery run. You will see the claim and where it comes
    from in the paper, what the paper says next to what we measured, the confidence interval
    against the tolerance band, the conditions, the Judge's explanation, the per-role cost
    receipt and the Proof Bundle download.
 3. **Start a live run.** Enter an arXiv ID (for example `[ARXIV_ID]`) and the invite code
-   **`[INVITE_CODE]`**, then press **Start the run**. A live run can take half an hour or more,
-   most of it waiting for a GPU and running the seeds. You can follow it live and leave the page: the
-   link keeps working. Each invite code allows 3 runs per day. Runs whose estimated cost is above
+   **`[INVITE_CODE]`**, then press **Start the run**. A small paper takes a few minutes (our
+   canaries finish in under two); a heavier one runs up to its 30-minute experiment budget. You can
+   follow it live and leave the page: the link keeps working. Each invite code allows 3 runs per day. Runs whose estimated cost is above
    $0.60 stop for your approval.
 4. **Verify a Proof Bundle** (optional, needs Python and [uv](https://docs.astral.sh/uv/)):
 
@@ -48,7 +48,7 @@ You need nothing but a browser for the first three. Each takes under two minutes
 
    It checks the hash of every file and the KMS signature against the published public key,
    [`docs/bundle-public-key.pem`](docs/bundle-public-key.pem). `bundle/reproduce.sh` re-runs the
-   judged experiment on any machine with Docker and an NVIDIA GPU.
+   judged experiment on any Linux machine with Docker (on its GPUs if it has an NVIDIA one).
 
 A negative result always reads **"Not reproduced under our conditions"**, with those conditions
 listed next to it. It is a statement about our run, never about the authors.
@@ -61,25 +61,34 @@ flowchart LR
     I --> C["Extract claims<br/>Super + Super VL"]
     C --> D["Find the code<br/>HF Papers + Tavily + Nano"]
     D --> P["Plan<br/>Ultra"]
-    P --> PR["Provision<br/>CPU job, allowlisted egress"]
-    PR --> S["Write and smoke-test<br/>Super, offline"]
-    S --> E["Run k seeds<br/>L40S job, offline"]
+    P --> PR["Provision<br/>locked-down container"]
+    PR --> S["Write and smoke-test<br/>Super, sandbox offline"]
+    S --> E["Run k seeds<br/>sandbox offline"]
     E --> V["Verdict<br/>pure function"]
     V --> J["Explain<br/>Ultra"]
     J --> B["Signed Proof Bundle"]
 ```
 
-- **The control plane** (API, web UI and orchestrator) is one FastAPI process on a Nebius
-  Serverless endpoint. Its state is SQLite, replicated to Object Storage with Litestream.
-- **Generated code never runs there.** Provisioning, smoke runs and the GPU experiment are
-  Nebius Serverless jobs in a separate project and network, with no secrets. Their only route to
-  the internet is an egress gateway that allows PyPI, Hugging Face and GitHub during
-  provisioning, and nothing during execution.
+- **The control plane** (API, web UI and orchestrator) is one FastAPI process on a host of
+  ours, behind TLS. Its state is SQLite, replicated to Nebius Object Storage with Litestream.
+  Per-run buckets, the image registry and the bundle-signing key (KMS) are on Nebius AI Cloud.
+- **Generated code never runs there.** The Coder's smoke runs and the experiment itself run in
+  **Nebius Token Factory Sandboxes**: a fresh microVM per run, with no network interface and no
+  secrets. Inputs are uploaded by content hash and mounted read-only; the job runs as an
+  unprivileged user, and its result files come back to be checked as untrusted data.
+  Provisioning (hash-pinned wheels, the repository, parquet data) runs our own code in a
+  locked-down container on the host, and never executes what it downloads.
+- **Why not GPU jobs.** The design runs the experiment as a Nebius AI Cloud GPU job behind an
+  egress gateway, and that path is implemented and tested (`P2P_EXEC_BACKEND=gpu`). For the
+  hackathon our tenant never got a CPU quota for the gateway, and L40S capacity was not
+  available when we tested, so the live service runs on CPU in Sandboxes. Every verdict lists
+  the hardware it ran on. Details: [docs/specs/hybrid-deploy.md](docs/specs/hybrid-deploy.md),
+  [docs/FEEDBACK.md](docs/FEEDBACK.md).
 - **The orchestrator is an explicit state machine** with a single bounded agentic loop (the
   Coder, at most 8 fixes). Installing packages, creating jobs and touching buckets are done by
   deterministic code after validation. The Coder can only *ask* for a package.
 - **Every model call and every job is checked against a budget before it is made:** per-run
-  tokens, $1 of inference, 30 GPU-minutes, and daily caps with a kill switch.
+  tokens, $1 of inference, 30 minutes of experiment, and daily caps with a kill switch.
 
 Details, diagrams and the threat model are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -110,8 +119,9 @@ ambiguous or missing.
   (`chat_template_kwargs`) worked unchanged, so the client is a thin layer with retries,
   rate-limit headers and a cost ledger.
 - **Batch API** at half price runs the claim-extraction evaluation and the routing ablation.
-- **Sandboxes** with networking disabled passed our isolation test (only the loopback interface,
-  1.5 s start) and are implemented as an alternative executor for the Coder's smoke runs.
+- **Sandboxes** run every smoke test and every experiment: networking disabled (only the
+  loopback interface), start-up in seconds, content-addressed file uploads and up to 10 MiB of
+  output per run. Moving the execution plane onto them took a day.
 
 ## Tavily
 
@@ -142,9 +152,10 @@ Every run shows a cost receipt with tokens and dollars per role, job time and to
 | Run | Inference | Cloud | Total |
 |---|---|---|---|
 | Canary paper, CPU only (development) | $0.037 | — | $0.037 |
-| Real paper on one L40S | [PENDING] | [PENDING] | [PENDING] |
+| Canary paper in production (Token Factory Sandbox, 4 vCPU) | $0.03 | $0.0017 | $0.03 |
+| Real paper | [PENDING] | [PENDING] | [PENDING] |
 
-Hard limits per run: $1.00 of inference and 30 GPU-minutes.
+Hard limits per run: $1.00 of inference and 30 minutes of experiment.
 
 ## For paper authors
 
@@ -220,8 +231,9 @@ account (`icacls var\jobs /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`): a fo
 ### Deploying
 
 Infrastructure is Terraform in [`infra/`](infra/README.md). The control plane deploy and its
-checklist are in [docs/DEPLOY.md](docs/DEPLOY.md), operations (invites, gallery curation,
-takedowns, rotation) in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+checklist are in [docs/DEPLOY.md](docs/DEPLOY.md) (the live service follows its "Hybrid deploy"
+section), operations (invites, gallery curation, takedowns, rotation) in
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ### Repository layout
 
@@ -230,7 +242,7 @@ takedowns, rotation) in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 | `app/` | Control plane: `api`, `orchestrator`, `models`, `ingestion`, `discovery`, `execution`, `verdict`, `bundle`, `domain`, `storage` |
 | `web/` | React + Vite + TypeScript UI |
 | `images/` | The four images: api, provisioner, runner (GPU), runner-cpu |
-| `infra/` | Terraform modules and the egress gateway's cloud-init |
+| `infra/` | Terraform modules (networks, buckets, registries, IAM, KMS) and the egress gateway's cloud-init |
 | `config/` | Model routing, prices, budgets, verdict tolerances, package allowlists |
 | `schemas/` | JSON Schemas of the manifests, results and events |
 | `eval/` | ReproBench-mini |

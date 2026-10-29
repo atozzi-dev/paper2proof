@@ -8,7 +8,7 @@ export const PIPELINE: { step: StepName; label: string }[] = [
   { step: 'AWAITING_APPROVAL', label: 'Awaiting approval' },
   { step: 'PROVISIONING', label: 'Provisioning packages and data' },
   { step: 'SMOKE_TESTING', label: 'Smoke testing in the sandbox' },
-  { step: 'EXECUTING', label: 'Executing on GPU' },
+  { step: 'EXECUTING', label: 'Running the experiment' },
   { step: 'ANALYZING', label: 'Analyzing results' },
   { step: 'VERDICT', label: 'Verdict' },
 ]
@@ -27,5 +27,5 @@ export const JOB_KIND_TEXT: Record<JobKind, string> = {
   prov: 'Packages (provision job)',
   fetch: 'Repository and datasets (fetch job)',
   smoke: 'Smoke test (smoke job)',
-  exec: 'Experiment on GPU (exec job)',
+  exec: 'Experiment (exec job)',
 }

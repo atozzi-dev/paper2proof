@@ -154,3 +154,40 @@ def test_a_scale_conversion_has_its_own_line_before_the_deviations() -> None:
     )  # fmt: skip
     lines = text.split("\n")
     assert lines[3:] == [f"- {ScaleNote.TO_PERCENT}", "- Deviation: Smaller model."]
+
+
+def _hardware_line(**kwargs: object) -> str:
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=[0], used_seeds=[0],
+        exit_reason="completed", deviations=[], **kwargs,  # type: ignore[arg-type]
+    )  # fmt: skip
+    return next(line for line in text.split("\n") if line.startswith("- Hardware:"))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "line"),
+    [
+        # the hybrid deploy: a Token Factory Sandbox, CPU only (the runner reports "cpu")
+        ({"gpu": "cpu", "platform": "sandbox", "preset": "4vcpu-4gb"},
+         "- Hardware: CPU only, no GPU (Nebius Token Factory Sandboxes, 4vcpu-4gb)."),
+        ({"gpu": None, "platform": "cpu-d3", "preset": "4vcpu-16gb"},
+         "- Hardware: CPU only, no GPU (Nebius AI Cloud cpu-d3, 4vcpu-16gb)."),
+        ({"gpu": "NVIDIA L40S", "platform": "gpu-l40s-a", "preset": "1gpu-8vcpu-32gb"},
+         "- Hardware: one GPU, NVIDIA L40S (Nebius AI Cloud gpu-l40s-a, 1gpu-8vcpu-32gb)."),
+        ({"gpu": "cpu", "platform": "gpu-l40s-a", "preset": None},
+         "- Hardware: one GPU, its name not reported (Nebius AI Cloud gpu-l40s-a)."),
+        ({"gpu": "NVIDIA L40S"}, "- Hardware: one GPU, NVIDIA L40S."),  # runs from before
+        ({"gpu": "cpu"}, "- Hardware: CPU only, no GPU."),
+        ({"gpu": None}, "- Hardware: not reported."),
+    ],
+)  # fmt: skip
+def test_the_hardware_line_says_what_the_job_ran_on(kwargs: dict[str, object], line: str) -> None:
+    assert _hardware_line(**kwargs) == line
+
+
+def test_no_capacity_names_no_gpu_when_none_was_asked_for() -> None:
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=[0], used_seeds=[], gpu=None,
+        exit_reason="capacity", deviations=[],
+    )  # fmt: skip
+    assert "- Execution: no capacity was available for the experiment, so it did not run." in text

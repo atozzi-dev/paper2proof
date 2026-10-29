@@ -16,8 +16,9 @@ _EXIT = {
     "experiment_error": "at least one seed failed (experiment error)",
     "budget_timeout": "the run hit its time budget before every seed finished",
     "contract_error": "the results broke the execution contract",
-    "capacity": "no GPU capacity was available, so the experiment did not run",
+    "capacity": "no capacity was available for the experiment, so it did not run",
 }
+SANDBOX_PLATFORM = "sandbox"  # app/execution/sandbox_jobs.py (Token Factory Sandboxes)
 
 
 def limitations(
@@ -30,7 +31,11 @@ def limitations(
     deviations: list[str],
     scale_note: ScaleNote | None = None,
     unmeasured_reason: str | None = None,
+    platform: str | None = None,
+    preset: str | None = None,
 ) -> str:
+    """`gpu` is what the job reported (results.json: "cpu" without a GPU); `platform` and
+    `preset` are where EXECUTING submitted it (None for runs recorded before they were kept)."""
     lines: list[str] = []
     if scale.full:
         lines.append("Run at full scale (the paper's data and schedule).")
@@ -50,7 +55,7 @@ def limitations(
             + (f" (the Coder's reason, model text: {why})." if why else ".")
         )
     lines.append(f"{len(used_seeds)} of {len(planned_seeds)} planned seeds produced usable values.")
-    lines.append(f"Hardware: {gpu or 'unknown'}, one GPU.")
+    lines.append(f"Hardware: {_hardware(gpu, platform, preset)}.")
     problem = _EXIT.get(exit_reason)
     if problem:
         lines.append(f"Execution: {problem}.")
@@ -58,6 +63,23 @@ def limitations(
         lines.append(scale_note)
     lines += [f"Deviation: {_plain(d)}" for d in deviations if _plain(d)]
     return "\n".join(f"- {line}" for line in lines)
+
+
+def _hardware(gpu: str | None, platform: str | None, preset: str | None) -> str:
+    where = ""
+    if platform:
+        service = (
+            "Nebius Token Factory Sandboxes"
+            if platform == SANDBOX_PLATFORM
+            else (f"Nebius AI Cloud {platform}")
+        )
+        where = f" ({service}{f', {preset}' if preset else ''})"
+    reported = gpu if gpu and gpu.lower() not in ("cpu", "unknown") else None
+    if (platform or "").startswith("gpu-") or (platform is None and reported):
+        return f"one GPU, {reported or 'its name not reported'}{where}"
+    if platform or gpu:
+        return f"CPU only, no GPU{where}"
+    return "not reported"
 
 
 def _plain(text: str) -> str:

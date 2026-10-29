@@ -90,6 +90,7 @@ class AnalyzingStep:
             {
                 "analysis": analysis.model_dump(mode="json"),
                 "manifest": execution["manifest"],
+                "hardware": execution.get("hardware"),  # where the judged job ran (EXECUTING)
                 "log_summary": await self._log_summary(ctx, manifest.attempt),
             },
         )

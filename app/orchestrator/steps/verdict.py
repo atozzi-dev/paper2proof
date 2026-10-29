@@ -144,13 +144,19 @@ class VerdictStep:
         stored = await self._json(await output_of(ctx, StepName.ANALYZING))
         analysis = Analysis.model_validate(stored["analysis"])
         manifest = ExecManifest.model_validate(stored["manifest"])
+        hardware = stored.get("hardware") if isinstance(stored.get("hardware"), dict) else {}
+        platform, preset = hardware.get("platform"), hardware.get("preset")
+        where = (  # where the judged job ran, for the Limitations
+            platform if isinstance(platform, str) else None,
+            preset if isinstance(preset, str) else None,
+        )
         plan = Plan.model_validate(
             (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
         )
         smoke = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
         units, unmeasured = _declared(smoke)
         decided = [
-            await self._decide(ctx, claim, analysis, manifest, plan, units, unmeasured)
+            await self._decide(ctx, claim, analysis, manifest, plan, units, unmeasured, where)
             for claim, _ in await planned_claims(ctx, plan)
         ]
         stored_verdicts = [v for _, v in await ctx.store.list_verdicts(ctx.run_id)]
@@ -178,6 +184,7 @@ class VerdictStep:
         plan: Plan,
         units: dict[str, str],
         unmeasured: dict[str, str],
+        where: tuple[str | None, str | None] = (None, None),
     ) -> dict[str, Any]:
         """One claim: decide() on its measurements (none if it was not measured), the reason
         adjusted by code, the Limitations by code, the Judge's prose only as explanation."""
@@ -214,6 +221,8 @@ class VerdictStep:
             deviations=plan.notes,
             scale_note=scale_note,
             unmeasured_reason=unmeasured.get(claim.id, "") if measured is None else None,
+            platform=where[0],
+            preset=where[1],
         )
         text = (
             await self._explain(ctx, verdict, json.dumps(claim.model_dump(mode="json")), limits)

@@ -5,8 +5,8 @@ Fields in brackets are filled in at submission.
 
 ## Tagline
 
-Do the numbers in this paper hold up? Paper2Proof re-runs an ML paper's claim on a Nebius GPU
-and returns a deterministic verdict with a signed Proof Bundle.
+Do the numbers in this paper hold up? Paper2Proof re-runs an ML paper's claims in an isolated
+Nebius sandbox and returns a deterministic verdict with a signed Proof Bundle.
 
 ## Inspiration
 
@@ -25,9 +25,12 @@ You give Paper2Proof an arXiv ID. It:
 2. finds the official code on Hugging Face Papers, in the abstract or through Tavily search;
 3. plans a small experiment within a fixed budget, and asks for approval when the estimate is
    above $0.60;
-4. provisions the packages, data and repository in an isolated CPU job;
-5. lets a Coder model write the experiment and fix it against offline smoke runs;
-6. runs it over at least 3 seeds on an NVIDIA L40S in a Serverless job, with no network;
+4. provisions the packages, data and repository in a locked-down container that never runs
+   what it downloads;
+5. lets a Coder model write the experiment and fix it against smoke runs in a Nebius Token
+   Factory sandbox with no network;
+6. runs it over at least 3 seeds in a fresh sandbox, also with no network interface and no
+   secrets (CPU in the live service; the GPU path is implemented);
 7. decides the verdict with a pure function: a 95% confidence interval against a stated
    tolerance band;
 8. has a reasoning model explain the verdict, and packs everything into a Proof Bundle signed
@@ -49,16 +52,22 @@ in about a minute without spending anything.
   fixes). The Coder can read and write workspace files, run smoke tests, search documentation
   and *ask* for packages. Installing packages, creating jobs and handling buckets are done by
   deterministic code after validation.
-- **Isolation on Nebius AI Cloud:** the control plane (FastAPI, React UI and orchestrator in one
-  process) runs on a Serverless endpoint. Generated code runs only in Serverless jobs in a
-  separate project and network, with no secrets, one bucket per run, images pinned by digest,
-  and an egress gateway (nftables and Squid, SNI allowlist, fail-closed) that allows PyPI,
-  Hugging Face and GitHub during provisioning and nothing during execution.
+- **Isolation:** the control plane (FastAPI, React UI and orchestrator in one process) runs on a
+  host of ours behind TLS. Generated code runs only in Nebius Token Factory Sandboxes: a fresh
+  microVM per smoke run and per experiment, no network interface, no secrets, inputs uploaded
+  by content hash and mounted read-only, the job dropped to an unprivileged user, and its result
+  files checked as untrusted data. One Nebius bucket per run, images pinned by digest.
+- **The designed deploy, kept:** a Serverless endpoint, GPU jobs on an NVIDIA L40S and an egress
+  gateway (nftables and Squid, SNI allowlist, fail-closed) are implemented, tested and in
+  Terraform. Our tenant never got the CPU quota they need, and no L40S was free when we tested,
+  so we moved the execution plane to Sandboxes two days before the deadline, behind the same
+  interfaces.
 - **State and evidence:** SQLite replicated to Object Storage with Litestream, Proof Bundles
   signed with an asymmetric Nebius KMS key, everything provisioned with Terraform and deployed
   from GitHub Actions through OIDC, with no static cloud key.
 - **Cost control:** every model call and every job is checked against per-run and daily budgets
-  before it is made, with a kill switch. A run is capped at $1 of inference and 30 GPU-minutes.
+  before it is made, with a kill switch. A run is capped at $1 of inference and 30 minutes of
+  experiment; our canary runs cost about $0.03.
 
 ## Challenges we ran into
 
@@ -71,7 +80,8 @@ in about a minute without spending anything.
   with no network and no secrets, in a separate project.
 - **Platform surprises,** found by a day of spikes and fixed in the design: job volumes need
   bucket IDs rather than names, GPU jobs wait for capacity in silence, new tenants have no CPU
-  quota, and one model ignores `json_schema`. Each is in our feedback file.
+  quota (ours never got one), the Sandboxes importer refuses images referenced by digest, and one
+  model ignores `json_schema`. Each is in our feedback file.
 - **Percent against fraction.** Papers write 94.1, code returns 0.941. The Coder declares the
   unit, the smoke run checks it, and any conversion is printed and recorded in the verdict.
 
@@ -109,7 +119,7 @@ GitHub Actions, OpenTelemetry, pytest, Hypothesis, Vitest, Playwright.
 
 ## Testing instructions
 
-- **Demo:** [DEMO_URL] (no login needed for the gallery and replays).
+- **Demo:** <https://146-59-83-160.sslip.io> (no login needed for the gallery and replays).
 - **Invite code for live runs:** `[INVITE_CODE]` (3 runs per day).
 - **Quick look (1 minute, free):** on the home page, under *Recent verdicts*, press **▶ Replay**
   on a run. It replays the recorded run at 10× speed; nothing is executed.
@@ -117,8 +127,8 @@ GitHub Actions, OpenTelemetry, pytest, Hypothesis, Vitest, Playwright.
   against the tolerance band, the conditions, the explanation, the cost receipt and the Proof
   Bundle.
 - **A live run:** enter an arXiv ID such as `[ARXIV_ID]` and the invite code, then press
-  **Start the run**. It can take half an hour or more, mostly waiting for a GPU; the link keeps
-  working if you leave the page.
+  **Start the run**. A small paper takes a few minutes; the link keeps working if you leave the
+  page.
 - **Verify a bundle:** see the README section "For judges: what to try" in
   <https://github.com/atozzi-dev/paper2proof>.
 

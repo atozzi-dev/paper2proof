@@ -15,8 +15,8 @@ export function GalleryPage() {
     <section>
       <h1>Gallery</h1>
       <p className="lead">
-        Recorded runs, chosen by hand. A replay re-streams the recorded events at 10× speed: no GPU is used and
-        nothing is executed.
+        Recorded runs, chosen by hand. A replay re-streams the recorded events at 10× speed: no experiment runs again
+        and nothing is executed.
       </p>
       {error && (
         <p role="alert" className="error">

@@ -46,7 +46,7 @@ export function PlanCard({ runId, plan: ready, approval, readOnly }: Props) {
         <dd>{p.seeds.join(', ')}</dd>
         <dt>Claims tested</dt>
         <dd>{p.claim_ids.join(', ')}</dd>
-        <dt>Estimated GPU time</dt>
+        <dt>Estimated compute time</dt>
         <dd>{p.gpu_minutes_est.toFixed(0)} min</dd>
         <dt>Estimated cost</dt>
         <dd>{formatUsd(ready.est_cost_usd)}</dd>
@@ -73,7 +73,7 @@ export function PlanCard({ runId, plan: ready, approval, readOnly }: Props) {
       {awaiting && (
         <div className="approval" role="group" aria-label="Approve the plan">
           <p>
-            This plan needs your approval before any GPU time is spent. It expires at{' '}
+            This plan needs your approval before any compute is spent. It expires at{' '}
             {new Date(approval.expires_at).toLocaleString()}.
           </p>
           <button type="button" onClick={() => decide('approved')} disabled={busy}>

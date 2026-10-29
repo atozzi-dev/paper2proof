@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Re-runs attempt {{attempt}} of Paper2Proof run {{run_id}} on this machine, with the same
-# runner image (by digest), workspace and exec manifest as the GPU job that was judged.
+# runner image (by digest), workspace and exec manifest as the experiment job that was judged.
 #
 #   ./reproduce.sh <staging dir>
 #
 # <staging dir> must hold the archives listed below with these exact sha256 digests. They are
 # not in the bundle (size); within 24 h of the run they are in the run bucket under staging/.
 # Check the bundle first: uv run python -m app.bundle.verify <bundle> (Paper2Proof repository).
-# Needs Linux, Docker with the NVIDIA Container Toolkit, sha256sum.
+# Needs Linux, Docker and sha256sum. With an NVIDIA GPU (and the NVIDIA Container Toolkit) the
+# job gets every GPU; without one it runs on CPU, as runs judged in a Token Factory Sandbox did.
 #
 # WARNING: this runs code written by a model and code from the paper's repository. Run it only
 # on an isolated, disposable machine (never a developer laptop or a control-plane host). The
@@ -46,8 +47,10 @@ SHA256SUMS
 
 mkdir -p "$STAGING/results"
 chmod 0777 "$STAGING/results"  # the container has no CAP_DAC_OVERRIDE
-echo "running $RUNNER_IMAGE (no network, all GPUs)"
-docker run --rm --gpus all --network none \
+gpus=()
+if command -v nvidia-smi > /dev/null 2>&1; then gpus=(--gpus all); fi
+echo "running $RUNNER_IMAGE (no network, ${gpus[*]:-CPU only})"
+docker run --rm "${gpus[@]}" --network none \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 4096 \
   --volume "$MANIFEST:/etc/p2p/manifest.json:ro" \
   --volume "$STAGING:/mnt/run/staging:ro" \
