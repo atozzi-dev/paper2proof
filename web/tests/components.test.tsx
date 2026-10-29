@@ -48,6 +48,17 @@ describe('VerdictCard', () => {
     expect(list).toHaveTextContent('Seeds: 1 seeds (seeds 0 of the planned 0, 1, 2)')
   })
 
+  it('names a Token Factory Sandbox as CPU only, never as a GPU', () => {
+    const sandbox = {
+      ...runConditions,
+      hardware: { ...runConditions.hardware, platform: 'sandbox', preset: '4vcpu-4gb', preemptible: false, gpu: 'cpu' },
+    }
+    render(<VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={sandbox} />)
+    const list = screen.getByRole('list', { name: 'Conditions' })
+    expect(list).toHaveTextContent('Hardware: Nebius Token Factory Sandboxes, preset 4vcpu-4gb (on demand) · CPU only, no GPU')
+    expect(list).not.toHaveTextContent(/AI Cloud|GPU reported/)
+  })
+
   it('lists the recorded conditions: scale factor, seeds used and the hardware', () => {
     render(
       <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={runConditions} />,
@@ -332,7 +343,7 @@ describe('JobsList', () => {
     expect(items[1]).toHaveTextContent('Repository and datasets (fetch job)')
     expect(items[1]).toHaveTextContent('p2p-fetch-abc-1')
     expect(items[1]).toHaveTextContent('RUNNING')
-    expect(items[2]).toHaveTextContent('Experiment on GPU (exec job)')
+    expect(items[2]).toHaveTextContent('Experiment (exec job)')
   })
 
   it('says when no job has started', () => {

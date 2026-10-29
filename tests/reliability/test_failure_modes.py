@@ -380,7 +380,7 @@ async def test_no_capacity_anywhere_ends_inconclusive_capacity(
     assert (stored["results_key"], stored["exit_reason"]) == (None, "capacity")
     explanation = artifacts.get_json(f"runs/{RUN}/verdict.json")["verdicts"][0]["explanation_md"]
     assert explanation.startswith("Inconclusive (capacity)")
-    assert "no GPU capacity" in explanation  # the Limitations say why
+    assert "no capacity was available" in explanation  # the Limitations say why
 
 
 async def test_a_gpu_job_that_never_leaves_the_queue_ends_inconclusive_capacity(

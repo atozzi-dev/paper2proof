@@ -15,7 +15,7 @@ const STEPS = [
   },
   {
     title: 'Re-run',
-    body: 'The experiment is planned, coded, smoke-tested and run on Nebius GPUs, isolated and without internet.',
+    body: 'The experiment is planned, coded, smoke-tested and run in an isolated Nebius Token Factory sandbox, without internet.',
     chip: 'Planner · Ultra · Coder · Super',
   },
   {
@@ -72,8 +72,9 @@ export function HomePage() {
           <span className="eyebrow">Reproducibility check for ML papers</span>
           <h1 className="hero-title">Do the numbers in this paper hold up?</h1>
           <p className="lead">
-            Give it an arXiv ID. Paper2Proof extracts the paper&rsquo;s claims, re-runs the experiment on Nebius GPUs
-            and returns a verdict decided by a fixed statistical rule, with a signed Proof Bundle anyone can re-run.
+            Give it an arXiv ID. Paper2Proof extracts the paper&rsquo;s claims, re-runs the experiment in an isolated
+            Nebius sandbox and returns a verdict decided by a fixed statistical rule, with a signed Proof Bundle anyone
+            can re-run.
           </p>
 
           <form className="card start-form" onSubmit={submit} noValidate aria-describedby={error ? ids.error : undefined}>
@@ -111,7 +112,7 @@ export function HomePage() {
             </div>
             <p id={ids.help} className="muted small">
               arXiv IDs only (for example 2106.09685 or 2106.09685v2): no URLs, no PDF uploads. The invite code is
-              needed once per browser session: live runs use real GPUs, so they are invite-only.
+              needed once per browser session: live runs use real compute, so they are invite-only.
             </p>
             <label htmlFor={ids.hint}>Claim to focus on (optional)</label>
             <textarea

@@ -8,8 +8,8 @@ const KINDS: VerdictKind[] = ['REPRODUCED', 'REPRODUCED_AT_REDUCED_SCALE', 'NOT_
 const ROLES: { role: string; family: string; job: string }[] = [
   { role: 'Reader', family: 'Nemotron Super', job: 'Reads the paper and extracts the quantitative claims with their source (table, section).' },
   { role: 'Vision', family: 'Nemotron 3.5 Super VL', job: 'Reads tables and figures the text extraction cannot (PDF papers).' },
-  { role: 'Planner', family: 'Nemotron Ultra', job: 'Turns the claims into an experiment plan: scale, seeds, packages, datasets, GPU minutes.' },
-  { role: 'Coder', family: 'Nemotron Super', job: 'Writes and fixes the experiment code, smoke-tested in an isolated CPU job with no network.' },
+  { role: 'Planner', family: 'Nemotron Ultra', job: 'Turns the claims into an experiment plan: scale, seeds, packages, datasets, compute minutes.' },
+  { role: 'Coder', family: 'Nemotron Super', job: 'Writes and fixes the experiment code, smoke-tested in an isolated sandbox with no network.' },
   { role: 'Judge', family: 'Nemotron Ultra', job: 'Explains the verdict in plain words. It cannot change the verdict.' },
   { role: 'Utility', family: 'Nemotron Nano', job: 'Small classification and summarization tasks.' },
 ]
@@ -26,8 +26,8 @@ export function AboutPage() {
     <>
       <h1>About Paper2Proof</h1>
       <p className="lead">
-        Paper2Proof checks whether the numbers in an ML paper hold up. It re-runs the experiment on Nebius GPUs and
-        decides with a fixed statistical rule, not with a language model.
+        Paper2Proof checks whether the numbers in an ML paper hold up. It re-runs the experiment in an isolated
+        Nebius Token Factory sandbox and decides with a fixed statistical rule, not with a language model.
       </p>
 
       <section aria-labelledby="stats-h">
@@ -65,9 +65,15 @@ export function AboutPage() {
         <ol className="steps-list">
           <li>The paper is fetched from arXiv by ID and its claims are extracted.</li>
           <li>The planner proposes an experiment and its cost; expensive plans wait for your approval.</li>
-          <li>Packages and data are fetched by a CPU job behind an allowlisting egress gateway.</li>
-          <li>The generated code is smoke-tested in an isolated CPU job with no network.</li>
-          <li>The experiment runs as a GPU job with no internet access, over several seeds.</li>
+          <li>
+            Packages and data are fetched by a locked-down container on our host: hash-pinned wheels and parquet
+            files, stored in a per-run Nebius bucket and never executed there.
+          </li>
+          <li>The generated code is smoke-tested in a Nebius Token Factory sandbox with no network interface.</li>
+          <li>
+            The experiment runs in a fresh sandbox, also with no network, over several seeds (CPU only: the hardware is
+            listed with every verdict).
+          </li>
           <li>A pure function compares the measurements with the claim and returns the verdict.</li>
           <li>Everything is packed into a signed Proof Bundle that anyone can re-run.</li>
         </ol>
@@ -142,17 +148,17 @@ function ArchitectureDiagram() {
           </marker>
         </defs>
         {box(10, 10, 130, 'Browser', 'this page, SSE')}
-        {box(200, 10, 220, 'API + orchestrator', 'Serverless Endpoint (CPU)')}
+        {box(200, 10, 220, 'API + orchestrator', 'our host, behind TLS')}
         {box(480, 10, 150, 'Token Factory', 'Nemotron roles')}
         {arrow(140, 36, 198, 36)}
         {arrow(420, 36, 478, 36)}
         <rect className="arch-zone" x={10} y={100} width={620} height={80} rx={8} />
         <text className="arch-sub" x={20} y={116}>
-          Sandbox project · no secrets · per-run bucket
+          Isolated · no secrets · per-run bucket
         </text>
-        {box(20, 122, 180, 'Provision', 'CPU job, allowlisted egress')}
-        {box(230, 122, 180, 'Smoke test', 'CPU job, no network')}
-        {box(440, 122, 180, 'Execute', 'GPU job, no internet')}
+        {box(20, 122, 180, 'Provision', 'locked-down container')}
+        {box(230, 122, 180, 'Smoke test', 'Token Factory sandbox')}
+        {box(440, 122, 180, 'Execute', 'sandbox, no network')}
         {arrow(200, 148, 228, 148)}
         {arrow(410, 148, 438, 148)}
         {arrow(310, 62, 310, 120)}

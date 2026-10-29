@@ -245,7 +245,10 @@ def test_reproduce_script_runs_the_runner_by_digest_without_network() -> None:
     script = render_reproduce(manifest, RUNNER, run_id=RUN).decode()
     image = RUNNER.split("@")[0] + "@sha256:" + "0" * 64
     assert f"RUNNER_IMAGE={image}" in script
-    assert "--gpus all" in script and "--network none" in script
+    assert "--network none" in script
+    # all GPUs when the host has one, CPU otherwise (runs judged in a CPU-only Sandbox)
+    assert "if command -v nvidia-smi > /dev/null 2>&1; then gpus=(--gpus all); fi" in script
+    assert 'docker run --rm "${gpus[@]}" --network none' in script
     assert "a" * 64 + "  overlay.tar.zst" in script
     assert "b" * 64 + "  data/uoft-cs__cifar10.tar.zst" in script
     assert "e" * 64 + "  workspace.tar" in script

@@ -163,7 +163,7 @@ describe('Run page', () => {
     expect(screen.getByRole('heading', { name: 'Reproduced' })).toBeInTheDocument()
     expect(screen.getByRole('table', { name: 'Claims extracted from the paper' })).toHaveTextContent('Table 2')
     expect(screen.getByText('<b>epoch 1</b>')).toBeInTheDocument()
-    expect(screen.getByRole('list', { name: 'Cloud jobs' })).toHaveTextContent('Experiment on GPU (exec job)')
+    expect(screen.getByRole('list', { name: 'Cloud jobs' })).toHaveTextContent('Experiment (exec job)')
     expect(screen.getByRole('link', { name: 'Download the Proof Bundle' })).toHaveAttribute(
       'href',
       `/api/runs/${RUN_ID}/bundle`,
@@ -223,7 +223,7 @@ describe('Run page', () => {
     render(<App />)
     const notices = (await screen.findByRole('heading', { name: 'Notices' })).closest('section') as HTMLElement
     await waitFor(() =>
-      expect(notices).toHaveTextContent('No GPU available: no GPU capacity on gpu-h100-sxm: retrying in 2 minutes'),
+      expect(notices).toHaveTextContent('No capacity for the experiment: no GPU capacity on gpu-h100-sxm: retrying in 2 minutes'),
     )
     expect(notices).not.toHaveTextContent('NO_GPU_CAPACITY')
   })
@@ -271,7 +271,7 @@ describe('Run page', () => {
 
 describe('warningTitle', () => {
   it('names the capacity warning in plain words', () => {
-    expect(warningTitle('NO_GPU_CAPACITY')).toBe('No GPU available')
+    expect(warningTitle('NO_GPU_CAPACITY')).toBe('No capacity for the experiment')
   })
 
   it('shows a code it does not know as it came', () => {
