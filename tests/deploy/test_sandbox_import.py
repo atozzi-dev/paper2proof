@@ -170,3 +170,9 @@ def test_a_bad_tag_stops_before_any_call(tmp_path: Path, tag: str) -> None:
         argv = ["--image", IMAGE, "--pull-tag", tag, "--config", str(tmp_path / "i.yaml")]
         assert tool.main(argv) == 2
         assert not router.calls
+
+
+def test_the_offline_check_loads_the_openmp_runtime() -> None:
+    """The last gate before a digest gets a UUID: it accepted the image whose LightGBM and
+    XGBoost could not load libgomp.so.1 (production, 2026-10-29)."""
+    assert "libgomp.so.1" in tool.CHECK

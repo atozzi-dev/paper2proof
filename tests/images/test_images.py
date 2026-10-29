@@ -290,4 +290,5 @@ def test_runners_ship_the_openmp_runtime(image: str) -> None:
     """Production, 2026-10-29: LightGBM and XGBoost wheels load libgomp.so.1, which the slim
     base lacks, so every gradient-boosting baseline failed to import in the sandbox."""
     text = (IMAGES / image / "Dockerfile").read_text(encoding="utf-8")
-    assert "apt-get install -y --no-install-recommends tini zstd libgomp1" in text
+    line = re.search(r"apt-get install -y --no-install-recommends ([^\\\n]+)", text)
+    assert line is not None and {"tini", "zstd", "libgomp1"} <= set(line.group(1).split())
