@@ -15,6 +15,7 @@ from app.domain.models import (
     VerdictKind,
 )
 from app.verdict.engine import decide
+from app.verdict.explanation import mentions_verdict
 from app.verdict.facts import judge_facts
 from app.verdict.scale import MetricUnit, ScaleNote
 
@@ -164,6 +165,39 @@ def test_every_unit_alignment_is_spelled_out(
     assert expected in facts
     if note is ScaleNote.UNIT_MISMATCH:
         assert "in the metric's own units, as the script reported them" in facts
+
+
+@pytest.mark.parametrize(
+    ("claim", "per_seed", "expected"),
+    [
+        (ACCURACY, [0.940, 0.941, 0.942], "The paper's value is 100 times the measured mean"),
+        (
+            ACCURACY.model_copy(
+                update={"metric": "loss", "higher_is_better": False, "reported_value": 0.30}
+            ),
+            [1.2, 1.2, 1.2],
+            "The measured mean is 4 times the paper's value",
+        ),
+    ],
+)
+def test_an_implausible_gap_is_explained_as_a_likely_broken_experiment(
+    claim: Claim, per_seed: list[float], expected: str
+) -> None:
+    verdict = _decided(claim, per_seed)
+    assert verdict.reason is ReasonCode.IMPLAUSIBLE_GAP
+    last = judge_facts(claim, verdict).split("\n")[-1]
+    assert last == (
+        f"- {expected}: a gap this large more likely comes from a broken experiment or a unit "
+        "mismatch (a count against a rate, a fraction against a percent) than from a wrong "
+        "claim, so the verdict code does not hold it against the paper."
+    )
+    assert not mentions_verdict(last)  # the Judge may quote it without naming another verdict
+
+
+def test_no_gap_line_for_any_other_reason() -> None:
+    verdict = _decided(ACCURACY, [80.0, 95.0, 88.0])  # 0.89 of the paper's value
+    assert verdict.reason is ReasonCode.HIGH_VARIANCE
+    assert "a gap this large" not in judge_facts(ACCURACY, verdict)
 
 
 def test_numbers_get_enough_digits_to_stay_apart() -> None:

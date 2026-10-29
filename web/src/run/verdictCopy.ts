@@ -29,6 +29,8 @@ export const REASON_TEXT: Record<ReasonCode, string> = {
   REDUCED_SCALE_ABSOLUTE:
     'An absolute number cannot be checked at reduced scale; the measured values are shown for reference.',
   REDUCED_SCALE_CONTRADICTS: 'The claimed trend was not observed at reduced scale.',
+  IMPLAUSIBLE_GAP:
+    "The measured value is several times off the paper's: more likely a broken experiment or a unit mismatch than a wrong claim.",
 }
 
 /** Plain-words titles of the warning codes (docs/specs/api-and-events.md, `warning` event). */
@@ -41,6 +43,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   PACKAGES_REQUESTED: 'Packages requested',
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
   REPO_TOO_LARGE: 'Repository too large to fetch',
+  STAND_IN_FLAGGED: 'Stand-in refused',
   VISION_PAGE_SKIPPED: 'A page could not be read',
   JOB_PREEMPTED: 'GPU job preempted',
   NO_GPU_CAPACITY: 'No capacity for the experiment',
@@ -60,6 +63,7 @@ const DEVIATION_WARNINGS = new Set([
   'DATASET_UNAVAILABLE',
   'REPO_SNAPSHOT_UNAVAILABLE',
   'REPO_TOO_LARGE',
+  'STAND_IN_FLAGGED',
   'JOB_PREEMPTED',
   'DISCOVERY_DEGRADED',
 ])

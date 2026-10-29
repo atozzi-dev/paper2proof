@@ -40,6 +40,7 @@ class ReasonCode(StrEnum):
     HIGH_VARIANCE = "HIGH_VARIANCE"
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
+    IMPLAUSIBLE_GAP = "IMPLAUSIBLE_GAP"  # ABSOLUTE, more than implausible_ratio times off
     NOT_MEASURED = "NOT_MEASURED"  # the experiment does not measure this claim (code-set)
 
 
@@ -77,6 +78,11 @@ class VerdictConfig(_Strict):
     rho: float = Field(default=0.5, ge=0)
     min_seeds: int = Field(default=3, ge=2)
     confidence: float = Field(default=0.95, gt=0, lt=1)
+    # ABSOLUTE: a mean more than this many times off the paper's value (same sign) is a likely
+    # broken experiment or unit mismatch, never NOT_REPRODUCED. Defaulted so that configs
+    # written before the rule still load.
+    # None disables the implausible-gap rule; finite only (verdict.json is strict JSON)
+    implausible_ratio: float | None = Field(default=3.0, gt=1, allow_inf_nan=False)
 
 
 class Verdict(_Strict):

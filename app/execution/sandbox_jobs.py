@@ -23,7 +23,7 @@ import re
 import secrets
 import stat
 import tarfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import Executor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,12 +43,17 @@ from app.execution.backend import (
 )
 from app.execution.hybrid import open_no_follow
 from app.execution.naming import bucket_name, run_slug
-from app.execution.nebius_backend import JobBackendError
+from app.execution.nebius_backend import InputUploadError, JobBackendError
 from app.execution.run_storage import RunStorage
 from app.execution.s3 import check_run_key
 from app.execution.sandboxes import SANDBOXES_API
 
 log = logging.getLogger(__name__)
+
+
+class _Transient(InputUploadError):
+    """An upload the gateway or the service failed (429, 5xx, transport): worth a resend."""
+
 
 SANDBOX_PLATFORM = "sandbox"  # the judged hardware the bundle records (config/pricing.yaml)
 # what an instance gets, as a preset (priced in config/pricing.yaml): 4 vCPU, ~3.8 GiB (S14)
@@ -67,6 +72,10 @@ INSTANCE_LOG_BYTES = 64 * 1024  # the stderr tail kept next to the results (untr
 LIST_PAGE = 1000
 MAX_PAGES = 10  # a lookup past this, or a page seen twice, is an outage
 CHUNK = 1 << 20
+UPLOAD_BACKOFF_S = (5.0, 15.0)  # between the attempts at an upload (3 in all)
+UPLOAD_TOTAL_S = 300.0  # the resends after a transient failure, never a healthy first send
+_DROPPED = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+_TRANSIENT = {429, 500, 502, 503, 504}  # the gateway or the service, not the request
 LOOKBACK = timedelta(minutes=5)  # a lost spawn is looked for from its intent minus this
 STALE_INTENT = timedelta(minutes=10)  # an intent with no operation after this never spawned
 KiB = 1024
@@ -213,6 +222,17 @@ def _text(stream: Any) -> str:
     return value
 
 
+def _json_dict(response: httpx.Response, what: str) -> dict[str, Any]:
+    """The answer's JSON object; a malformed one is an error, never an internal crash."""
+    try:
+        body = response.json()
+    except ValueError:
+        raise JobBackendError(f"{what}: the answer is not JSON") from None
+    if not isinstance(body, dict):
+        raise JobBackendError(f"{what}: the answer is not a JSON object")
+    return body
+
+
 def _hash_fd(fd: int, size: int) -> str:
     """sha256 of the first `size` bytes of `fd` from its start (blocking: call it in a thread)."""
     os.lseek(fd, 0, os.SEEK_SET)
@@ -243,6 +263,7 @@ class SandboxesJobBackend:
         cpu_pool: Executor | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         http: httpx.AsyncClient | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._key = api_key
         self._project = project_id
@@ -254,6 +275,7 @@ class SandboxesJobBackend:
         self._pool = cpu_pool
         self._clock = clock
         self._http = http
+        self._sleep = sleep
         self._hashes: dict[tuple[int, int, int, int], str] = {}  # (dev, ino, size, mtime) -> sha
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -298,13 +320,17 @@ class SandboxesJobBackend:
     async def _known(self, sha: str) -> str | None:
         try:
             response = await self._request("GET", f"/v1/files/{sha}")
+        except _DROPPED as err:
+            raise _Transient(f"Sandboxes files: {type(err).__name__}") from None
         except httpx.HTTPError as err:
             raise JobBackendError(f"Sandboxes files: {type(err).__name__}") from None
         if response.status_code == 404:
             return None
+        if response.status_code in _TRANSIENT:
+            raise _Transient(f"Sandboxes files: HTTP {response.status_code}")
         if response.status_code != 200:
             raise JobBackendError(f"Sandboxes files: HTTP {response.status_code}")
-        uuid = (response.json() or {}).get("uuid")
+        uuid = _json_dict(response, "Sandboxes files").get("uuid")
         return str(uuid) if uuid else None
 
     async def _send(
@@ -315,18 +341,52 @@ class SandboxesJobBackend:
             headers["Content-Length"] = str(size)
         try:
             response = await self._request("POST", "/v1/files", content=content, headers=headers)
+        except _DROPPED as err:
+            raise _Transient(f"Sandboxes upload: {type(err).__name__}") from None
         except httpx.HTTPError as err:
             raise JobBackendError(f"Sandboxes upload: {type(err).__name__}") from None
+        if response.status_code in _TRANSIENT:
+            raise _Transient(f"Sandboxes upload: HTTP {response.status_code}")
         if response.status_code not in (200, 201):
             raise JobBackendError(f"Sandboxes upload: HTTP {response.status_code}")
-        body = response.json() or {}
+        body = _json_dict(response, "Sandboxes upload")
         if body.get("sha256") != sha or not body.get("uuid"):
             raise JobBackendError("Sandboxes stored another sha256 than the one sent")
         return str(body["uuid"])
 
+    async def _retrying(self, send: Callable[[], Awaitable[str]], sha: str) -> str:
+        """An upload, sent again after a transient failure (production, 2026-10-29: a 502 on a
+        large overlay). Content-addressed, so a resend is safe, and a 502 can hide a file that
+        was stored: it is looked up before each new attempt."""
+        try:
+            return await send()  # a large input on a modest uplink is slow, not failing
+        except _Transient:
+            log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+        try:
+            async with asyncio.timeout(UPLOAD_TOTAL_S):
+                for number, wait in enumerate(UPLOAD_BACKOFF_S, 1):
+                    await self._sleep(wait)
+                    try:
+                        found = await self._known(sha)
+                    except JobBackendError:  # the same outage: send again, it is safe
+                        found = None
+                    if found:
+                        return found
+                    try:
+                        return await send()
+                    except _Transient:
+                        if number == len(UPLOAD_BACKOFF_S):
+                            raise
+                        log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+                raise AssertionError("unreachable")  # pragma: no cover
+        except TimeoutError:
+            raise InputUploadError(
+                f"Sandboxes upload: no success within {UPLOAD_TOTAL_S:g} s"
+            ) from None
+
     async def _upload_bytes(self, data: bytes) -> str:
         sha = await asyncio.to_thread(lambda: hashlib.sha256(data).hexdigest())
-        return await self._known(sha) or await self._send(data, sha)
+        return await self._known(sha) or await self._retrying(lambda: self._send(data, sha), sha)
 
     async def _upload_local(self, fd: int) -> str:
         info = os.fstat(fd)
@@ -339,23 +399,27 @@ class SandboxesJobBackend:
         found = await self._known(sha)
         if found:
             return found
-        sent = hashlib.sha256()
 
-        async def chunks() -> AsyncIterator[bytes]:
-            os.lseek(fd, 0, os.SEEK_SET)
-            left = info.st_size
-            while left > 0:
-                chunk = await asyncio.to_thread(os.read, fd, min(CHUNK, left))
-                if not chunk:
-                    break
-                sent.update(chunk)
-                left -= len(chunk)
-                yield chunk
+        async def send() -> str:  # each attempt reads the file again, from its start
+            sent = hashlib.sha256()
 
-        uuid = await self._send(chunks(), sha, info.st_size)
-        if sent.hexdigest() != sha:  # rewritten between the hash and the send
-            raise JobBackendError("a run input changed during its upload")
-        return uuid
+            async def chunks() -> AsyncIterator[bytes]:
+                os.lseek(fd, 0, os.SEEK_SET)
+                left = info.st_size
+                while left > 0:
+                    chunk = await asyncio.to_thread(os.read, fd, min(CHUNK, left))
+                    if not chunk:  # shorter than hashed: never a transient failure
+                        raise JobBackendError("a run input changed during its upload")
+                    sent.update(chunk)
+                    left -= len(chunk)
+                    yield chunk
+
+            uuid = await self._send(chunks(), sha, info.st_size)
+            if sent.hexdigest() != sha:  # rewritten between the hash and the send
+                raise JobBackendError("a run input changed during its upload")
+            return uuid
+
+        return await self._retrying(send, sha)
 
     def _open_local(self, run_id: str, key: str) -> int | None:
         """The local run copy's file for `key`, never through a link; None if it isn't there."""

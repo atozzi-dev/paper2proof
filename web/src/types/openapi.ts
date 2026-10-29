@@ -477,7 +477,7 @@ export interface components {
          * ReasonCode
          * @enum {string}
          */
-        ReasonCode: "BUDGET" | "CAPACITY" | "MISSING_DATA" | "RUNTIME_ERROR" | "UNDERSPECIFIED_CLAIM" | "INSUFFICIENT_SEEDS" | "HIGH_VARIANCE" | "REDUCED_SCALE_ABSOLUTE" | "REDUCED_SCALE_CONTRADICTS" | "NOT_MEASURED";
+        ReasonCode: "BUDGET" | "CAPACITY" | "MISSING_DATA" | "RUNTIME_ERROR" | "UNDERSPECIFIED_CLAIM" | "INSUFFICIENT_SEEDS" | "HIGH_VARIANCE" | "REDUCED_SCALE_ABSOLUTE" | "REDUCED_SCALE_CONTRADICTS" | "IMPLAUSIBLE_GAP" | "NOT_MEASURED";
         /** RunCard */
         RunCard: {
             /** Arxiv Id */

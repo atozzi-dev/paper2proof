@@ -1,6 +1,8 @@
-"""Properties P1-P6 from docs/specs/verdict-engine.md (Hypothesis, 500 examples each)."""
+"""Properties P1-P8 from docs/specs/verdict-engine.md (Hypothesis, 500 examples each)."""
 
-from hypothesis import given, settings
+import math
+
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from app.domain.models import (
@@ -15,6 +17,8 @@ from app.domain.models import (
 from app.verdict.engine import decide
 
 CFG = VerdictConfig()
+NO_GAP_RULE = VerdictConfig(implausible_ratio=None)  # the verdict before the gap rule
+K = CFG.implausible_ratio
 EXAMPLES = settings(max_examples=500, deadline=None)
 
 value = st.floats(min_value=-100, max_value=100, allow_nan=False, allow_subnormal=False)
@@ -154,3 +158,50 @@ def test_p6_reason_iff_inconclusive(case: tuple[Claim, Measurements], drop: int)
     )
     verdict = decide(claim, short, CFG)
     assert (verdict.reason is not None) == (verdict.kind is VerdictKind.INCONCLUSIVE)
+
+
+def _far_off(claim: Claim, meas: Measurements) -> bool:
+    """P7's premise, from the inputs: the mean of the measurements and the paper's value have
+    the same sign, neither is zero, and one is more than k times the other."""
+    v = claim.reported_value
+    mean = math.fsum(meas.per_seed) / len(meas.per_seed)
+    if v is None or v == 0 or mean == 0 or (v > 0) != (mean > 0):
+        return False
+    return abs(mean) > K * abs(v) or abs(v) > K * abs(mean)
+
+
+@st.composite
+def far_off_cases(draw: st.DrawFn) -> tuple[Claim, Measurements]:
+    """An ABSOLUTE claim measured k times off or more, either way, at any scale."""
+    reported = draw(value.filter(lambda x: abs(x) >= 1e-3))
+    claim = draw(claims(ClaimType.ABSOLUTE)).model_copy(update={"reported_value": reported})
+    factor = draw(st.floats(min_value=K * 1.01, max_value=1000))
+    centre = reported * factor if draw(st.booleans()) else reported / factor
+    k = draw(st.integers(min_value=3, max_value=8))
+    jitter = st.floats(min_value=-0.004, max_value=0.004)  # keeps the mean beyond k
+    per_seed = [centre * (1 + draw(jitter)) for _ in range(k)]
+    return claim, Measurements(scale=draw(st.sampled_from(list(Scale))), per_seed=per_seed)
+
+
+@EXAMPLES
+@given(far_off_cases())
+def test_p7_a_value_k_times_off_is_never_an_accusation(case: tuple[Claim, Measurements]) -> None:
+    claim, meas = case
+    assume(_far_off(claim, meas))
+    assert decide(claim, meas, CFG).kind is not VerdictKind.NOT_REPRODUCED
+
+
+@EXAMPLES
+@given(st.one_of(cases(), far_off_cases()))
+def test_p8_the_gap_rule_only_replaces_an_accusation_or_high_variance(
+    case: tuple[Claim, Measurements],
+) -> None:
+    claim, meas = case
+    before, after = decide(claim, meas, NO_GAP_RULE), decide(claim, meas, CFG)
+    if after == before:
+        return
+    assert claim.claim_type is ClaimType.ABSOLUTE and meas.scale is Scale.FULL
+    assert _far_off(claim, meas)
+    assert before.kind is VerdictKind.NOT_REPRODUCED or before.reason is ReasonCode.HIGH_VARIANCE
+    assert (after.kind, after.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
+    assert after.model_copy(update={"kind": before.kind, "reason": before.reason}) == before

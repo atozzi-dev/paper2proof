@@ -550,6 +550,7 @@
         "HIGH_VARIANCE",
         "REDUCED_SCALE_ABSOLUTE",
         "REDUCED_SCALE_CONTRADICTS",
+        "IMPLAUSIBLE_GAP",
         "NOT_MEASURED"
       ],
       "title": "ReasonCode",

@@ -112,6 +112,14 @@ class _State:
         last = data.get("last_smoke")
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
         self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
+        flags = data.get("stand_in_flags")
+        self.stand_in_flags: list[str] = (  # every refusal, kept for the run's record
+            [f for f in flags if isinstance(f, str)] if isinstance(flags, list) else []
+        )
+
+    def tried(self) -> bool:
+        """A smoke run of a script happened in this environment (an outage is not one)."""
+        return self.last_smoke is not None
 
     def dump(self, workspace: Workspace) -> dict[str, Any]:
         return {
@@ -119,6 +127,7 @@ class _State:
             "smoke_runs": self.smoke_runs,
             "searches": self.searches,
             "last_smoke": self.last_smoke,
+            "stand_in_flags": self.stand_in_flags,
         }
 
 
@@ -529,6 +538,11 @@ class SmokeTestingStep:
     ) -> StepResult:
         if not args.measures:  # the Coder says nothing can be tested faithfully here
             _check_measures(claims, args, {}, state.difference_warned)  # each claim, once
+            if not state.tried():
+                raise ToolError(
+                    "write the experiment and call run_smoke first: declare claims unmeasured "
+                    "only when a smoke run shows the method or its data cannot run here"
+                )
             reasons = [
                 {"claim_id": u.claim_id, "reason": printable(u.reason).strip()}
                 for u in args.unmeasured
@@ -559,6 +573,25 @@ class SmokeTestingStep:
             raise ToolError(f"run_smoke on {script} must pass right before finish")
         if last.get("workspace_sha256") != await ctx.run_cpu(_workspace_sha256, ws.files):
             raise ToolError("the workspace changed since the last passing smoke run: run it again")
+        found = await ctx.run_cpu(stand_in, ws.files)
+        if found is not None:
+            where = f"workspace/{found[0]}:{found[1]}"  # the excerpt is workspace text: not shown
+            if where not in state.stand_in_flags:
+                state.stand_in_flags.append(where)
+                await ctx.emit(
+                    EventType.WARNING,
+                    {
+                        "code": "STAND_IN_FLAGGED",
+                        "message": f"the Coder's script said at {where} that it uses a stand-in; "
+                        "the experiment could not run before it was changed",
+                    },
+                )
+            raise ToolError(
+                f"{where} says the script uses a stand-in: a result for another model or for "
+                "other data is a false verdict. Measure the paper's own method on its own data, "
+                "or put the claims it serves in `unmeasured` with the reason; never fall back to "
+                "other data or another model"
+            )
         check_user_args(args.args)
         if list(args.args) != last.get("args"):
             raise ToolError("finish args must match the last passing smoke run's args")
@@ -587,6 +620,7 @@ class SmokeTestingStep:
                 "files": sorted(ws.files),
                 "workspace_sha256": digest,
                 "smoke_runs": state.smoke_runs,
+                "stand_in_flags": state.stand_in_flags,
             },
         )
         await self._put(f"runs/{ctx.run_id}/workspace.json", state.dump(ws))
@@ -605,6 +639,33 @@ BASE = frozenset(
 
 def _canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+# Wording with which a script admits to testing something else than the paper (production,
+# 2026-10-29: "LogisticRegression as EBM proxy", a fallback to random data in place of MNIST).
+# A tripwire, not a proof: ordinary words ("synthetic data as in the paper", "sampling with
+# replacement", DummyClassifier as the paper's baseline) never match it.
+_DATA = r"(?:data|dataset|inputs?|labels?|images?|features?|samples?|values?)"
+_STAND_IN = re.compile(
+    r"\bas (?:an? |the )?(?:[\w.-]+ ){0,3}(?:proxy|stand-?in|substitute)\b"
+    r"|\b(?:stand-?in|substitute) for\b"
+    r"|\bplaceholder (?:model|method|data|dataset|values?|results?|implementation)\b"
+    rf"|\b(?:dummy|fake|mock) {_DATA}\b"
+    r"|\bsynthetic\b[^\n]{0,40}\b(?:for testing|testing purposes|instead|in place|fall ?back)"
+    r"|\b(?:instead of|in place of|fall(?:s|ing)? ?back to)\b[^\n]{0,40}"
+    rf"\b(?:synthetic|random|dummy|fake) {_DATA}\b"
+    r"|\b(?:synthetic|random|fake)\b[^\n]{0,30}\bmimics?\b",
+    re.IGNORECASE,
+)
+
+
+def stand_in(files: dict[str, bytes]) -> tuple[str, int, str] | None:
+    """The first line of the Coder's files that says it uses a stand-in, as (path, line, text)."""
+    for path in sorted(files):
+        for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
+            if _STAND_IN.search(line):
+                return path, number, line.strip()
+    return None
 
 
 MAX_COMPARED = 1000  # metrics.json keys; real experiments write tens
@@ -648,8 +709,9 @@ def _smoke_hint(outcome: SmokeResult) -> list[str]:
         ]
     return [
         "note: this smoke run passed. Its values come from a small subset and are not expected "
-        "to match the paper: do not tune the experiment toward the paper's numbers. If every "
-        "claim's value is in metrics.json, call finish now."
+        "to match the paper: do not tune the experiment toward the paper's numbers. A value at "
+        "chance level or the same for every input means the script is broken: fix it. "
+        "Otherwise, if every claim's value is in metrics.json, call finish now."
     ]
 
 

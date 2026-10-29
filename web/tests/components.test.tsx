@@ -105,6 +105,15 @@ describe('VerdictCard', () => {
     expect(screen.getByText(/confidence interval is too wide/i)).toBeInTheDocument()
   })
 
+  it('explains an implausible gap as a likely broken experiment, not a wrong claim', () => {
+    const v: Verdict = { ...notReproduced, kind: 'INCONCLUSIVE', reason: 'IMPLAUSIBLE_GAP' }
+    render(<VerdictCard claim={claimAbs} verdict={v} explanationMd="" {...conditions} />)
+    expect(screen.getByRole('heading', { name: 'Inconclusive' })).toBeInTheDocument()
+    expect(screen.getByText(/several times off the paper's/i)).toHaveTextContent(
+      'more likely a broken experiment or a unit mismatch than a wrong claim',
+    )
+  })
+
   it('draws the confidence interval against the tolerance band', () => {
     render(<VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} />)
     const chart = screen.getByRole('img', { name: /95% CI/ })
