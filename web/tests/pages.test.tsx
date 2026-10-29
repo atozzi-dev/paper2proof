@@ -274,6 +274,10 @@ describe('warningTitle', () => {
     expect(warningTitle('NO_GPU_CAPACITY')).toBe('No capacity for the experiment')
   })
 
+  it('names a repository skipped for its size', () => {
+    expect(warningTitle('REPO_TOO_LARGE')).toBe('Repository too large to fetch')
+  })
+
   it('shows a code it does not know as it came', () => {
     expect(warningTitle('SOMETHING_NEW')).toBe('SOMETHING_NEW')
     expect(warningTitle('toString')).toBe('toString')
