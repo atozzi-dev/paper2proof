@@ -26,7 +26,7 @@ from app.execution.backend import (
     JobStatusUnavailable,
     VolumeMount,
 )
-from app.execution.nebius_backend import JobBackendError
+from app.execution.nebius_backend import InputUploadError, JobBackendError
 from app.execution.run_storage import FakeRunStorage
 from app.execution.sandbox_jobs import (
     SANDBOX_PLATFORM,
@@ -197,10 +197,12 @@ class Api:
         self.upload_drops = 0  # uploads whose connection is dropped
         self.lookup_errors: list[int] = []  # HTTP status the next GET /v1/files answers
         self.lookup_fails_after_an_error = False  # the gateway outage hits the lookup too
+        self.upload_delay_s = 0.0  # a healthy but slow upload (a large overlay)
+        self.malformed: str | None = None  # "lookup" or "upload": a 2xx that is not an object
 
     def install(self, router: respx.Router) -> None:
         router.get(url__regex=rf"{FILES}/[0-9a-f]{{64}}$").mock(side_effect=self._file)
-        router.post(FILES).mock(side_effect=self._upload)
+        router.post(FILES).mock(side_effect=self._upload_after_a_while)
         router.post(INSTANCES).mock(side_effect=self._spawn)
         router.get(url__regex=rf"{OPS}/[0-9a-f-]+$").mock(side_effect=self._op)
         router.delete(url__regex=rf"{OPS}/[0-9a-f-]+$").mock(side_effect=self._cancel)
@@ -209,7 +211,16 @@ class Api:
     def _uuid(self, sha: str) -> str:
         return f"{sha[:8]}-0000-0000-0000-{sha[8:20]}"
 
+    async def _upload_after_a_while(self, request: httpx.Request) -> httpx.Response:
+        if self.upload_delay_s:
+            await asyncio.sleep(self.upload_delay_s)
+        if self.malformed == "upload":
+            return httpx.Response(201, json=["not", "an", "object"])
+        return self._upload(request)
+
     def _file(self, request: httpx.Request) -> httpx.Response:
+        if self.malformed == "lookup":
+            return httpx.Response(200, text="<html>ok</html>")
         if self.lookup_errors:
             return httpx.Response(self.lookup_errors.pop(0), text="<html>Bad Gateway</html>")
         sha = request.url.path.rsplit("/", 1)[-1]
@@ -950,8 +961,9 @@ async def test_an_input_that_shrinks_during_its_upload_is_changed_not_retried(
         return sha
 
     monkeypatch.setattr(sandbox_jobs, "_hash_fd", hash_then_truncate)
-    with pytest.raises(JobBackendError, match="changed during its upload"):
+    with pytest.raises(JobBackendError, match="changed during its upload") as err:
         await _backend(tmp_path, local, storage).submit(_spec())
+    assert not isinstance(err.value, InputUploadError)  # integrity: never retried later
     assert api.posts <= 1 and api.spawns == []
 
 
@@ -970,3 +982,44 @@ async def test_the_retries_have_a_total_deadline(
     with pytest.raises(InputUploadError, match="within"):
         await backend.submit(_spec())
     assert api.spawns == []
+
+
+@pytest.mark.parametrize("failure", ["spawn 503", "spawn 409", "lost reply", "another sha256"])
+async def test_an_error_once_a_job_may_exist_is_never_an_input_upload_error(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api, failure: str
+) -> None:
+    """Only InputUploadError makes the smoke executor "unavailable" (the Coder tries again): an
+    unconfirmed spawn may have left an instance, and an integrity error is no outage."""
+    if failure.startswith("spawn"):
+        api.spawn_error = int(failure.split()[1])
+    elif failure == "lost reply":
+        api.lost_reply = httpx.ReadTimeout
+    else:
+        api.stored_sha = "0" * 64
+    with pytest.raises(JobBackendError) as err:
+        await _backend(tmp_path, local, storage).submit(_spec())
+    assert not isinstance(err.value, InputUploadError)
+
+
+@pytest.mark.parametrize("where", ["lookup", "upload"])
+async def test_a_malformed_files_answer_is_a_backend_error(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api, where: str
+) -> None:
+    api.malformed = where
+    with pytest.raises(JobBackendError, match="JSON") as err:
+        await _backend(tmp_path, local, storage).submit(_spec())
+    assert not isinstance(err.value, InputUploadError)
+    assert api.spawns == []
+
+
+async def test_a_healthy_slow_upload_is_never_cut_short(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline bounds the retries after a transient failure, not a first upload that is
+    only slow (a large overlay on a modest uplink)."""
+    from app.execution import sandbox_jobs
+
+    monkeypatch.setattr(sandbox_jobs, "UPLOAD_TOTAL_S", 0.05)
+    api.upload_delay_s = 0.2
+    await _backend(tmp_path, local, storage).submit(_spec())
+    assert len(api.spawns) == 1

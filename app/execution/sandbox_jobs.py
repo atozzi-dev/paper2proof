@@ -73,7 +73,7 @@ LIST_PAGE = 1000
 MAX_PAGES = 10  # a lookup past this, or a page seen twice, is an outage
 CHUNK = 1 << 20
 UPLOAD_BACKOFF_S = (5.0, 15.0)  # between the attempts at an upload (3 in all)
-UPLOAD_TOTAL_S = 300.0  # all attempts: the upload counts against the job's queue cap
+UPLOAD_TOTAL_S = 300.0  # the resends after a transient failure, never a healthy first send
 _DROPPED = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 _TRANSIENT = {429, 500, 502, 503, 504}  # the gateway or the service, not the request
 LOOKBACK = timedelta(minutes=5)  # a lost spawn is looked for from its intent minus this
@@ -359,12 +359,12 @@ class SandboxesJobBackend:
         large overlay). Content-addressed, so a resend is safe, and a 502 can hide a file that
         was stored: it is looked up before each new attempt."""
         try:
+            return await send()  # a large input on a modest uplink is slow, not failing
+        except _Transient:
+            log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+        try:
             async with asyncio.timeout(UPLOAD_TOTAL_S):
-                for wait in UPLOAD_BACKOFF_S:
-                    try:
-                        return await send()
-                    except _Transient:
-                        log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+                for number, wait in enumerate(UPLOAD_BACKOFF_S, 1):
                     await self._sleep(wait)
                     try:
                         found = await self._known(sha)
@@ -372,7 +372,13 @@ class SandboxesJobBackend:
                         found = None
                     if found:
                         return found
-                return await send()
+                    try:
+                        return await send()
+                    except _Transient:
+                        if number == len(UPLOAD_BACKOFF_S):
+                            raise
+                        log.warning("Sandboxes upload failed, retrying", extra={"sha256": sha})
+                raise AssertionError("unreachable")  # pragma: no cover
         except TimeoutError:
             raise InputUploadError(
                 f"Sandboxes upload: no success within {UPLOAD_TOTAL_S:g} s"
