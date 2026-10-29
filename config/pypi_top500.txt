@@ -88,6 +88,7 @@ cssselect2
 cycler
 cyclopts
 cython
+dash
 dask
 databricks-sdk
 dataclasses-json
@@ -446,6 +447,7 @@ ruff
 s3fs
 s3transfer
 safetensors
+salib
 scikit-image
 scikit-learn
 scipy

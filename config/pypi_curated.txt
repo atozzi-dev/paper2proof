@@ -30,6 +30,7 @@ contourpy
 cryptography
 cycler
 cython
+dash
 dask
 datasets
 decorator
@@ -143,6 +144,7 @@ rich
 rsa
 s3transfer
 safetensors
+salib
 scikit-image
 scikit-learn
 scipy

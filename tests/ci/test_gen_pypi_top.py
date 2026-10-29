@@ -111,3 +111,13 @@ def test_the_committed_list_keeps_every_curated_name() -> None:
     assert names == sorted(set(names)) and names == [normalize(n) for n in names]
     assert {normalize(n) for n in curated} <= set(names)
     assert len(names) >= 500
+
+
+def test_legitimate_dependencies_of_paper_packages_are_not_typosquats() -> None:
+    """Production, 2026-10-29: the provisioner refused interpret (InterpretML's package) because
+    its dependency dash is one edit from dask; SALib is two from jaxlib. Both are real, widely
+    used projects (Plotly Dash, the SALib sensitivity-analysis library)."""
+    from app.execution.package_policy import load_policy_config
+
+    popular = load_policy_config(ROOT / "config").popular
+    assert {"dash", "salib"} <= popular
