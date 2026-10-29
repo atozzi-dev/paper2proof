@@ -12,6 +12,7 @@ from app.domain.events import SandboxOutputPayload
 from app.domain.models import (
     Claim,
     ClaimType,
+    DatasetReq,
     ErrorCode,
     Plan,
     PlanMode,
@@ -56,6 +57,7 @@ async def _setup(
     entrypoint_hint: str | None = None,
     report: dict[str, Any] | None = None,
     two_claims: bool = False,
+    datasets: list[DatasetReq] | None = None,
 ) -> tuple[RunContext, LocalArtifactStore]:
     artifacts = LocalArtifactStore(tmp_path)
     ids = ["c1", "c2"] if two_claims else ["c1"]
@@ -69,6 +71,7 @@ async def _setup(
         seeds=[0, 1, 2],
         gpu_minutes_est=10,
         entrypoint_hint=entrypoint_hint,
+        datasets=datasets or [],
     )
     artifacts.put_json(PLAN_KEY, {"plan": plan.model_dump(mode="json"), "est_cost_usd": 0.1})
     artifacts.put_json(REPORT_KEY, {"overlay_sha256": "a" * 64, **(report or {})})
@@ -577,6 +580,35 @@ async def test_claims_are_declared_untestable_only_after_trying(
     assert err.value.code is ErrorCode.NO_CLAIMS
     first = _tool_results(models)[0]
     assert first.startswith("ERROR:") and "run_smoke" in first
+
+
+async def test_the_coder_is_told_where_the_planned_data_is_and_in_what_form(
+    store: Store, tmp_path: Path
+) -> None:
+    """Production, 2026-10-29: ylecun/mnist was provisioned, but the Coder only knew "under
+    $P2P_DATA_DIR" and looked for MNIST in torchvision, which cannot download offline."""
+    mnist = DatasetReq(kind="hf", id="ylecun/mnist")
+    ctx, artifacts = await _setup(store, tmp_path, datasets=[mnist])
+    step, models = _step("chatty", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    _, messages = models.requests[0]
+    task = str(messages[1].content)
+    assert "$P2P_DATA_DIR/ylecun__mnist/" in task and "parquet" in task
+    assert "split train only" in task
+    assert "$P2P_DATA_DIR/smoke/smoke.parquet" in task
+    assert "torchvision" in task  # its downloaders are named as what fails
+
+
+async def test_without_planned_data_the_coder_is_told_nothing_can_be_downloaded(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step("chatty", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    _, messages = models.requests[0]
+    assert "no dataset is planned" in str(messages[1].content)
 
 
 async def test_an_oversized_package_request_is_a_tool_error(store: Store, tmp_path: Path) -> None:
