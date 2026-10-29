@@ -29,6 +29,8 @@ export const REASON_TEXT: Record<ReasonCode, string> = {
   REDUCED_SCALE_ABSOLUTE:
     'An absolute number cannot be checked at reduced scale; the measured values are shown for reference.',
   REDUCED_SCALE_CONTRADICTS: 'The claimed trend was not observed at reduced scale.',
+  IMPLAUSIBLE_GAP:
+    "The measured value is several times off the paper's: more likely a broken experiment or a unit mismatch than a wrong claim.",
 }
 
 /** Plain-words titles of the warning codes (docs/specs/api-and-events.md, `warning` event). */

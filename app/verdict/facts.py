@@ -9,7 +9,7 @@ floats. Verdict numbers are in the claim's original direction (engine.py): for a
 claim the mean and CI are of method minus baseline, and `claimed_delta` is on that same
 scale (a lower-is-better reduction is stored negative)."""
 
-from app.domain.models import Claim, ClaimType, Verdict
+from app.domain.models import Claim, ClaimType, ReasonCode, Verdict
 from app.verdict.scale import MetricUnit, ScaleNote
 
 _DIGITS = range(4, 10)  # significant digits: the fewest that keep different numbers apart
@@ -188,7 +188,22 @@ def _absolute_paper(claim: Claim, verdict: Verdict) -> list[str]:
             f" With a tolerance of {_fmt(w)[0]}, a mean of {_fmt(edge)[0]} or {bound} counts as "
             "matching the paper."
         )
+    if verdict.reason is ReasonCode.IMPLAUSIBLE_GAP and verdict.mean is not None:
+        return [text, _gap(verdict.mean, reported)]
     return [text]
+
+
+def _gap(mean: float, reported: float) -> str:
+    """IMPLAUSIBLE_GAP: same sign, both non-zero (engine.py), so the ratio is positive."""
+    if abs(mean) > abs(reported):
+        subject = f"The measured mean is {_fmt(mean / reported)[0]} times the paper's value"
+    else:
+        subject = f"The paper's value is {_fmt(reported / mean)[0]} times the measured mean"
+    return (
+        f"{subject}: a gap this large more likely comes from a broken experiment or a unit "
+        "mismatch (a count against a rate, a fraction against a percent) than from a wrong "
+        "claim, so the verdict code does not hold it against the paper."
+    )
 
 
 def _fmt(*values: float) -> list[str]:
