@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.domain.errors import P2PError
 from app.domain.models import Claim, ClaimType, ErrorCode, Plan, StepName
-from app.domain.paper import IngestedPaper
+from app.domain.paper import IngestedPaper, Section
 from app.orchestrator.context import RunContext
 from app.storage.artifacts import ArtifactStore
 
@@ -49,8 +49,10 @@ def paper_excerpt(paper: IngestedPaper, max_chars: int) -> str:
     experiment first, then the others, cut at `max_chars`. Production, 2026-10-29: with only
     the Reader's claim summaries they guessed the sample size, the noise and the epochs, and a
     planted false claim came out Reproduced."""
-    first = [s for s in paper.sections if _SETUP.search(s.title)]
-    rest = [s for s in paper.sections if not _SETUP.search(s.title)]
+    first: list[Section] = []
+    rest: list[Section] = []
+    for section in paper.sections:  # one pass, a bounded title (CPU pool: run_cpu)
+        (first if _SETUP.search(section.title[:200]) else rest).append(section)
     out = ""
     for section in [*first, *rest]:
         left = max_chars - len(out)

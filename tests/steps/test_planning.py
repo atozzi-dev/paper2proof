@@ -426,3 +426,9 @@ async def test_the_planner_reads_the_paper_s_own_schedule(store: Store, tmp_path
     prompt = _prompt(models)
     block = prompt[prompt.index('<untrusted_document source="arxiv:0000.00001"') :]
     assert "Adam for 300 epochs, batch 128." in block.split("</untrusted_document>")[0]
+
+
+async def test_the_planner_works_without_the_ingested_paper(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
+    await _plan(store, tmp_path, "two_seeds", models=models)  # "i" was never written
+    assert "(not available)" in _prompt(models)

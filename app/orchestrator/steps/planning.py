@@ -150,7 +150,7 @@ class PlanningStep:
                 discovery.model_dump_json(indent=1), source="discovery", max_chars=10_000
             ),
             paper=wrap_untrusted(
-                paper_excerpt(paper, PAPER_EXCERPT_CHARS),
+                await ctx.run_cpu(paper_excerpt, paper, PAPER_EXCERPT_CHARS),
                 source=f"arxiv:{paper.arxiv_id}",
                 max_chars=PAPER_EXCERPT_CHARS,
             )
