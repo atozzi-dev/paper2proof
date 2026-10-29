@@ -144,9 +144,11 @@ async def test_an_unselected_claim_has_no_verdict() -> None:
 # --- set B -----------------------------------------------------------------------------------
 
 
-def test_set_b_file_is_a_placeholder_until_the_human_picks_papers() -> None:
+def test_set_b_holds_the_papers_picked_with_the_human() -> None:
     config = run_set_b.load_set_b()
-    assert config.papers == []
+    ids = [p.arxiv_id for p in config.papers]
+    assert ids == ["1909.09223", "2001.05016", "2404.19756", "1706.09516", "1503.02531"]
+    assert all(p.claim_hint and p.notes for p in config.papers)
 
 
 def test_set_b_rejects_anything_but_arxiv_ids(tmp_path: Path) -> None:
