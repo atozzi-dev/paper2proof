@@ -283,3 +283,12 @@ def test_the_api_image_ships_the_canary_papers_but_not_their_code() -> None:
         "!eval/canaries/*/paper.tex",
         "!eval/canaries/*/truth.yaml",
     }
+
+
+@pytest.mark.parametrize("image", ["runner", "runner-cpu"])
+def test_runners_ship_the_openmp_runtime(image: str) -> None:
+    """Production, 2026-10-29: LightGBM and XGBoost wheels load libgomp.so.1, which the slim
+    base lacks, so every gradient-boosting baseline failed to import in the sandbox."""
+    text = (IMAGES / image / "Dockerfile").read_text(encoding="utf-8")
+    line = re.search(r"apt-get install -y --no-install-recommends ([^\\\n]+)", text)
+    assert line is not None and {"tini", "zstd", "libgomp1"} <= set(line.group(1).split())

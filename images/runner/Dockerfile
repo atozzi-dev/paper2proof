@@ -26,7 +26,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # /opt/p2p is created here as root 0755: when a COPY --chmod=0444 creates it, recent BuildKit
 # leaves it without a search bit and p2p cannot open its own scripts.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini zstd \
+ && apt-get install -y --no-install-recommends tini zstd libgomp1 \
  && rm -rf /var/lib/apt/lists/* \
  && echo 'p2p:x:10001:' >> /etc/group \
  && echo 'p2p:x:10001:10001:p2p:/home/p2p:/usr/sbin/nologin' >> /etc/passwd \

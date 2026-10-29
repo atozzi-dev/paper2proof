@@ -1,13 +1,18 @@
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
+import httpx
 import pytest
+import respx
 from pydantic import BaseModel
 
+from app.discovery.github import GITHUB_API
 from app.discovery.hf_datasets import DatasetProblem, DatasetReport, RunCpu
-from app.domain.discovery import Discovery, RepoRef
+from app.discovery.known_datasets import named_in
+from app.domain.discovery import MAX_DATASETS, Discovery, RepoRef
 from app.domain.errors import P2PError
 from app.domain.events import ApprovalRequiredPayload, PlanReadyPayload, WarningPayload
 from app.domain.models import (
@@ -15,19 +20,27 @@ from app.domain.models import (
     ClaimType,
     DatasetReq,
     ErrorCode,
+    PackageReq,
     Plan,
     PlanMode,
     RunStatus,
     Scale,
     StepName,
 )
+from app.execution.package_policy import PYPI
 from app.models.client import Message, Role
 from app.models.fake import FakeModelClient
 from app.models.pricing import load_cloud_prices
 from app.orchestrator.budget import BudgetExceeded
 from app.orchestrator.cost_estimate import estimate_plan_cost
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
-from app.orchestrator.steps.planning import CPU_HARDWARE, DatasetCheck, PlanningStep, correct_plan
+from app.orchestrator.steps.planning import (
+    CPU_HARDWARE,
+    DatasetCheck,
+    PackageCheck,
+    PlanningStep,
+    correct_plan,
+)
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
@@ -35,16 +48,27 @@ from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
 DISCOVERY = f"runs/{RUN}/discovery.json"
 T = TypeVar("T", bound=BaseModel)
 CLOUD = load_cloud_prices(ROOT / "config" / "pricing.yaml")
+OFFICIAL = RepoRef(url="https://github.com/a/b", source="paper", official=True)
 
 
-def _claim(cid: str, kind: ClaimType) -> Claim:
+@pytest.fixture(autouse=True)
+def pypi() -> Iterator[respx.MockRouter]:
+    """PyPI and GitHub as each test sets them up: by default PyPI knows no project named b (the
+    default repository's name). Nothing reaches the network."""
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{PYPI}/b/json", name="b").respond(404)
+        router.get(f"{GITHUB_API}/repos/a/b", name="github").respond(200, json={"full_name": "a/b"})
+        yield router
+
+
+def _claim(cid: str, kind: ClaimType, dataset: str = "CIFAR-10") -> Claim:
     return Claim(
         id=cid,
-        text="Ours beats ResNet-18 on CIFAR-10",
+        text=f"Ours beats ResNet-18 on {dataset}",
         claim_type=kind,
         metric="top1_accuracy",
         higher_is_better=True,
-        dataset="CIFAR-10",
+        dataset=dataset,
         setting="200 epochs",
         reported_value=94.1 if kind is ClaimType.ABSOLUTE else None,
         baseline_name="ResNet-18" if kind is ClaimType.RELATIVE else None,
@@ -59,11 +83,15 @@ async def _plan(
     *,
     preemptible: bool = True,
     dataset_check: DatasetCheck | None = None,
+    package_check: PackageCheck | None = None,
     models: FakeModelClient | None = None,
     hardware: str | None = None,
+    repo: RepoRef | None = OFFICIAL,
+    dataset: str = "CIFAR-10",
+    popular: frozenset[str] = frozenset({"b"}),
 ) -> tuple[Plan, StepName | RunStatus, list[object]]:
     artifacts = LocalArtifactStore(tmp_path)
-    discovery = Discovery(repo=RepoRef(url="https://github.com/a/b", source="paper", official=True))
+    discovery = Discovery(repo=repo)
     artifacts.put_json(DISCOVERY, discovery.model_dump(mode="json"))
     ctx = await ctx_at(
         store,
@@ -74,7 +102,7 @@ async def _plan(
             (StepName.DISCOVERING, DISCOVERY),
         ],
     )
-    claims = [_claim("c1", ClaimType.RELATIVE), _claim("c2", ClaimType.ABSOLUTE)]
+    claims = [_claim("c1", ClaimType.RELATIVE, dataset), _claim("c2", ClaimType.ABSOLUTE, dataset)]
     await store.save_claims(RUN, claims, selected={"c1", "c2"})
     step = PlanningStep(
         models or FakeModelClient(LLM_FIXTURES, case=case),
@@ -82,6 +110,8 @@ async def _plan(
         CLOUD,
         preemptible=preemptible,
         dataset_check=dataset_check,
+        package_check=package_check,
+        popular=popular,
         **({"hardware": hardware} if hardware else {}),
     )
     result = await step.run(ctx)
@@ -298,7 +328,7 @@ async def test_a_dataset_still_missing_after_the_retry_is_dropped_with_a_warning
 ) -> None:
     models = FakeModelClient(LLM_FIXTURES, case="still_made_up")
     plan, _, events = await _plan(
-        store, tmp_path, "still_made_up", dataset_check=_on_hf, models=models
+        store, tmp_path, "still_made_up", dataset_check=_on_hf, models=models, dataset="Wine"
     )
     assert plan.datasets == []
     assert len(models.calls) == 2  # one retry, never a loop
@@ -432,3 +462,216 @@ async def test_the_planner_works_without_the_ingested_paper(store: Store, tmp_pa
     models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
     await _plan(store, tmp_path, "two_seeds", models=models)  # "i" was never written
     assert "(not available)" in _prompt(models)
+
+
+# --- the authors' package: an official repository planned REPO_FIRST -------------------------
+
+
+def _links(*urls: str) -> httpx.Response:
+    urls_by_label = {f"link {i}": url for i, url in enumerate(urls)}
+    return httpx.Response(200, json={"info": {"project_urls": urls_by_label}})
+
+
+async def test_the_authors_package_is_planned_when_pypi_links_the_official_repository(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    """InterpretML: the official repository's sources need a compiled library that only the
+    authors' PyPI package ships, and the Planner did not plan it."""
+    pypi["b"].mock(return_value=_links("https://b.dev", "https://github.com/a/b"))
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds")  # REPO_FIRST, plans timm only
+    assert plan.packages == [PackageReq(name="b"), PackageReq(name="timm", specifier="==1.0.9")]
+    assert any("authors' package b was added" in n for n in plan.notes)
+    assert not pypi["github"].called  # PyPI links the repository as discovered
+
+
+async def test_the_authors_package_goes_through_the_package_policy(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+    seen: list[list[PackageReq]] = []
+
+    async def refuse_b(packages: list[PackageReq]) -> list[PackageReq]:
+        seen.append(packages)
+        return [p for p in packages if p.name != "b"]
+
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", package_check=refuse_b)
+    assert [[p.name for p in packages] for packages in seen] == [["b", "timm"]]
+    assert [p.name for p in plan.packages] == ["timm"]
+    assert not any("was added" in n for n in plan.notes)
+    assert any("authors' package b" in n and "refused" in n for n in plan.notes)
+
+
+async def test_the_authors_package_the_policy_accepts_is_noted_as_added(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+
+    async def accept(packages: list[PackageReq]) -> list[PackageReq]:
+        return packages
+
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", package_check=accept)
+    assert [p.name for p in plan.packages] == ["b", "timm"]
+    assert any("authors' package b was added" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _links("https://github.com/someone/b", "https://github.com/a/b-extra"),
+        httpx.Response(404),
+        httpx.ConnectError("down"),
+    ],
+    ids=["links-elsewhere", "not-on-pypi", "network-error"],
+)
+async def test_no_authors_package_without_a_link_back_to_the_repository(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter, answer: httpx.Response | Exception
+) -> None:
+    if isinstance(answer, Exception):
+        pypi["b"].mock(side_effect=answer)
+    else:
+        pypi["b"].mock(return_value=answer)
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds")
+    assert pypi["b"].called
+    assert [p.name for p in plan.packages] == ["timm"]
+    assert not any("authors' package" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize(
+    ("case", "repo"),
+    [
+        ("two_seeds", RepoRef(url="https://github.com/a/b", source="tavily", official=False)),
+        ("two_seeds", None),
+        ("made_up_dataset", OFFICIAL),  # FROM_SCRATCH
+        ("two_seeds", RepoRef(url="https://github.com/a/timm", source="paper", official=True)),
+    ],
+    ids=["found-by-search", "no-repository", "from-scratch", "already-planned"],
+)
+async def test_the_authors_package_is_looked_up_only_for_an_official_repository_run_as_is(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter, case: str, repo: RepoRef | None
+) -> None:
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+    plan, _, _ = await _plan(store, tmp_path, case, repo=repo)  # any other request would fail
+    assert not pypi["b"].called and not pypi["github"].called
+    assert "b" not in [p.name for p in plan.packages]
+    assert not any("authors' package" in n for n in plan.notes)
+
+
+# --- known datasets the claims name ----------------------------------------------------------
+
+
+async def _keep(datasets: list[DatasetReq], run_cpu: RunCpu) -> DatasetReport:
+    return DatasetReport(kept=datasets, dropped=[], unchecked=[])
+
+
+async def test_a_claim_on_mnist_plans_its_hugging_face_copy(store: Store, tmp_path: Path) -> None:
+    """Distillation: the Planner planned no data for MNIST claims ("loaded via torchvision"),
+    but experiments run offline, where torchvision cannot download."""
+    checked: list[list[DatasetReq]] = []
+
+    async def keep(datasets: list[DatasetReq], run_cpu: RunCpu) -> DatasetReport:
+        checked.append(datasets)
+        return await _keep(datasets, run_cpu)
+
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", dataset="MNIST", dataset_check=keep)
+    assert plan.datasets == [DatasetReq(kind="hf", id="ylecun/mnist")]
+    assert checked == [plan.datasets]  # added before the dataset check, which judges it too
+    assert any("MNIST" in n and "ylecun/mnist" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize(
+    ("dataset", "expected"),
+    [
+        ("Fashion-MNIST", ["zalando-datasets/fashion_mnist"]),
+        ("CIFAR-100", ["uoft-cs/cifar100"]),
+        ("digits (scikit-learn load_digits, MNIST-like)", []),
+        ("synthetic data generated in code", []),
+    ],
+)
+async def test_known_datasets_are_planned_once_and_only_when_a_claim_names_them(
+    store: Store, tmp_path: Path, dataset: str, expected: list[str]
+) -> None:
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", dataset=dataset, dataset_check=_keep)
+    assert [d.id for d in plan.datasets] == expected
+
+
+async def test_the_retried_plan_gets_the_known_dataset_too(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="still_made_up")  # CIFAR-10 claims, wine data
+    plan, _, _ = await _plan(store, tmp_path, "still_made_up", dataset_check=_on_hf, models=models)
+    assert [d.id for d in plan.datasets] == ["uoft-cs/cifar10"]
+    assert len(models.calls) == 2
+
+
+def _plan_with(*datasets: DatasetReq, claims: tuple[str, ...] = ("c1",)) -> Plan:
+    return Plan(
+        mode=PlanMode.FROM_SCRATCH,
+        claim_ids=list(claims),
+        claim_types={c: ClaimType.RELATIVE for c in claims},
+        scale=Scale.REDUCED,
+        seeds=[0, 1, 2],
+        datasets=list(datasets),
+        gpu_minutes_est=10,
+    )
+
+
+MNIST = named_in("MNIST", "")
+RELATIVE = {"c1": ClaimType.RELATIVE, "c2": ClaimType.RELATIVE}
+
+
+@pytest.mark.parametrize("planned", ["ylecun/mnist", "YLeCun/MNIST", "mnist"])
+def test_a_known_dataset_already_planned_is_not_added_again(planned: str) -> None:
+    plan = _plan_with(DatasetReq(kind="hf", id=planned, split="test"))
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c1": MNIST})
+    assert corrected.datasets == plan.datasets and notes == []
+
+
+def test_two_claims_on_one_known_dataset_add_it_once() -> None:
+    plan = _plan_with(claims=("c1", "c2"))
+    named = {"c1": MNIST, "c2": MNIST}
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named=named)
+    assert [d.id for d in corrected.datasets] == ["ylecun/mnist"] and len(notes) == 1
+
+
+def test_only_the_claims_the_plan_tests_add_known_datasets() -> None:
+    plan = _plan_with()  # c2 is selected but the Planner does not test it
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c2": MNIST})
+    assert corrected.datasets == [] and notes == []
+
+
+@pytest.mark.parametrize(
+    "planned",
+    [
+        [DatasetReq(kind="hf", id=f"org/d{i}") for i in range(MAX_DATASETS)],
+        [DatasetReq(kind="hf", id=f"org/h{i}", max_bytes=10_000_000_000) for i in range(2)],
+    ],
+    ids=["datasets-cap", "bytes-cap"],
+)
+def test_known_datasets_respect_the_caps(planned: list[DatasetReq]) -> None:
+    plan = _plan_with(*planned)
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c1": MNIST})
+    assert corrected.datasets == planned
+    assert len(notes) == 1 and "MNIST" in notes[0] and "not added" in notes[0]
+
+
+async def test_an_authors_package_that_is_not_popular_is_never_added_automatically(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    """Its PyPI links are self-declared: a squatter can point them at the official repository.
+    Only a popular name (the top PyPI list plus the curated one) is the real project."""
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", popular=frozenset())
+    assert [p.name for p in plan.packages] == ["timm"]
+    assert any("authors' package b" in n and "not added" in n for n in plan.notes)
+
+
+def test_the_popular_set_is_the_package_policy_s() -> None:
+    from app.execution.package_policy import load_policy_config
+    from app.orchestrator.steps.planning import POPULAR
+
+    assert load_policy_config(ROOT / "config").popular == POPULAR
+    assert "interpret" in POPULAR  # InterpretML's own package (Microsoft), curated
+
+
+async def test_a_huge_claim_field_is_matched_within_a_bound() -> None:
+    from app.orchestrator.steps.planning import NAMED_CHARS
+
+    assert NAMED_CHARS <= 4096

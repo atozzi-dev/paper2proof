@@ -831,3 +831,50 @@ async def test_a_package_the_plan_installed_is_not_requested_again(
     assert result.output_ref.endswith("package_request_1.json")  # the refusal stored nothing
     request = artifacts.get_json(result.output_ref)
     assert [p["name"] for p in request["requested_packages"]] == ["shap"]
+
+
+async def test_a_script_that_starts_processes_is_not_smoke_run(
+    store: Store, tmp_path: Path
+) -> None:
+    """Production, 2026-10-29: the Coder kept running wrappers that subprocess or exec the
+    experiment with guessed paths, and spent its smoke runs on them."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("smoke_a_wrapper", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    refused = _tool_results(models)[1]
+    assert refused.startswith("ERROR:") and "train.py:1" in refused and "process" in refused
+    assert len(smoke.runs) == 1  # the refused run never reached the sandbox
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "import subprocess",
+        "os.system('python experiment.py')",
+        "exec(open('workspace/experiment.py').read())",
+        "import runpy",
+        "proc = os.popen('ls')",
+    ],
+)
+def test_process_launching_code_is_found(line: str) -> None:
+    from app.orchestrator.steps.smoke_testing import launches_processes
+
+    assert launches_processes({"train.py": f"import os\n{line}\n".encode()}) == ("train.py", 2)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "from multiprocessing import Pool",
+        "loader = DataLoader(data, num_workers=2)",
+        "# never start a subprocess here",
+        "result = executor.submit(fn)",
+        "model.exec_mode = 'fast'",
+    ],
+)
+def test_ordinary_code_does_not_launch_processes(line: str) -> None:
+    from app.orchestrator.steps.smoke_testing import launches_processes
+
+    assert launches_processes({"train.py": f"{line}\n".encode()}) is None

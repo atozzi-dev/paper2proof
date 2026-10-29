@@ -10,7 +10,8 @@ Needs: NEBIUS_API_KEY and TF_PROJECT_ID. For a private registry: --username (the
        Sandboxes uses it for this import only. Nothing secret is printed or written.
 
 1. POST /v1/images/import with the image by digest (invariant 8), then wait for the operation.
-2. Check the imported image offline: the runner files, setpriv and torch are there.
+2. Check the imported image offline: the runner files, setpriv, torch and the OpenMP
+   runtime (libgomp, which LightGBM and XGBoost wheels load) are there.
 3. Write `<digest>: <image uuid>` into config/sandbox_images.yaml (other digests are kept).
 Exit 0 on success; the file is then committed like any config change.
 """
@@ -41,7 +42,8 @@ CHECK = (
     " && command -v setpriv setsid timeout tail >/dev/null"
     " && install -d -m 0700 /root/p2p"
     ' && echo "uid $(setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs id -u)"'
-    " && /opt/venv/bin/python -I -c 'import torch; print(\"torch\", torch.__version__)'"
+    ' && /opt/venv/bin/python -I -c \'import ctypes, torch; ctypes.CDLL("libgomp.so.1");'
+    ' print("torch", torch.__version__)\''
 )
 IMPORT_TIMEOUT_S = 1800
 
@@ -120,7 +122,7 @@ def import_image(
     if code != 0 or "uid 10001" not in out or "torch" not in out:
         raise ImportFailed(
             "the imported image cannot run the job command (runner files, setpriv, setsid, "
-            "timeout, a writable /root, the uid 10001 drop or torch)"
+            "timeout, a writable /root, the uid 10001 drop, torch or the OpenMP runtime)"
         )
     print(f"checked: {_stdout(ran).strip().splitlines()[-1]}")
     return str(uuid)

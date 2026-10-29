@@ -504,3 +504,10 @@ def test_a_sandboxes_exec_job_stopped_at_its_watchdog_still_reports_partial_resu
     assert files is not None
     analysis = analyze_results(files["results.json"], manifest)
     assert analysis.exit_reason == "budget_timeout" and analysis.used_seeds == [0]
+
+
+@pytest.mark.parametrize("image", ["p2p-runner", "p2p-runner-cpu"])
+def test_runners_load_the_openmp_runtime(image: str) -> None:
+    """LightGBM and XGBoost wheels need the system libgomp: torch and scikit-learn bundle
+    their own, so importing them proves nothing."""
+    _run(image, "-c", "import ctypes; ctypes.CDLL('libgomp.so.1')", entrypoint="python")
