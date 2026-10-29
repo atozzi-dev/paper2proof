@@ -203,6 +203,7 @@ importlib-metadata
 importlib-resources
 iniconfig
 installer
+interpret
 invoke
 ipykernel
 ipython

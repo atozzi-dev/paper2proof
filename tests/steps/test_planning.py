@@ -88,6 +88,7 @@ async def _plan(
     hardware: str | None = None,
     repo: RepoRef | None = OFFICIAL,
     dataset: str = "CIFAR-10",
+    popular: frozenset[str] = frozenset({"b"}),
 ) -> tuple[Plan, StepName | RunStatus, list[object]]:
     artifacts = LocalArtifactStore(tmp_path)
     discovery = Discovery(repo=repo)
@@ -110,6 +111,7 @@ async def _plan(
         preemptible=preemptible,
         dataset_check=dataset_check,
         package_check=package_check,
+        popular=popular,
         **({"hardware": hardware} if hardware else {}),
     )
     result = await step.run(ctx)
@@ -648,3 +650,28 @@ def test_known_datasets_respect_the_caps(planned: list[DatasetReq]) -> None:
     corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c1": MNIST})
     assert corrected.datasets == planned
     assert len(notes) == 1 and "MNIST" in notes[0] and "not added" in notes[0]
+
+
+async def test_an_authors_package_that_is_not_popular_is_never_added_automatically(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    """Its PyPI links are self-declared: a squatter can point them at the official repository.
+    Only a popular name (the top PyPI list plus the curated one) is the real project."""
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", popular=frozenset())
+    assert [p.name for p in plan.packages] == ["timm"]
+    assert any("authors' package b" in n and "not added" in n for n in plan.notes)
+
+
+def test_the_popular_set_is_the_package_policy_s() -> None:
+    from app.execution.package_policy import load_policy_config
+    from app.orchestrator.steps.planning import POPULAR
+
+    assert load_policy_config(ROOT / "config").popular == POPULAR
+    assert "interpret" in POPULAR  # InterpretML's own package (Microsoft), curated
+
+
+async def test_a_huge_claim_field_is_matched_within_a_bound() -> None:
+    from app.orchestrator.steps.planning import NAMED_CHARS
+
+    assert NAMED_CHARS <= 4096

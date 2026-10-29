@@ -4,6 +4,7 @@ budget and invariants, estimates the cost and decides auto-approval (architectur
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 
 import httpx
 
@@ -28,7 +29,7 @@ from app.domain.models import (
     Scale,
     StepName,
 )
-from app.execution.package_policy import normalize
+from app.execution.package_policy import load_policy_config, normalize
 from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
@@ -144,6 +145,12 @@ def correct_plan(
     return Plan.model_validate(corrected.model_dump()), notes
 
 
+NAMED_CHARS = 4096  # of a claim's dataset and text fields, matched against the known datasets
+# The package policy's popular names: an authors' package found by its PyPI links is added
+# only if it is one of them (its links are self-declared, a squatter can copy them).
+POPULAR = load_policy_config(Path(__file__).resolve().parents[3] / "config").popular
+
+
 class PlanningStep:
     name = StepName.PLANNING
 
@@ -159,6 +166,7 @@ class PlanningStep:
         exec_on: tuple[str, str] = (EXEC_PLATFORM, EXEC_PRESET),
         hardware: str = GPU_HARDWARE,
         http: httpx.AsyncClient | None = None,
+        popular: frozenset[str] | None = None,
     ) -> None:
         self._models = models
         self._artifacts = artifacts
@@ -169,6 +177,7 @@ class PlanningStep:
         self._exec_on = exec_on  # the configured exec platform and preset (the estimate's price)
         self._hardware = hardware  # what the experiment runs on, as the Planner reads it
         self._http = http  # PyPI (the authors' package); None: a short-lived client per lookup
+        self._popular = POPULAR if popular is None else popular
 
     async def run(self, ctx: RunContext) -> StepResult:
         claims = [c for c, selected in await ctx.store.get_claims(ctx.run_id) if selected]
@@ -207,13 +216,16 @@ class PlanningStep:
             Role.PLANNER, messages, Plan, run_id=ctx.run_id, step=ctx.step.value, prompt=prompt.name
         )
         selected = {c.id: c.claim_type for c in claims}
-        named = {c.id: named_in(c.dataset, c.text) for c in claims}  # curated names only
+        named = {  # curated names only; paper text, so bounded before the regexes
+            c.id: named_in(c.dataset[:NAMED_CHARS], c.text[:NAMED_CHARS]) for c in claims
+        }
         plan, _ = correct_plan(proposed, selected=selected, gpu_cap=limits.gpu_minutes, named=named)
         if self._dataset_check is not None and plan.datasets:
             history = [*messages, _said(proposed)]
             plan = await self._fetchable(ctx, self._dataset_check, plan, history, selected, named)
         authors = await self._authors_package(ctx, plan, discovery)
-        if authors is not None:  # first: the per-request quota never cuts it
+        unknown = authors is not None and normalize(authors.name) not in self._popular
+        if authors is not None and not unknown:  # first: the per-request quota never cuts it
             plan = plan.model_copy(update={"packages": [authors, *plan.packages]})
         if self._package_check is not None:
             plan = plan.model_copy(update={"packages": await self._package_check(plan.packages)})
@@ -221,7 +233,14 @@ class PlanningStep:
             plan = plan.model_copy(
                 update={"notes": [*plan.notes, "packages are validated at provisioning"]}
             )
-        if authors is not None:
+        if authors is not None and unknown:  # its PyPI links are self-declared
+            note = (
+                f"the authors' package {authors.name} was not added: it links to the official "
+                "repository, but such links are self-declared and it is not a known popular "
+                "package"
+            )
+            plan = plan.model_copy(update={"notes": [*plan.notes, note]})
+        elif authors is not None:
             kept = authors.name in {normalize(p.name) for p in plan.packages}
             note = (
                 f"the authors' package {authors.name} was added (its PyPI page links to the "
