@@ -14,6 +14,7 @@ from app.domain.models import (
     ClaimType,
     DatasetReq,
     ErrorCode,
+    PackageReq,
     Plan,
     PlanMode,
     Scale,
@@ -58,6 +59,7 @@ async def _setup(
     report: dict[str, Any] | None = None,
     two_claims: bool = False,
     datasets: list[DatasetReq] | None = None,
+    packages: list[PackageReq] | None = None,
 ) -> tuple[RunContext, LocalArtifactStore]:
     artifacts = LocalArtifactStore(tmp_path)
     ids = ["c1", "c2"] if two_claims else ["c1"]
@@ -72,6 +74,7 @@ async def _setup(
         gpu_minutes_est=10,
         entrypoint_hint=entrypoint_hint,
         datasets=datasets or [],
+        packages=packages or [],
     )
     artifacts.put_json(PLAN_KEY, {"plan": plan.model_dump(mode="json"), "est_cost_usd": 0.1})
     artifacts.put_json(REPORT_KEY, {"overlay_sha256": "a" * 64, **(report or {})})
@@ -769,3 +772,56 @@ async def test_an_unavailable_executor_is_not_a_smoke_run_that_tried(
     state = _State({"smoke_runs": 2, "last_smoke": None})
     assert not state.tried()
     assert _State({"smoke_runs": 1, "last_smoke": {"exit_code": 1}}).tried()
+
+
+async def test_the_coder_reads_the_paper_s_own_setup_as_untrusted_data(
+    store: Store, tmp_path: Path
+) -> None:
+    from app.domain.paper import IngestedPaper, Section
+
+    ctx, artifacts = await _setup(store, tmp_path)
+    paper = IngestedPaper(
+        arxiv_id="0000.00008",
+        sha256="0" * 64,
+        title="t",
+        sections=[Section(title="Setup", text="make_friedman1(n_samples=2000, noise=1.0)")],
+        tables=[],
+        source_kind="latex",
+    )
+    artifacts.put_json("i", paper.model_dump(mode="json"))  # the INGESTING output of _setup
+    step, models = _step("chatty", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    _, messages = models.requests[0]
+    task = str(messages[1].content)
+    block = task[task.index('<untrusted_document source="arxiv:0000.00008"') :]
+    assert "make_friedman1(n_samples=2000, noise=1.0)" in block.split("</untrusted_document>")[0]
+
+
+async def test_without_the_ingested_paper_the_coder_still_works(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)  # "i" was never written
+    step, models = _step("chatty", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    _, messages = models.requests[0]
+    assert "not available" in str(messages[1].content)
+
+
+async def test_a_package_the_plan_installed_is_not_requested_again(
+    store: Store, tmp_path: Path
+) -> None:
+    """Production, 2026-10-29: the Coder asked again for catboost, lightgbm and xgboost (and for
+    interpret, and sympy), which the plan had installed, until the request quota ran out."""
+    ctx, artifacts = await _setup(store, tmp_path, packages=[PackageReq(name="catboost")])
+    step, models = _step(
+        "request_planned_package", artifacts, FakeSmokeExecutor([]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.PROVISIONING and result.output_ref is not None
+    first = _tool_results(models)[0]
+    assert first.startswith("ERROR:") and "CatBoost" in first and "already" in first
+    assert result.output_ref.endswith("package_request_1.json")  # the refusal stored nothing
+    request = artifacts.get_json(result.output_ref)
+    assert [p["name"] for p in request["requested_packages"]] == ["shap"]

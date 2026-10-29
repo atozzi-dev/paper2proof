@@ -406,3 +406,23 @@ async def test_planned_claims_take_the_type_the_paper_gives(store: Store, tmp_pa
     )
     [(claim, kind)] = await planned_claims(ctx, plan)
     assert claim.id == "c2" and kind is ClaimType.ABSOLUTE
+
+
+async def test_the_planner_reads_the_paper_s_own_schedule(store: Store, tmp_path: Path) -> None:
+    """Scale is the paper's schedule against the budget: the Planner needs the schedule."""
+    from app.domain.paper import IngestedPaper, Section
+
+    paper = IngestedPaper(
+        arxiv_id="0000.00001",
+        sha256="0" * 64,
+        title="t",
+        sections=[Section(title="Training", text="Adam for 300 epochs, batch 128.")],
+        tables=[],
+        source_kind="latex",
+    )
+    LocalArtifactStore(tmp_path).put_json("i", paper.model_dump(mode="json"))
+    models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
+    await _plan(store, tmp_path, "two_seeds", models=models)
+    prompt = _prompt(models)
+    block = prompt[prompt.index('<untrusted_document source="arxiv:0000.00001"') :]
+    assert "Adam for 300 epochs, batch 128." in block.split("</untrusted_document>")[0]
