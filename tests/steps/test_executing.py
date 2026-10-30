@@ -59,14 +59,18 @@ CLAIM = Claim(
 )
 
 
-def _config(preemptible: bool = True) -> ExecutionConfig:
-    return ExecutionConfig(
-        provisioner_image=DIGEST.format("p2p-provisioner"),
-        runner_image=DIGEST.format("p2p-runner"),
-        runner_cpu_image=DIGEST.format("p2p-runner-cpu"),
-        subnet_provision="vpcsubnet-provision",
-        subnet_exec="vpcsubnet-exec",
-        preemptible_gpu=preemptible,
+def _config(preemptible: bool = True, *, sandbox: bool = False) -> ExecutionConfig:
+    in_sandboxes = {"exec_platform": "sandbox", "exec_preset": "4vcpu-4gb", "exec_fallback": None}
+    return ExecutionConfig.model_validate(
+        {
+            "provisioner_image": DIGEST.format("p2p-provisioner"),
+            "runner_image": DIGEST.format("p2p-runner"),
+            "runner_cpu_image": DIGEST.format("p2p-runner-cpu"),
+            "subnet_provision": "vpcsubnet-provision",
+            "subnet_exec": "vpcsubnet-exec",
+            "preemptible_gpu": preemptible,
+            **(in_sandboxes if sandbox else {}),
+        }
     )
 
 
@@ -186,11 +190,12 @@ def _step(
     clock: FakeClock,
     *,
     preemptible: bool = True,
+    sandbox: bool = False,
 ) -> ExecutingStep:
     return ExecutingStep(
         artifacts=artifacts,
         storage=storage,
-        config=_config(preemptible),
+        config=_config(preemptible, sandbox=sandbox),
         cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
         poll_s=30,
         clock=clock,
@@ -291,6 +296,21 @@ async def test_the_budget_seconds_fit_the_per_run_gpu_minutes(store: Store, tmp_
     budget = _manifest_of(backend.specs[0]).budget_seconds
     assert budget == ctx.limits.per_run.gpu_minutes * 60 - EXEC_MARGIN_S
     assert backend.specs[0].watchdog_s == ctx.limits.per_run.gpu_minutes * 60
+
+
+@pytest.mark.parametrize("sandbox", [True, False])
+async def test_in_sandboxes_the_experiment_gets_the_runs_whole_budget(
+    store: Store, tmp_path: Path, sandbox: bool
+) -> None:
+    """KAN (eval set B, 2026-10-30): planned at 8 minutes, it finished one seed of three and
+    ended INCONCLUSIVE. A CPU sandbox costs cents per hour and stops when the script does, so
+    the Planner's estimate does not cap it there; on GPUs it still does."""
+    ctx, artifacts, storage = await _setup(store, tmp_path, gpu_minutes=8)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    await _step(artifacts, storage, FakeClock(), sandbox=sandbox).run(_with(ctx, backend))
+    budget = _manifest_of(backend.specs[0]).budget_seconds
+    whole = ctx.limits.per_run.gpu_minutes * 60 - EXEC_MARGIN_S
+    assert budget == (whole if sandbox else 8 * 60)
 
 
 async def test_a_demo_configuration_never_uses_preemptible_gpus(

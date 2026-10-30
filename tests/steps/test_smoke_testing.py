@@ -862,6 +862,117 @@ async def test_a_script_that_starts_processes_is_not_smoke_run(
     assert len(smoke.runs) == 1  # the refused run never reached the sandbox
 
 
+SYNTHETIC = "make_classification n=2000 features=20 informative=6 redundant=2 flip_y=0.05"
+
+
+async def test_a_generator_option_the_paper_does_not_give_is_a_hint_at_finish(
+    store: Store, tmp_path: Path
+) -> None:
+    """Canary synthetic-tree (eval set A, 2026-10-30): the Coder added n_clusters_per_class=1
+    (the default is 2), the data got easier, and a planted false claim read REPRODUCED. The
+    prompt forbids extra options; this names the one it added. Once: the paper may set it."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("extra_generator_option", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    hint = _tool_results(models)[2]
+    assert hint.startswith("ERROR:") and "n_clusters_per_class=1" in hint and "(2)" in hint
+
+
+@pytest.mark.parametrize(
+    ("code", "text", "flagged"),
+    [
+        ("make_classification(n_samples=2000, n_clusters_per_class=1, random_state=0)",
+         SYNTHETIC, ["n_clusters_per_class=1"]),
+        ("datasets.make_classification(n_informative=6, flip_y=0.05, class_sep=1.0)",
+         SYNTHETIC, []),  # given by the text, or the default written out
+        ("make_classification(n_clusters_per_class=1)", "one cluster per class", []),
+        ("make_moons(n_samples=500, noise=0.3)", "make_moons with noise 0.3, 500 points", []),
+        ("make_moons(n_samples=500, noise=0.25)", "make_moons, 500 points", ["noise=0.25"]),
+        ("make_blobs(centers=4, cluster_std=0.5)", "four blobs", ["centers=4", "cluster_std=0.5"]),
+        ("make_moons(n_samples=n, noise=args.noise)", "", []),  # not literals: not judged
+        ("my_make_moons(noise=0.9)", "", []),
+    ],
+)  # fmt: skip
+def test_generator_options_away_from_the_default_need_the_paper(
+    code: str, text: str, flagged: list[str]
+) -> None:
+    from app.orchestrator.steps.smoke_testing import extra_generator_options
+
+    found = extra_generator_options({"train.py": code.encode()}, text)
+    assert [f.split(" ", 1)[0] for f in found] == flagged
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "make_moons(noise=0x" + "f" * 100_000 + ")",  # an int too long to print
+        "make_moons(noise=1e999)",  # inf
+        "make_moons(noise=" + "(" * 300 + "0.9" + ")" * 300 + ")",  # deep nesting
+        "make_moons(noise='\\d')",  # an invalid escape: a SyntaxWarning, silenced
+    ],
+    ids=["huge-int", "inf", "deep", "escape"],
+)
+def test_hostile_generator_calls_are_not_judged(code: str) -> None:
+    from app.orchestrator.steps.smoke_testing import extra_generator_options
+
+    assert extra_generator_options({"train.py": code.encode()}, "") == []
+
+
+def test_generator_hints_are_deduplicated_and_capped() -> None:
+    from app.orchestrator.steps.smoke_testing import MAX_OPTION_HINTS, extra_generator_options
+
+    calls = [f"make_moons(noise=0.{i + 10})" for i in range(30)] + ["make_moons(noise=0.10)"] * 5
+    found = extra_generator_options({"train.py": "\n".join(calls).encode()}, "")
+    assert len(found) == MAX_OPTION_HINTS and len(set(found)) == len(found)
+
+
+def test_the_generator_defaults_are_scikit_learns() -> None:
+    import inspect
+
+    datasets = pytest.importorskip("sklearn.datasets")
+    from app.orchestrator.steps.smoke_testing import GENERATOR_DEFAULTS
+
+    for name, defaults in GENERATOR_DEFAULTS.items():
+        signature = inspect.signature(getattr(datasets, name)).parameters
+        assert defaults == {k: v.default for k, v in signature.items() if k in defaults}, name
+
+
+async def test_a_flat_parquet_glob_is_not_smoke_run(store: Store, tmp_path: Path) -> None:
+    """CatBoost (eval set B, 2026-10-30): the script globbed '<folder>/*.parquet', the files sit
+    in '<folder>/data/', and smoke runs (which mount only the subset) could not show it: the
+    experiment failed at once, after the whole smoke phase."""
+    cifar = [DatasetReq(kind="hf", id="uoft-cs/cifar10")]
+    ctx, artifacts = await _setup(store, tmp_path, datasets=cifar)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("glob_parquet_flat", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    refused = _tool_results(models)[1]
+    assert refused.startswith("ERROR:") and "train.py:2" in refused and "rglob" in refused
+    assert len(smoke.runs) == 1
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("files = glob.glob(os.path.join(root, 'ylecun__mnist', '*.parquet'))", True),
+        ('files = list(Path(root, "ylecun__mnist").glob("*.parquet"))', True),
+        ("pattern = f'{root}/ylecun__mnist/*.parquet'", True),
+        ("files = sorted(Path(root).rglob('*.parquet'))", False),
+        ("files = glob.glob(f'{root}/**/*.parquet', recursive=True)", False),
+        ("smoke = os.path.join(root, 'smoke', 'smoke.parquet')", False),
+        ("# glob('*.parquet') would miss data/", False),
+    ],
+)
+def test_flat_parquet_globs_are_found(line: str, found: bool) -> None:
+    from app.orchestrator.steps.smoke_testing import flat_parquet_glob
+
+    hit = flat_parquet_glob({"train.py": f"import os\n{line}\n".encode()})
+    assert hit == (("train.py", 2) if found else None)
+
+
 @pytest.mark.parametrize(
     "line",
     [

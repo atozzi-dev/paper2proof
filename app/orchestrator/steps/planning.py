@@ -29,7 +29,12 @@ from app.domain.models import (
     Scale,
     StepName,
 )
-from app.execution.package_policy import PACKAGE_NAME, load_policy_config, normalize
+from app.execution.package_policy import (
+    PACKAGE_NAME,
+    PACKAGE_SPECIFIER,
+    load_policy_config,
+    normalize,
+)
 from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
@@ -163,6 +168,36 @@ POPULAR = load_policy_config(Path(__file__).resolve().parents[3] / "config").pop
 REFUSED_SHOWN = 10
 
 
+def plain_specifiers(packages: Sequence[PackageReq]) -> tuple[list[PackageReq], list[str]]:
+    """A planned version the policy cannot parse ("0.7.3", "latest") would refuse the whole
+    package: the version is the Planner's guess, so the package goes on without it. Returns the
+    packages and the names unpinned this way (valid names only: an invalid one is the policy's
+    to refuse)."""
+    kept, unpinned = [], []
+    for p in packages:
+        bad = p.specifier is not None and not PACKAGE_SPECIFIER.fullmatch(p.specifier)
+        if bad and PACKAGE_NAME.fullmatch(p.name):
+            kept.append(PackageReq(name=p.name))
+            unpinned.append(p.name)
+        else:
+            kept.append(p)
+    return kept, unpinned
+
+
+def unpinned_note(unpinned: Sequence[str], accepted: Sequence[PackageReq]) -> str | None:
+    """The plan note for unpinned packages the policy then accepted, at most REFUSED_SHOWN."""
+    allowed = {normalize(p.name) for p in accepted}
+    names = [n for n in unpinned if normalize(n) in allowed]
+    if not names:
+        return None
+    more = len(names) - REFUSED_SHOWN
+    return (
+        f"no plain version was given for {', '.join(names[:REFUSED_SHOWN])}"
+        + (f" and {more} more" if more > 0 else "")
+        + ": the newest compatible versions are used"
+    )
+
+
 def refused_note(names: Sequence[str]) -> str:
     """The plan note for packages the policy refused. The names are the Planner's: only those
     the policy can parse are quoted, and at most REFUSED_SHOWN of them."""
@@ -255,6 +290,8 @@ class PlanningStep:
         if authors is not None and not unknown:  # first: the per-request quota never cuts it
             plan = plan.model_copy(update={"packages": [authors, *plan.packages]})
         if self._package_check is not None:
+            packages, unpinned = plain_specifiers(plan.packages)
+            plan = plan.model_copy(update={"packages": packages})
             accepted = await self._package_check(plan.packages)
             allowed = {normalize(p.name) for p in accepted}
             refused = [
@@ -263,6 +300,8 @@ class PlanningStep:
                 if normalize(p.name) not in allowed and (authors is None or p.name != authors.name)
             ]
             notes = [refused_note(refused)] if refused else []
+            unpinned_text = unpinned_note(unpinned, accepted)
+            notes += [unpinned_text] if unpinned_text else []
             plan = plan.model_copy(update={"packages": accepted, "notes": [*plan.notes, *notes]})
         else:
             plan = plan.model_copy(

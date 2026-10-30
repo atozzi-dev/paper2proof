@@ -515,6 +515,31 @@ async def test_packages_the_policy_refuses_are_noted(
     assert "refused by the package policy: timm" in plan.notes
 
 
+@pytest.mark.parametrize("specifier", ["0.7.3", "latest", ">= 0.6 (EBM)", "*"])
+def test_a_package_with_an_unparsable_version_keeps_its_name(specifier: str) -> None:
+    """InterpretML (eval set B, 2026-10-30): interpret was refused at planning without a PyPI
+    lookup, so for its syntax, and the Coder then declared every claim unmeasured. The version
+    is the Planner's guess: the package is still judged by the policy, without it."""
+    from app.orchestrator.steps.planning import plain_specifiers
+
+    planned = [PackageReq(name="interpret", specifier=specifier), PackageReq(name="timm")]
+    packages, unpinned = plain_specifiers(planned)
+    assert packages == [PackageReq(name="interpret"), PackageReq(name="timm")]
+    assert unpinned == ["interpret"]
+    kept = [PackageReq(name="timm", specifier="==1.0.9"), PackageReq(name="x y", specifier="?")]
+    assert plain_specifiers(kept) == (kept, [])  # an invalid name is the policy's to refuse
+
+
+def test_the_unpinned_note_names_only_packages_the_policy_accepted() -> None:
+    from app.orchestrator.steps.planning import unpinned_note
+
+    accepted = [PackageReq(name=f"p{i}") for i in range(12)]
+    note = unpinned_note(["pip", *(p.name for p in accepted)], accepted)
+    assert note is not None and "pip" not in note
+    assert note.startswith("no plain version was given for p0, p1") and "and 2 more:" in note
+    assert unpinned_note(["pip"], accepted) is None
+
+
 def test_the_refused_packages_note_shows_only_valid_names_and_is_capped() -> None:
     """The names come from the Planner: a name the policy would not even parse is not quoted."""
     from app.orchestrator.steps.planning import refused_note

@@ -40,6 +40,7 @@ from app.execution.backend import CapacityError, JobKind, JobSpec, JobState, Vol
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
 from app.execution.run_storage import RunStorage
+from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 from app.models.pricing import CloudPrices
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
@@ -223,10 +224,14 @@ class ExecutingStep:
 
     async def _budget_seconds(self, ctx: RunContext, plan: Plan) -> int | None:
         """The planned GPU time, within what the run's GPU minutes still allow (the watchdog
-        margin included); None when not even the minimum fits."""
+        margin included); None when not even the minimum fits. In Sandboxes (CPU, cents per
+        hour) the run's whole allowance: the Planner's estimate is a guess, and a job that
+        outlives it ends the run without enough seeds (KAN, eval set B)."""
         spent = await ctx.budget.run_spend(ctx.run_id, SpendKind.GPU_MINUTES)
         left_s = int((ctx.limits.per_run.gpu_minutes - spent) * 60) - EXEC_MARGIN_S
         planned = max(math.ceil(plan.gpu_minutes_est * 60), MIN_BUDGET_S)
+        if self._primary[0] == SANDBOX_PLATFORM:
+            planned = MAX_BUDGET_S
         budget = min(planned, MAX_BUDGET_S, left_s)
         return budget if budget >= MIN_BUDGET_S else None
 

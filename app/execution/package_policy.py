@@ -25,6 +25,7 @@ PACKAGE_NAME = _NAME  # what a plan note may quote
 _VERSION = r"[A-Za-z0-9.*+!_-]{1,40}"
 _OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
 _SPEC = re.compile(rf"^ *{_OP} *{_VERSION}(?: *, *{_OP} *{_VERSION})* *$")  # plain spaces only
+PACKAGE_SPECIFIER = _SPEC  # what the policy accepts as a version
 TYPOSQUAT_DISTANCE = 2
 SHORT_NAME = 5  # below this many characters a single edit is already a different name
 

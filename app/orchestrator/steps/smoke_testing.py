@@ -8,11 +8,13 @@ the same files. Repository files, smoke output and search results are untrusted 
 the model only through wrap_untrusted (invariant 6).
 """
 
+import ast
 import asyncio
 import hashlib
 import json
 import math
 import re
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -119,6 +121,7 @@ class _State:
         last = data.get("last_smoke")
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
         self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
+        self.option_warned: set[str] = set()  # the same, for extra generator options
         flags = data.get("stand_in_flags")
         self.stand_in_flags: list[str] = (  # every refusal, kept for the run's record
             [f for f in flags if isinstance(f, str)] if isinstance(flags, list) else []
@@ -375,6 +378,9 @@ class SmokeTestingStep:
         messages = self._messages(
             claims, plan, ws, state, max_runs, ctx.attempt > 1, paper, excerpt
         )
+        given = "\n".join(  # what the paper gives the experiment, for extra_generator_options
+            [excerpt, *(f"{c.text}\n{c.dataset}\n{c.setting}" for c, _ in claims)]
+        )
         state_key = f"runs/{ctx.run_id}/workspace.json"
 
         async def save() -> None:
@@ -424,7 +430,9 @@ class SmokeTestingStep:
                             )
                         if env is None:
                             env = await executor.prepare(ctx.run_id, ws.files)
-                        result = await self._run_smoke(ctx, executor, env, ws, state, args)
+                        result = await self._run_smoke(
+                            ctx, executor, env, ws, state, args, datasets=bool(plan.datasets)
+                        )
                         left = max_runs - state.smoke_runs
                         result += f"\nsmoke runs left: {left} of {max_runs}"
                         await save()
@@ -434,7 +442,7 @@ class SmokeTestingStep:
                     elif isinstance(args, RequestPackages):
                         return await self._request_packages(ctx, ws, state, args, save, plan)
                     elif isinstance(args, Finish):
-                        return await self._finish(ctx, ws, state, claims, args)
+                        return await self._finish(ctx, ws, state, claims, args, given)
                     else:  # pragma: no cover - parse_args only returns the types above
                         raise ToolError(f"unsupported tool {call.name}")
                 except ToolError as err:
@@ -450,6 +458,8 @@ class SmokeTestingStep:
         ws: Workspace,
         state: _State,
         args: RunSmoke,
+        *,
+        datasets: bool = False,
     ) -> str:
         script = args.script.removeprefix("workspace/")
         extra = check_user_args(args.args)
@@ -465,6 +475,13 @@ class SmokeTestingStep:
                 f"workspace/{launched[0]}:{launched[1]} starts a process or runs another file: "
                 "run_smoke runs your script itself, so write the experiment as that script (no "
                 "subprocess, os.system, exec of a file or runpy)"
+            )
+        flat = await ctx.run_cpu(flat_parquet_glob, ws.files) if datasets else None
+        if flat is not None:  # the subset hides it: only the experiment would fail
+            raise ToolError(
+                f"workspace/{flat[0]}:{flat[1]} looks for parquet files directly in a folder, "
+                "but a dataset's files sit in subfolders (data/train-*.parquet): find them with "
+                "Path(os.environ['P2P_DATA_DIR'], '<folder>').rglob('*.parquet')"
             )
         state.smoke_runs += 1
         try:
@@ -578,6 +595,7 @@ class SmokeTestingStep:
         state: _State,
         claims: list[tuple[Claim, ClaimType]],
         args: Finish,
+        paper_text: str = "",
     ) -> StepResult:
         if not args.measures:  # the Coder says nothing can be tested faithfully here
             _check_measures(claims, args, {}, state.difference_warned)  # each claim, once
@@ -640,6 +658,19 @@ class SmokeTestingStep:
             raise ToolError("finish args must match the last passing smoke run's args")
         metrics = last.get("metrics") or {}
         _check_measures(claims, args, metrics, state.difference_warned)
+        try:
+            options = await ctx.run_cpu(extra_generator_options, ws.files, paper_text, timeout_s=10)
+        except TimeoutError:  # a hint, never a reason to fail the run
+            options = []
+        extra = [option for option in options if option not in state.option_warned]
+        if extra:  # a hint, once: the paper may set it in words the check does not read
+            state.option_warned.update(extra)
+            raise ToolError(
+                "these generator options are not the library's default (in brackets) and "
+                f"neither the paper nor the claims give them: {'; '.join(extra)}. An option "
+                "the paper does not give changes its data: remove it and run_smoke again. If "
+                "the paper does set it, call finish again unchanged"
+            )
         try:
             validate_argv(["python", script, *args.args])
         except SmokeContractError as err:
@@ -717,6 +748,124 @@ def launches_processes(files: dict[str, bytes]) -> tuple[str, int] | None:
     for path in sorted(files):
         for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
             if _LAUNCH.search(line.split("#", 1)[0]):
+                return path, number
+    return None
+
+
+# scikit-learn's data generators and their defaults (1.9; checked against the installed
+# library by the tests). random_state and return flags are never judged.
+GENERATOR_DEFAULTS: dict[str, dict[str, object]] = {
+    "make_classification": {
+        "n_samples": 100, "n_features": 20, "n_informative": 2, "n_redundant": 2,
+        "n_repeated": 0, "n_classes": 2, "n_clusters_per_class": 2, "weights": None,
+        "flip_y": 0.01, "class_sep": 1.0, "hypercube": True, "shift": 0.0, "scale": 1.0,
+        "shuffle": True,
+    },
+    "make_regression": {
+        "n_samples": 100, "n_features": 100, "n_informative": 10, "n_targets": 1, "bias": 0.0,
+        "effective_rank": None, "tail_strength": 0.5, "noise": 0.0, "shuffle": True,
+    },
+    "make_blobs": {
+        "n_samples": 100, "n_features": 2, "centers": None, "cluster_std": 1.0, "shuffle": True,
+    },
+    "make_moons": {"n_samples": 100, "shuffle": True, "noise": None},
+    "make_circles": {"n_samples": 100, "shuffle": True, "noise": None, "factor": 0.8},
+    "make_friedman1": {"n_samples": 100, "n_features": 10, "noise": 0.0},
+    "make_friedman2": {"n_samples": 100, "noise": 0.0},
+    "make_friedman3": {"n_samples": 100, "noise": 0.0},
+    "make_gaussian_quantiles": {
+        "mean": None, "cov": 1.0, "n_samples": 100, "n_features": 2, "n_classes": 3,
+        "shuffle": True,
+    },
+}  # fmt: skip
+
+
+MAX_OPTION_HINTS = 10
+GIVEN_CHARS = 50_000  # the paper text a hint reads: bounded, like the excerpt itself
+_WORD = re.compile(r"[a-z]+")
+_NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?")
+
+
+def _literal(node: ast.expr) -> tuple[bool, object]:
+    """Only small numbers, booleans and None are judged: anything else (a string, an int too
+    long to print, inf) is not a generator option the check can compare."""
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False, None
+    if value is None or isinstance(value, bool):
+        return True, value
+    if isinstance(value, int):
+        return abs(value) < 10**18, value
+    if isinstance(value, float):
+        return math.isfinite(value), value
+    return False, None
+
+
+def _named_in(keyword: str, value: object, words: set[str], numbers: set[float]) -> bool:
+    """The paper gives an option when its value (a number with 2+ characters) appears in the
+    text, or every word of its name with 4+ letters does, as a whole word, singular or plural
+    ("one cluster per class" gives n_clusters_per_class; "classification" does not)."""
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if number and len(repr(abs(value))) >= 2 and float(abs(value)) in numbers:  # type: ignore[arg-type]
+        return True
+    names = [w for w in keyword.split("_") if len(w) >= 4]
+    stems = [w[:-1] if w.endswith("s") and not w.endswith("ss") else w for w in names]
+    return bool(stems) and all(any(s + end in words for end in ("", "s", "es")) for s in stems)
+
+
+def extra_generator_options(files: dict[str, bytes], text: str) -> list[str]:
+    """Literal options of scikit-learn's data generators that differ from the default and that
+    `text` (the paper excerpt and the claims) does not give, as "name=value (default) in
+    generator at path:line", at most MAX_OPTION_HINTS: an extra option changes the paper's
+    data."""
+    lowered = text[:GIVEN_CHARS].lower()
+    words = set(_WORD.findall(lowered))
+    numbers = {float(n) for n in _NUMBER.findall(lowered)}
+    found: list[str] = []
+    seen: set[tuple[str, str, object]] = set()
+    for path in sorted(files):
+        try:
+            with warnings.catch_warnings():  # invalid escapes: a warning per line, to stderr
+                warnings.simplefilter("ignore")
+                tree = ast.parse(files[path].decode("utf-8", "replace"))
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            defaults = GENERATOR_DEFAULTS.get(name, {})
+            for kw in node.keywords:
+                if kw.arg is None or kw.arg not in defaults:
+                    continue
+                ok, value = _literal(kw.value)
+                if not ok or value == defaults[kw.arg] or (name, kw.arg, value) in seen:
+                    continue
+                if _named_in(kw.arg, value, words, numbers):
+                    continue
+                seen.add((name, kw.arg, value))
+                found.append(
+                    f"{kw.arg}={value!r} ({defaults[kw.arg]!r}) in {name} at {path}:{node.lineno}"
+                )
+                if len(found) == MAX_OPTION_HINTS:
+                    return found
+    return found
+
+
+_FLAT_PARQUET = re.compile(r"""['"]([^'"\n]*\*\.parquet)['"]""")
+
+
+def flat_parquet_glob(files: dict[str, bytes]) -> tuple[str, int] | None:
+    """The first line of the Coder's files with a non-recursive '*.parquet' pattern: Hugging
+    Face keeps a dataset's parquet files in subfolders (data/train-*.parquet), and smoke runs
+    mount only the subset, so such a glob fails only in the experiment."""
+    for path in sorted(files):
+        for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
+            code = line.split("#", 1)[0]
+            pattern = _FLAT_PARQUET.search(code)
+            if pattern and "**" not in pattern.group(1) and "rglob" not in code:
                 return path, number
     return None
 
