@@ -425,6 +425,8 @@ class SmokeTestingStep:
                         if env is None:
                             env = await executor.prepare(ctx.run_id, ws.files)
                         result = await self._run_smoke(ctx, executor, env, ws, state, args)
+                        left = max_runs - state.smoke_runs
+                        result += f"\nsmoke runs left: {left} of {max_runs}"
                         await save()
                     elif isinstance(args, SearchDocs):
                         result = await self._search(ctx, state, args)

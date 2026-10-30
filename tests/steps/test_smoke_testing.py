@@ -392,6 +392,20 @@ async def test_a_passing_smoke_run_says_to_finish_and_not_to_tune(
     assert "call finish" in passed and "not expected to match the paper" in passed
 
 
+async def test_every_smoke_run_says_how_many_runs_are_left(store: Store, tmp_path: Path) -> None:
+    """NAU (production, 2026-10-30): a passing run at run 7 of 8, then a rewrite that crashed and
+    no run left. The Coder should know the run it is about to spend may be its last."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    runs = ctx.limits.per_run.fix_iterations
+    step, models = _step(
+        "planted_bug", artifacts, FakeSmokeExecutor([FAIL, PASS]), FakeRunStorage()
+    )
+    await step.run(ctx)
+    failed, passed = _tool_results(models)[1], _tool_results(models)[3]
+    assert f"smoke runs left: {runs - 1} of {runs}" in failed
+    assert f"smoke runs left: {runs - 2} of {runs}" in passed
+
+
 async def test_a_smoke_run_without_metrics_points_at_the_out_directory(
     store: Store, tmp_path: Path
 ) -> None:
