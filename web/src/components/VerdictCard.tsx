@@ -21,7 +21,8 @@ function figures(claim: Claim | null, v: Verdict): { label: string; value: strin
     const std = claim?.reported_std
     out.push({ label: 'Paper says', value: `${fmtNum(reported)}${std ? ` ± ${fmtNum(std)}` : ''}` })
   } else if (delta !== undefined) {
-    out.push({ label: 'Paper says', value: `+${fmtNum(delta)} vs ${claim?.baseline_name ?? 'baseline'}` })
+    const signed = delta > 0 ? `+${fmtNum(delta)}` : fmtNum(delta)
+    out.push({ label: 'Paper says', value: `${signed} vs ${claim?.baseline_name ?? 'baseline'}` })
   }
   if (v.mean !== null) out.push({ label: 'We measured', value: fmtNum(v.mean), emphasis: true })
   if (v.ci_low !== null && v.ci_high !== null) {
@@ -30,7 +31,8 @@ function figures(claim: Claim | null, v: Verdict): { label: string; value: strin
   if (w !== undefined && reported !== undefined) {
     out.push({ label: 'Tolerance band', value: `${fmtNum(reported - w)} – ${fmtNum(reported + w)}` })
   } else if (rho !== undefined && delta !== undefined) {
-    out.push({ label: 'Gain needed', value: `≥ ${fmtNum(rho * delta)}` })
+    const at = claim?.higher_is_better === false ? '≤' : '≥' // lower is better: at most rho × delta
+    out.push({ label: 'Gain needed', value: `${at} ${fmtNum(rho * delta)}` })
   }
   return out
 }
