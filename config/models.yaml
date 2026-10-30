@@ -10,13 +10,17 @@ provider:
   # How reasoning on/off is sent: chat_template_kwargs | system_flag | none. Set from spike S-2.
   reasoning_toggle: chat_template_kwargs
 
+# Token Factory retires Nemotron 3 Super and Nemotron 3 Nano on 2026-11-09 and recommends
+# Nemotron 3.5 Super VL and Nemotron 3.5 Lightning in their place (same prices). Super VL and
+# Ultra as the Coder re-read files or answered in prose until the turns ran out; SMOKE_TESTING
+# now forces a tool call after prose and caps reads in a row (READS_PER_CHANGE).
 roles:
-  reader:  { match: "nemotron-3-super",    max_output: 8000, temperature: 0.1, reasoning: "off" }
-  coder:   { match: "nemotron-3-super",    max_output: 6000, temperature: 0.2, reasoning: "off" }
+  reader:  { match: "nemotron-3.5-super-vl", max_output: 8000, temperature: 0.1, reasoning: "off" }
+  coder:   { match: "nemotron-3.5-super-vl", max_output: 6000, temperature: 0.2, reasoning: "off" }
   planner: { match: "nemotron-3-ultra",    max_output: 8000, temperature: 0.2, reasoning: "on", timeout_s: 300 }
   judge:   { match: "nemotron-3-ultra",    max_output: 3000, temperature: 0.0, reasoning: "on", timeout_s: 300 }
   vision:  { match: "nemotron-3.5-super-vl", max_output: 2000, temperature: 0.0, reasoning: "off" }  # S-2: no Nano Omni
-  utility: { match: "nemotron-3-nano-30b", max_output: 1500, temperature: 0.0, reasoning: "off" }
+  utility: { match: "nemotron-3_5-lightning", max_output: 1500, temperature: 0.0, reasoning: "off" }
 
 fallbacks:
   planner: reader

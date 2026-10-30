@@ -24,7 +24,7 @@ from app.execution.run_storage import FakeRunStorage
 from app.execution.smoke import FakeSmokeExecutor, SmokeResult, pack_workspace
 from app.models.fake import FakeModelClient
 from app.orchestrator.context import RunContext
-from app.orchestrator.steps.smoke_testing import SmokeTestingStep
+from app.orchestrator.steps.smoke_testing import READS_PER_CHANGE, SmokeTestingStep
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.steps.conftest import LLM_FIXTURES, RUN, ctx_at
@@ -203,6 +203,40 @@ async def test_a_model_that_never_uses_tools_runs_out_of_turns(
     with pytest.raises(P2PError) as err:
         await step.run(ctx)
     assert err.value.code is ErrorCode.SMOKE_EXHAUSTED
+
+
+async def test_a_reply_without_a_tool_call_forces_one_on_the_next_turn(
+    store: Store, tmp_path: Path
+) -> None:
+    """Super VL (production, 2026-10-30) answered in prose for 40 turns and never ran a smoke
+    test: after a reply without a tool call, the next turn must call a tool."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step("chatty", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    with pytest.raises(P2PError):
+        await step.run(ctx)
+    assert models.tool_choices[:3] == ["auto", "required", "required"]
+
+
+async def test_the_coder_chooses_freely_after_a_tool_call(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step(
+        "planted_bug", artifacts, FakeSmokeExecutor([FAIL, PASS]), FakeRunStorage()
+    )
+    await step.run(ctx)
+    assert set(models.tool_choices) == {"auto"}
+
+
+async def test_reading_in_a_row_without_a_change_is_capped(store: Store, tmp_path: Path) -> None:
+    """Ultra and Super VL (production, 2026-10-30) read files for 40 turns and never wrote or
+    ran the experiment. Past the cap, a read asks for a change and a smoke run instead."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    step, models = _step("read_loop", artifacts, FakeSmokeExecutor([]), FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.PROVISIONING  # the package request ends the step
+    reads = _tool_results(models)[1:]  # after the write
+    assert len(reads) == READS_PER_CHANGE + 1
+    assert all(r.endswith("</untrusted>") or "print(1)" in r for r in reads[:-1])
+    assert reads[-1].startswith("ERROR:") and "run_smoke" in reads[-1]
 
 
 async def test_the_workspace_survives_a_restart(store: Store, tmp_path: Path) -> None:

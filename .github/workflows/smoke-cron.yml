@@ -1,5 +1,5 @@
 # Daily canary smoke on the live demo during judging (architecture §13.2), 2026-10-30 to
-# 2026-12-15 at 07:00 UTC. A failure opens (or comments on) one issue.
+# 2026-12-23 at 07:17 UTC (the end of the judging period). A failure opens (or comments on) one issue.
 # Environment `smoke`: main only, no reviewer (a scheduled run cannot wait for an approval). It
 # holds only P2P_SMOKE_INVITE (a low-quota, expiring invite), never the admin token.
 name: smoke-cron
@@ -39,8 +39,8 @@ jobs:
           today=$(date -u +%F)
           if [ "$FORCE" = true ]; then
             echo "active=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$today" < "2026-10-30" || "$today" > "2026-12-15" ]]; then
-            echo "outside the judging window (2026-10-30..2026-12-15): nothing to do"
+          elif [[ "$today" < "2026-10-30" || "$today" > "2026-12-23" ]]; then
+            echo "outside the judging window (2026-10-30..2026-12-23): nothing to do"
             echo "active=false" >> "$GITHUB_OUTPUT"
           else
             echo "active=true" >> "$GITHUB_OUTPUT"

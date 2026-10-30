@@ -45,7 +45,7 @@ paid for, hashed and signed so that anyone can check it and run it again.
 ```mermaid
 flowchart LR
     U["User / judge<br/>(browser)"] -->|HTTPS| P2P["Paper2Proof<br/>(Nebius AI Cloud, eu-north1)"]
-    P2P -->|"OpenAI-compatible API"| TF["Nebius Token Factory<br/>Nemotron 3 Nano / Super / Ultra<br/>Nemotron 3.5 Super VL · Batch · Sandboxes"]
+    P2P -->|"OpenAI-compatible API"| TF["Nebius Token Factory<br/>Nemotron 3 Ultra<br/>Nemotron 3.5 Super VL / Lightning · Batch · Sandboxes"]
     P2P -->|"search / extract"| TAV["Tavily API"]
     P2P -->|"metadata, LaTeX / PDF source"| ARX["arXiv"]
     P2P -->|"paper → models, datasets"| HF["Hugging Face Hub"]
@@ -226,11 +226,11 @@ resolves to no model, or to more than one. No model ID is hardcoded.
 
 | Role | Model | Work | Reasoning |
 |---|---|---|---|
-| Reader | `nvidia/nemotron-3-super-120b-a12b` | Claim extraction from the full paper text | off |
+| Reader | `nvidia/Nemotron-3.5-Super-VL` | Claim extraction from the full paper text | off |
 | Vision | `nvidia/Nemotron-3.5-Super-VL` | Tables and figures from PDF pages | off |
-| Utility | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | Ranking repository candidates, repairing invalid JSON, small classification | off |
+| Utility | `nvidia/Nemotron-3_5-Lightning` | Ranking repository candidates, repairing invalid JSON, small classification | off |
 | Planner | `nvidia/Nemotron-3-Ultra-550b-a55b` | Planning the experiment | on |
-| Coder | `nvidia/nemotron-3-super-120b-a12b` | Writing and fixing the experiment with tools | off |
+| Coder | `nvidia/Nemotron-3.5-Super-VL` | Writing and fixing the experiment with tools | off |
 | Judge | `nvidia/Nemotron-3-Ultra-550b-a55b` | Explaining the verdict | on |
 
 - **Structured output** goes through forced tool calls for every role. Super returns empty

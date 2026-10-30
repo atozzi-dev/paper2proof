@@ -23,9 +23,9 @@ from app.storage.store import Store
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures" / "llm"
 BASE = "https://tf.test/v1/"
-SUPER = "nvidia/nemotron-3-super-120b-a12b"
+SUPER = "nvidia/Nemotron-3.5-Super-VL"  # reader and coder since the Nov 2026 retirement
 ULTRA = "nvidia/Nemotron-3-Ultra-550b-a55b"
-NANO = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
+NANO = "nvidia/Nemotron-3_5-Lightning"
 
 
 def models_list() -> list[dict[str, Any]]:
@@ -87,9 +87,10 @@ def sleeps() -> Sleeps:
     return Sleeps()
 
 
-@pytest.fixture
-async def client(store: Store, sleeps: Sleeps) -> TokenFactoryClient:
-    cfg = config()
+def make_client(
+    store: Store, sleeps: Sleeps, cfg: ModelsConfig | None = None
+) -> TokenFactoryClient:
+    cfg = cfg or config()
     limits = load_budget_limits(ROOT / "config" / "budgets.yaml")
     return TokenFactoryClient(
         cfg,
@@ -100,6 +101,11 @@ async def client(store: Store, sleeps: Sleeps) -> TokenFactoryClient:
         api_key=SecretStr("test-key-not-real"),
         sleep=sleeps,
     )
+
+
+@pytest.fixture
+async def client(store: Store, sleeps: Sleeps) -> TokenFactoryClient:
+    return make_client(store, sleeps)
 
 
 ALL_ROLES = list(Role)
