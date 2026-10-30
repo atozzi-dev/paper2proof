@@ -6,7 +6,7 @@ name: smoke-cron
 
 on:
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "17 7 * * *" # off the hour: GitHub delays or drops fewer runs
   workflow_dispatch:
     inputs:
       force:
@@ -23,6 +23,7 @@ concurrency:
 jobs:
   smoke:
     name: canary smoke on the live endpoint
+    if: github.ref == 'refs/heads/main' # the smoke environment allows main only
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: smoke
@@ -56,9 +57,11 @@ jobs:
         timeout-minutes: 20
         env:
           GH_TOKEN: ${{ github.token }}
-          P2P_API_URL: ${{ vars.P2P_API_URL }}
+          # no deploy.yml run records a URL in the hybrid deploy: the live service by default
+          P2P_API_URL: ${{ vars.P2P_API_URL || 'https://paper2proof.com' }}
           P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
         run: |
+          set -o pipefail
           # A recreate may change the endpoint URL: prefer the one the last deploy recorded.
           run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main \
             --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)
@@ -69,13 +72,14 @@ jobs:
               P2P_API_URL="$recorded"
             fi
           fi
-          test -n "$P2P_API_URL" || { echo "::error::no endpoint URL (deploy or set P2P_API_URL)"; exit 1; }
+          [[ "$P2P_API_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] \
+            || { echo "::error::no valid https endpoint URL (deploy or set P2P_API_URL)"; exit 1; }
           echo "smoke target: $P2P_API_URL"
           smoke() {
             if [ -f deploy/smoke.sh ]; then
               bash deploy/smoke.sh "$P2P_API_URL"
-            else  # until the canary script exists: the endpoint's own readiness check
-              curl -fsS --proto =https --max-time 20 "${P2P_API_URL%/}/readyz"
+            else  # until the canary script exists: the endpoint's own readiness check, every check true
+              curl -fsS --proto =https --max-time 20 "${P2P_API_URL%/}/readyz" | jq -e '.checks | all' > /dev/null
             fi
           }
           if ! smoke; then

@@ -10,7 +10,7 @@ import { SafeMarkdown } from '../src/components/SafeMarkdown'
 import { StatusTimeline } from '../src/components/StatusTimeline'
 import { VerdictCard } from '../src/components/VerdictCard'
 import type { StepEntry } from '../src/run/state'
-import type { Verdict } from '../src/types/api'
+import type { Claim, Verdict } from '../src/types/api'
 import { claimAbs, claimRel, notReproduced, plan, reproduced, runConditions } from './fixtures'
 
 const conditions = {
@@ -31,6 +31,35 @@ describe('VerdictCard', () => {
     expect(list).toHaveTextContent('p2p-exec-abc-1')
     expect(list).toHaveTextContent('Learning-rate schedule not specified in the paper: cosine used.')
     expect(list).toHaveTextContent('The GPU job was preempted')
+  })
+
+  it('shows a claimed gain with its own sign and the direction the rule needs', () => {
+    // CatBoost (eval set B, 2026-10-30): a lower-is-better delta read "+-0.0065", "≥ -0.00325"
+    const logloss: Claim = {
+      ...claimRel,
+      metric: 'logloss',
+      higher_is_better: false,
+      baseline_name: 'LightGBM',
+      claimed_delta: -0.0065,
+    }
+    const v: Verdict = {
+      ...reproduced,
+      kind: 'INCONCLUSIVE',
+      reason: 'HIGH_VARIANCE',
+      mean: -0.0017,
+      ci_low: -0.005,
+      ci_high: 0.0016,
+      tolerance: { rho: 0.5, delta: -0.0065 },
+    }
+    const { unmount } = render(<VerdictCard claim={logloss} verdict={v} explanationMd="" {...conditions} />)
+    const card = screen.getByRole('article')
+    expect(card).toHaveTextContent('-0.0065 vs LightGBM')
+    expect(card).not.toHaveTextContent('+-')
+    expect(card).toHaveTextContent('≤ -0.00325')
+    unmount()
+    render(<VerdictCard claim={claimRel} verdict={reproduced} explanationMd="" {...conditions} />)
+    expect(screen.getByRole('article')).toHaveTextContent('+0.017 vs ResNet-18')
+    expect(screen.getByRole('article')).toHaveTextContent('≥ 0.0085')
   })
 
   it('shows reduced-scale reproduction with its scale', () => {
