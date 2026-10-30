@@ -426,10 +426,14 @@ highest known price until one is published.
 - **CI on every push:** ruff, mypy `--strict`, shellcheck, actionlint, oxlint and tsc; pytest and
   vitest; a license gate (no GPL or AGPL in shipped dependencies); the web build; Terraform
   `fmt`, `validate`, tflint and checkov; and a build of the four images with a size check.
-- **Deploy from `main`:** build, SBOM (syft), vulnerability scan (trivy, fails on CRITICAL),
-  push by digest, `terraform apply` in a protected environment, endpoint update after a drain,
-  smoke test, and rollback to the previous digests on failure.
-- **Daily smoke** (cron) keeps the demo alive during judging.
+- **Deploy from `main`, by hand:** build, SBOM (syft), vulnerability scan (trivy, fails on
+  CRITICAL), push by digest, `terraform apply` in a protected environment, endpoint update after
+  a drain, smoke test, and rollback to the previous digests on failure. It targets this design;
+  the live service runs the hybrid deploy, updated from `develop` on its host, so a merge into
+  `main` does not start it. It has not completed a run: on 2026-10-30 its scan step failed on the
+  OCI archives (trivy reads a `docker save` tar or an OCI layout directory).
+- **Daily smoke** (cron) checks the live service during judging (https://paper2proof.com unless a
+  deploy recorded another URL).
 
 ## 14. Observability
 
