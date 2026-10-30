@@ -37,7 +37,7 @@ from app.execution.smoke import (
     validate_argv,
     validate_path,
 )
-from app.models.client import Message, ModelClient, Role
+from app.models.client import Message, ModelClient, Role, ToolChoice
 from app.models.prompt_files import load_prompt
 from app.models.untrusted import UNTRUSTED_NOTICE, wrap_untrusted
 from app.orchestrator.coder_tools import (
@@ -70,6 +70,9 @@ from app.verdict.scale import unit_mismatch
 SMOKE_TIMEOUT_S = 150
 SEARCH_LIMIT = 5
 TURNS_PER_RUN = 5  # model turns allowed per smoke run in the budget
+# read_file calls in a row without a write, patch or smoke run. Past KEEP_FULL_MESSAGES the
+# older reads are trimmed, and Ultra and Super VL re-read them until the turns ran out.
+READS_PER_CHANGE = 8
 TOOL_RESULT_CHARS = 8_000
 ERROR_CHARS = 32_000  # ~8k tokens (architecture §6.4)
 KEEP_FULL_MESSAGES = 8  # the latest tool turns the Coder sees in full
@@ -386,13 +389,15 @@ class SmokeTestingStep:
         async def save() -> None:
             await self._put(state_key, state.dump(ws))
 
+        reads = 0  # read_file calls since the last change or smoke run
+        choice: ToolChoice = "auto"
         for _ in range(max_runs * TURNS_PER_RUN):
             messages = compact_history(messages)
             completion = await self._models.complete(
                 Role.CODER,
                 messages,
                 tools=TOOL_DEFS,
-                tool_choice="auto",
+                tool_choice=choice,
                 run_id=ctx.run_id,
                 step=ctx.step.value,
                 prompt="coder_system",
@@ -404,25 +409,36 @@ class SmokeTestingStep:
                         role="user", content="Use the tools. Call finish when the smoke run passes."
                     ),
                 ]
+                choice = "required"  # Super VL answered in prose turn after turn otherwise
                 continue
+            choice = "auto"
             messages.append(Message.tool_request(completion.content, completion.tool_calls))
             for call in completion.tool_calls:
                 try:
                     args = parse_args(call.name, call.arguments)
                     if isinstance(args, ReadFile):
+                        if reads >= READS_PER_CHANGE:
+                            raise ToolError(
+                                f"{reads} files read in a row without a change: write or patch "
+                                "the experiment under workspace/ and call run_smoke now"
+                            )
+                        reads += 1
                         text = ws.read(args.path)
                         # The workspace is model-written, often from paper text: data, too.
                         source = "repository" if args.path.startswith("repo/") else "workspace"
                         result = wrap_untrusted(text, source=source, max_chars=TOOL_RESULT_CHARS)
                     elif isinstance(args, WriteFile):
                         ws.write(args.path, args.content)
+                        reads = 0
                         await save()
                         result = f"OK: wrote {args.path}"
                     elif isinstance(args, ApplyPatch):
                         changed = ws.apply_patch(args.diff)
+                        reads = 0
                         await save()
                         result = f"OK: patched {', '.join(changed)}"
                     elif isinstance(args, RunSmoke):
+                        reads = 0
                         if state.smoke_runs >= max_runs:
                             raise P2PError(
                                 ErrorCode.SMOKE_EXHAUSTED,
