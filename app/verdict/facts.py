@@ -172,7 +172,25 @@ def _relative_paper(claim: Claim, verdict: Verdict) -> list[str]:
         )
     else:
         lines.append("The verdict code needs the whole CI to favour the method.")
+    own, reported = verdict.tolerance.get("method_mean"), claim.reported_value
+    if verdict.reason is ReasonCode.IMPLAUSIBLE_GAP and own is not None and reported is not None:
+        lines.append(_method_gap(own, reported))
     return lines
+
+
+def _method_gap(own: float, reported: float) -> str:
+    """A RELATIVE IMPLAUSIBLE_GAP: same sign, both non-zero (engine.py), so the ratio is
+    positive."""
+    if abs(own) > abs(reported):
+        ratio = f"{_fmt(own / reported)[0]} times the paper's value"
+    else:
+        ratio = f"the paper's value is {_fmt(reported / own)[0]} times it"
+    return (
+        f"The paper reports {reported:g} for the method itself; the experiment measured "
+        f"{_fmt(own)[0]} for it on average, {ratio}. A gap this large means the experiment is "
+        "not the paper's setup (another task, data or scale) or a unit mismatch, so the verdict "
+        "code counts the difference neither for nor against the paper."
+    )
 
 
 def _absolute_paper(claim: Claim, verdict: Verdict) -> list[str]:

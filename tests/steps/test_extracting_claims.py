@@ -324,6 +324,17 @@ def test_a_claim_naming_no_table_row_keeps_its_missing_number() -> None:
     assert fill_from_tables(claim, rows) == claim
 
 
+def test_a_relative_claim_never_takes_its_method_value_from_a_table() -> None:
+    """A RELATIVE claim's reported_value steers the method-gap rule (engine.py), and a row
+    found by name in a comparison can be the baseline's, or another column's. Only the Reader
+    states it, from the text."""
+    claim = _comparison("Ours beats ResNet-18 by 1.0", 1.0, higher_is_better=True, metric="acc")
+    rows = {2: [("ResNet-18", [93.0]), ("Ours", [94.0])]}
+    assert fill_from_tables(claim, rows) == claim
+    absolute = claim.model_copy(update={"claim_type": ClaimType.ABSOLUTE, "text": "Ours: 94"})
+    assert fill_from_tables(absolute, rows).reported_value == 94.0
+
+
 async def test_claim_hint_overrides_the_selection(store: Store, tmp_path: Path) -> None:
     await _run(store, tmp_path, _canary(), claim_hint="macro-F1")
     selected = {c.id for c, sel in await store.get_claims(RUN) if sel}

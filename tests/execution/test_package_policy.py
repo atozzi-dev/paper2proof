@@ -23,12 +23,19 @@ ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 20, tzinfo=UTC)
 
 
-def _pypi(name: str, *, releases: int = 20, first_days_ago: int = 2000) -> httpx.Response:
+def _pypi(
+    name: str, *, releases: int = 20, first_days_ago: int = 2000, kind: str = "bdist_wheel"
+) -> httpx.Response:
     first = NOW - timedelta(days=first_days_ago)
     data: dict[str, Any] = {
         "info": {"name": name},
         "releases": {
-            f"1.{i}": [{"upload_time_iso_8601": (first + timedelta(days=i)).isoformat()}]
+            f"1.{i}": [
+                {
+                    "upload_time_iso_8601": (first + timedelta(days=i)).isoformat(),
+                    "packagetype": kind,
+                }
+            ]
             for i in range(releases)
         },
     }
@@ -144,6 +151,49 @@ async def test_young_packages_need_the_repo_requirements(policy: PackagePolicy) 
     assert await _decide(policy, "brandnewlib", repo_requirements={"brandnewlib"}) == [
         Reason.ACCEPT
     ]
+
+
+@respx.mock
+async def test_a_package_with_no_wheel_is_rejected(policy: PackagePolicy) -> None:
+    """lime (InterpretML, production 2026-10-30): sdists only. The provisioner never builds an
+    sdist, and its lock failed as a version conflict; refused here, the plan goes on without it."""
+    respx.get("https://pypi.org/pypi/lime/json").mock(return_value=_pypi("lime", kind="sdist"))
+    decision = await policy.validate([PackageReq(name="lime")], PolicyContext())
+    assert [d.reason for d in decision.decisions] == [Reason.REJECT_NO_WHEEL]
+    assert "sdist" in decision.decisions[0].detail
+    assert await _decide(policy, "lime", repo_requirements={"lime"}) == [Reason.REJECT_NO_WHEEL]
+
+
+@respx.mock
+async def test_metadata_cached_before_the_wheel_check_is_fetched_again(
+    policy: PackagePolicy, store: Store
+) -> None:
+    """An entry written without the wheel fact must not pass as having wheels."""
+    import hashlib
+
+    key = hashlib.sha256(b"lime").hexdigest()
+    await store.cache_put("pypi", key, {"info": {"releases": 20, "first_release": None}})
+    route = respx.get("https://pypi.org/pypi/lime/json").mock(
+        return_value=_pypi("lime", kind="sdist")
+    )
+    assert await _decide(policy, "lime") == [Reason.REJECT_NO_WHEEL]
+    assert route.called
+
+
+@respx.mock
+async def test_cached_answers_need_no_request(policy: PackagePolicy, store: Store) -> None:
+    import hashlib
+
+    for name, info in (
+        ("gone", None),
+        ("lime", {"releases": 20, "first_release": None, "has_wheel": False}),
+    ):
+        await store.cache_put("pypi", hashlib.sha256(name.encode()).hexdigest(), {"info": info})
+    assert await _decide(policy, "gone", "lime") == [
+        Reason.REJECT_NOT_FOUND,
+        Reason.REJECT_NO_WHEEL,
+    ]
+    assert not respx.calls  # an unmocked request would have failed
 
 
 @respx.mock

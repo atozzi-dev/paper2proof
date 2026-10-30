@@ -1,4 +1,4 @@
-"""Properties P1-P8 from docs/specs/verdict-engine.md (Hypothesis, 500 examples each)."""
+"""Properties P1-P9 from docs/specs/verdict-engine.md (Hypothesis, 500 examples each)."""
 
 import math
 
@@ -40,7 +40,7 @@ def claims(draw: st.DrawFn, claim_type: ClaimType | None = None) -> Claim:
         higher_is_better=draw(st.booleans()),
         dataset="d",
         setting="s",
-        reported_value=draw(value) if kind is ClaimType.ABSOLUTE else None,
+        reported_value=draw(value) if kind is ClaimType.ABSOLUTE else draw(st.none() | value),
         reported_std=draw(st.none() | st.floats(min_value=0, max_value=5)),
         baseline_name="b" if kind is ClaimType.RELATIVE else None,
         claimed_delta=draw(st.none() | value) if kind is ClaimType.RELATIVE else None,
@@ -200,8 +200,41 @@ def test_p8_the_gap_rule_only_replaces_an_accusation_or_high_variance(
     before, after = decide(claim, meas, NO_GAP_RULE), decide(claim, meas, CFG)
     if after == before:
         return
-    assert claim.claim_type is ClaimType.ABSOLUTE and meas.scale is Scale.FULL
-    assert _far_off(claim, meas)
-    assert before.kind is VerdictKind.NOT_REPRODUCED or before.reason is ReasonCode.HIGH_VARIANCE
+    assert meas.scale is Scale.FULL and _far_off(claim, meas)
+    if claim.claim_type is ClaimType.ABSOLUTE:
+        assert before.kind is VerdictKind.NOT_REPRODUCED or before.reason is (
+            ReasonCode.HIGH_VARIANCE
+        )
     assert (after.kind, after.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
-    assert after.model_copy(update={"kind": before.kind, "reason": before.reason}) == before
+    tolerance = {k: v for k, v in after.tolerance.items() if k != "method_mean"}
+    restored = {"kind": before.kind, "reason": before.reason, "tolerance": tolerance}
+    assert after.model_copy(update=restored) == before
+
+
+@st.composite
+def far_off_relative_cases(draw: st.DrawFn) -> tuple[Claim, Measurements]:
+    """A RELATIVE claim whose method is measured k times off the paper's value for it, and not
+    by a factor of 100 (a percent/fraction mismatch), at full scale."""
+    reported = draw(value.filter(lambda x: abs(x) >= 1e-3))
+    claim = draw(claims(ClaimType.RELATIVE)).model_copy(update={"reported_value": reported})
+    factor = draw(
+        st.floats(min_value=K * 1.01, max_value=1000).filter(lambda f: not 100 / K <= f <= 100 * K)
+    )
+    centre = reported * factor if draw(st.booleans()) else reported / factor
+    k = draw(st.integers(min_value=3, max_value=8))
+    jitter = st.floats(min_value=-0.004, max_value=0.004)
+    per_seed = [centre * (1 + draw(jitter)) for _ in range(k)]
+    base = draw(st.lists(value, min_size=k, max_size=k))
+    return claim, Measurements(scale=Scale.FULL, per_seed=per_seed, baseline_per_seed=base)
+
+
+@EXAMPLES
+@given(far_off_relative_cases())
+def test_p9_a_relative_method_k_times_off_is_an_implausible_gap(
+    case: tuple[Claim, Measurements],
+) -> None:
+    claim, meas = case
+    assume(_far_off(claim, meas))
+    verdict = decide(claim, meas, CFG)
+    assume(verdict.reason is not ReasonCode.RUNTIME_ERROR)
+    assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)

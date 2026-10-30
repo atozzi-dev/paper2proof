@@ -21,6 +21,7 @@ from app.storage.store import Store
 PYPI = "https://pypi.org/pypi"
 CACHE_TTL = timedelta(hours=24)
 _NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")  # PEP 508 name
+PACKAGE_NAME = _NAME  # what a plan note may quote
 _VERSION = r"[A-Za-z0-9.*+!_-]{1,40}"
 _OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
 _SPEC = re.compile(rf"^ *{_OP} *{_VERSION}(?: *, *{_OP} *{_VERSION})* *$")  # plain spaces only
@@ -33,6 +34,7 @@ class Reason(StrEnum):
     REJECT_SYNTAX = "REJECT_SYNTAX"
     REJECT_DENYLIST = "REJECT_DENYLIST"
     REJECT_NOT_FOUND = "REJECT_NOT_FOUND"
+    REJECT_NO_WHEEL = "REJECT_NO_WHEEL"
     REJECT_TYPOSQUAT = "REJECT_TYPOSQUAT"
     REJECT_UNPOPULAR = "REJECT_UNPOPULAR"
     REJECT_QUOTA = "REJECT_QUOTA"
@@ -127,6 +129,7 @@ def typosquat_threshold(name: str, popular: str) -> int:
 class PackageInfo(BaseModel):
     releases: int
     first_release: datetime | None
+    has_wheel: bool | None = None  # None: cached before the wheel check, so fetched again
 
 
 class PyPIClient:
@@ -139,8 +142,9 @@ class PyPIClient:
     async def info(self, name: str) -> PackageInfo | None:
         key = hashlib.sha256(name.encode()).hexdigest()
         hit = await self._store.cache_get("pypi", key, max_age=CACHE_TTL)
-        if hit is not None:
-            return PackageInfo.model_validate(hit["info"]) if hit.get("info") else None
+        cached = PackageInfo.model_validate(hit["info"]) if hit and hit.get("info") else None
+        if hit is not None and (cached is None or cached.has_wheel is not None):
+            return cached
         client = self._http or httpx.AsyncClient(timeout=30)
         try:
             response = await client.get(f"{PYPI}/{name}/json")
@@ -162,7 +166,10 @@ def _parse_pypi(data: Mapping[str, Any]) -> PackageInfo:
         for f in files
         if f.get("upload_time_iso_8601")
     ]
-    return PackageInfo(releases=len(releases), first_release=min(times) if times else None)
+    wheel = any(f.get("packagetype") == "bdist_wheel" for files in releases.values() for f in files)
+    return PackageInfo(
+        releases=len(releases), first_release=min(times) if times else None, has_wheel=wheel
+    )
 
 
 class PackagePolicy:
@@ -203,6 +210,8 @@ class PackagePolicy:
         info = await self._pypi.info(name)  # 3
         if info is None or info.releases == 0:
             return decision(Reason.REJECT_NOT_FOUND)
+        if not info.has_wheel:  # 3b: the provisioner never builds an sdist (only-binary)
+            return decision(Reason.REJECT_NO_WHEEL, "no wheel on PyPI, only sdists")
         # 4: typosquats of popular names (packages the official repository declares are exempt:
         # e.g. torchao is 2 edits from torch)
         if name not in cfg.popular and name not in context.repo_requirements:

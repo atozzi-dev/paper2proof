@@ -53,7 +53,12 @@ NOW = datetime(2026, 10, 20, tzinfo=UTC)
 def _pypi() -> httpx.Response:
     first = NOW - timedelta(days=2000)
     releases = {
-        f"1.{i}": [{"upload_time_iso_8601": (first + timedelta(days=i)).isoformat()}]
+        f"1.{i}": [
+            {
+                "upload_time_iso_8601": (first + timedelta(days=i)).isoformat(),
+                "packagetype": "bdist_wheel",
+            }
+        ]
         for i in range(20)
     }
     return httpx.Response(200, json={"releases": releases})

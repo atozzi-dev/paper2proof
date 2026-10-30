@@ -501,6 +501,41 @@ async def test_the_authors_package_goes_through_the_package_policy(
     assert any("authors' package b" in n and "refused" in n for n in plan.notes)
 
 
+async def test_packages_the_policy_refuses_are_noted(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    """InterpretML: lime (sdists only) was dropped silently and nobody saw why."""
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+
+    async def refuse_timm(packages: list[PackageReq]) -> list[PackageReq]:
+        return [p for p in packages if p.name != "timm"]
+
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", package_check=refuse_timm)
+    assert [p.name for p in plan.packages] == ["b"]
+    assert "refused by the package policy: timm" in plan.notes
+
+
+def test_the_refused_packages_note_shows_only_valid_names_and_is_capped() -> None:
+    """The names come from the Planner: a name the policy would not even parse is not quoted."""
+    from app.orchestrator.steps.planning import refused_note
+
+    hostile = ["git+https://evil.example/x", "a\nb", "x" * 200, *(f"pkg{i}" for i in range(12))]
+    note = refused_note(hostile)
+    assert note.startswith("refused by the package policy: 3 invalid names, pkg0, pkg1")
+    assert "evil" not in note and "\n" not in note and "x" * 200 not in note
+    assert note.endswith("pkg9 and 2 more")
+
+
+async def test_a_search_found_repository_whose_popular_package_links_elsewhere_adds_nothing(
+    store: Store, tmp_path: Path, pypi: respx.MockRouter
+) -> None:
+    pypi["b"].mock(return_value=_links("https://github.com/real-owner/b"))
+    found = RepoRef(url="https://github.com/a/b", source="tavily", official=False)
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", repo=found)
+    assert [p.name for p in plan.packages] == ["timm"]
+    assert not any("authors' package" in n for n in plan.notes)
+
+
 async def test_the_authors_package_the_policy_accepts_is_noted_as_added(
     store: Store, tmp_path: Path, pypi: respx.MockRouter
 ) -> None:
@@ -539,14 +574,13 @@ async def test_no_authors_package_without_a_link_back_to_the_repository(
 @pytest.mark.parametrize(
     ("case", "repo"),
     [
-        ("two_seeds", RepoRef(url="https://github.com/a/b", source="tavily", official=False)),
         ("two_seeds", None),
         ("made_up_dataset", OFFICIAL),  # FROM_SCRATCH
         ("two_seeds", RepoRef(url="https://github.com/a/timm", source="paper", official=True)),
     ],
-    ids=["found-by-search", "no-repository", "from-scratch", "already-planned"],
+    ids=["no-repository", "from-scratch", "already-planned"],
 )
-async def test_the_authors_package_is_looked_up_only_for_an_official_repository_run_as_is(
+async def test_the_authors_package_is_looked_up_only_for_a_repository_run_as_is(
     store: Store, tmp_path: Path, pypi: respx.MockRouter, case: str, repo: RepoRef | None
 ) -> None:
     pypi["b"].mock(return_value=_links("https://github.com/a/b"))
@@ -554,6 +588,27 @@ async def test_the_authors_package_is_looked_up_only_for_an_official_repository_
     assert not pypi["b"].called and not pypi["github"].called
     assert "b" not in [p.name for p in plan.packages]
     assert not any("authors' package" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize(
+    ("popular", "planned"), [(frozenset({"b"}), ["b", "timm"]), (frozenset(), ["timm"])]
+)
+async def test_a_repository_found_by_search_gets_its_popular_authors_package(
+    store: Store,
+    tmp_path: Path,
+    pypi: respx.MockRouter,
+    popular: frozenset[str],
+    planned: list[str],
+) -> None:
+    """InterpretML (production, 2026-10-30): search found interpretml/interpret, not marked
+    official. A popular package whose PyPI page links to the very repository is that project's,
+    whoever found the repository; an unpopular one is never added."""
+    pypi["b"].mock(return_value=_links("https://github.com/a/b"))
+    found = RepoRef(url="https://github.com/a/b", source="tavily", official=False)
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds", repo=found, popular=popular)
+    assert [p.name for p in plan.packages] == planned
+    added = any("authors' package b was added" in n for n in plan.notes)
+    assert added is bool(popular)
 
 
 # --- known datasets the claims name ----------------------------------------------------------
@@ -622,6 +677,25 @@ def test_a_known_dataset_already_planned_is_not_added_again(planned: str) -> Non
     plan = _plan_with(DatasetReq(kind="hf", id=planned, split="test"))
     corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c1": MNIST})
     assert corrected.datasets == plan.datasets and notes == []
+
+
+def test_a_dataset_planned_twice_is_kept_once_with_its_first_split() -> None:
+    """Distillation (production, 2026-10-30): MNIST planned as train and test. The provisioner
+    names a dataset's archive after its id: two archives of the same name broke the run."""
+    plan = _plan_with(
+        DatasetReq(kind="hf", id="ylecun/mnist", split="train"),
+        DatasetReq(kind="hf", id="uoft-cs/cifar10"),
+        DatasetReq(kind="hf", id="YLeCun/MNIST", split="test"),  # Hugging Face ids ignore case
+    )
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30)
+    assert [(d.id, d.split) for d in corrected.datasets] == [
+        ("ylecun/mnist", "train"),
+        ("uoft-cs/cifar10", None),
+    ]
+    assert notes == [
+        "dataset YLeCun/MNIST dropped: ylecun/mnist is already planned and one split per "
+        "dataset is fetched (the experiment holds out part of it for the other split)"
+    ]
 
 
 def test_two_claims_on_one_known_dataset_add_it_once() -> None:
