@@ -160,12 +160,17 @@ where it pays off.
 
 | Role | Model | Used for |
 |---|---|---|
-| Reader | Nemotron 3 Super 120B-A12B | Extracting claims from the full paper text (up to 256K tokens of context) |
+| Reader | Nemotron 3.5 Super VL | Extracting claims from the full paper text (up to 1M tokens of context) |
 | Vision | Nemotron 3.5 Super VL | Reading tables and figures from PDF pages |
-| Utility | Nemotron 3 Nano 30B-A3B | Ranking repository candidates, repairing invalid JSON |
+| Utility | Nemotron 3.5 Lightning | Ranking repository candidates, repairing invalid JSON |
 | Planner | Nemotron 3 Ultra 550B-A55B, reasoning on | Planning the experiment within the budget |
-| Coder | Nemotron 3 Super 120B-A12B | Writing and fixing the experiment through tool calls |
+| Coder | Nemotron 3.5 Super VL | Writing and fixing the experiment through tool calls |
 | Judge | Nemotron 3 Ultra 550B-A55B, reasoning on | Explaining the verdict (never deciding it) |
+
+Token Factory retires Nemotron 3 Super and Nemotron 3 Nano on 2026-11-09, so on 2026-10-30 the
+Reader and the Coder moved from Nemotron 3 Super to Nemotron 3.5 Super VL and the Utility role from
+Nemotron 3 Nano to Nemotron 3.5 Lightning, the replacements Token Factory recommends, at the same
+prices.
 
 Model IDs are not hardcoded: [`config/models.yaml`](config/models.yaml) maps roles to models,
 resolved against `GET /v1/models` at startup, and the process refuses to start if a role is

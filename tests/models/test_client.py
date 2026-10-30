@@ -11,7 +11,7 @@ from app.domain.models import ErrorCode
 from app.models.client import Message, Role, TokenFactoryClient, ToolDef
 from app.orchestrator.budget import BudgetExceeded, SpendKind
 from app.storage.store import Store
-from tests.models.conftest import BASE, SUPER, ULTRA, Sleeps, completion
+from tests.models.conftest import BASE, SUPER, ULTRA, Sleeps, completion, config, make_client
 
 RUN = "r_01jb7z00000000000000000000"
 USER = [Message(role="user", content="hello")]
@@ -170,11 +170,15 @@ async def test_malformed_200_releases_reservations_conservatively(
 
 @respx.mock
 async def test_unpriced_model_is_charged_at_the_worst_case_price(
-    store: Store, client: TokenFactoryClient
+    store: Store, sleeps: Sleeps
 ) -> None:
     await _run(store)
-    omni = "nvidia/Nemotron-3-Nano-Omni"  # not in the test pricing file
-    respx.post(f"{BASE}chat/completions").mock(return_value=completion("x", model=omni))
+    unpriced = "meta-llama/Llama-3.3-70B-Instruct"  # listed by the API, not in the test pricing
+    cfg = config()
+    roles = dict(cfg.roles)
+    roles[Role.VISION] = roles[Role.VISION].model_copy(update={"exact_id": unpriced})
+    client = make_client(store, sleeps, cfg.model_copy(update={"roles": roles}))
+    respx.post(f"{BASE}chat/completions").mock(return_value=completion("x", model=unpriced))
     await client.complete(Role.VISION, USER, run_id=RUN)
     events = [e.payload for e in await store.events_after(RUN, 0)]
     assert isinstance(events[-1], ModelCallPayload) and events[-1].cost_usd is None  # UI: n/a

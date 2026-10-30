@@ -7,6 +7,9 @@ models:
   nvidia/Nemotron-3-Ultra-550b-a55b:      { input: 1.00, output: 3.00 }
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B:  { input: 0.06, output: 0.24 }
   nvidia/Nemotron-3-Nano-Omni:            { input: 0.06, output: 0.24 }
+  # GET /v1/models?verbose=true, 2026-10-30
+  nvidia/Nemotron-3.5-Super-VL:           { input: 0.30, output: 0.90 }
+  nvidia/Nemotron-3_5-Lightning:          { input: 0.06, output: 0.24 }
 batch_discount: 0.5
 
 # Nebius AI Cloud list prices, eu-north1, from Oct 8 2026 (USD per hour)

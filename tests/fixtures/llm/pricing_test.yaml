@@ -3,4 +3,6 @@ models:
   nvidia/nemotron-3-super-120b-a12b: { input: 1.00, output: 2.00 }
   nvidia/Nemotron-3-Ultra-550b-a55b: { input: 4.00, output: 8.00 }
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B: { input: 0.10, output: 0.20 }
+  nvidia/Nemotron-3.5-Super-VL: { input: 1.00, output: 2.00 }
+  nvidia/Nemotron-3_5-Lightning: { input: 0.10, output: 0.20 }
 batch_discount: 0.5

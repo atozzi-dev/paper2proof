@@ -46,8 +46,8 @@ default, and the public gallery is curated by hand.
 ## How we built it
 
 - **Models:** six roles mapped to open NVIDIA Nemotron models on Nebius Token Factory.
-  Nemotron 3 Super reads the paper and writes the code, Nemotron 3.5 Super VL reads tables and
-  figures, Nemotron 3 Nano ranks and repairs, and Nemotron 3 Ultra with reasoning plans the
+  Nemotron 3.5 Super VL reads the paper, writes the code and reads tables and figures,
+  Nemotron 3.5 Lightning ranks and repairs, and Nemotron 3 Ultra with reasoning plans the
   experiment and explains the verdict. Roles resolve against `/v1/models` at startup (no model
   ID is hardcoded), and every structured answer is a forced tool call.
 - **Agent design:** an explicit state machine with one bounded agentic loop: the Coder, with at
