@@ -194,6 +194,45 @@ def test_an_implausible_gap_is_explained_as_a_likely_broken_experiment(
     assert not mentions_verdict(last)  # the Judge may quote it without naming another verdict
 
 
+def test_a_relative_gap_names_the_methods_own_value_not_the_difference() -> None:
+    """The verdict's mean is the difference; the gap is about the method's own value."""
+    claim = RMSE.model_copy(update={"reported_value": 0.000133, "claimed_delta": -0.000515})
+    measured = Measurements(
+        scale=Scale.FULL, per_seed=[0.0054, 0.0049, 0.0041], baseline_per_seed=[0.18, 0.12, 0.14]
+    )
+    verdict = decide(claim, measured, VerdictConfig())
+    assert verdict.reason is ReasonCode.IMPLAUSIBLE_GAP
+    last = judge_facts(claim, verdict).split("\n")[-1]
+    assert last == (
+        "- The paper reports 0.000133 for the method itself; the experiment measured 0.0048 "
+        "for it on average, 36.09 times the paper's value. A gap this large means the "
+        "experiment is not the paper's setup (another task, data or scale) or a unit mismatch, "
+        "so the verdict code counts the difference neither for nor against the paper."
+    )
+    assert not mentions_verdict(last)
+
+
+def test_a_relative_gap_below_the_papers_value_says_which_way() -> None:
+    claim = RMSE.model_copy(
+        update={
+            "metric": "accuracy",
+            "higher_is_better": True,
+            "reported_value": 0.9,
+            "claimed_delta": 0.1,
+        }
+    )
+    measured = Measurements(
+        scale=Scale.FULL, per_seed=[0.3, 0.3, 0.3], baseline_per_seed=[0.2, 0.21, 0.19]
+    )
+    verdict = decide(claim, measured, VerdictConfig())
+    assert verdict.reason is ReasonCode.IMPLAUSIBLE_GAP
+    last = judge_facts(claim, verdict).split("\n")[-1]
+    assert last.startswith(
+        "- The paper reports 0.9 for the method itself; the experiment measured 0.3 for it on "
+        "average, the paper's value is 3 times it."
+    )
+
+
 def test_no_gap_line_for_any_other_reason() -> None:
     verdict = _decided(ACCURACY, [80.0, 95.0, 88.0])  # 0.89 of the paper's value
     assert verdict.reason is ReasonCode.HIGH_VARIANCE

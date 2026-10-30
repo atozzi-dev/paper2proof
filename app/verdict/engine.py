@@ -45,6 +45,17 @@ def _implausible_gap(mean: float, reported: float, k: float) -> bool:
     return abs(mean) > k * abs(reported) or abs(reported) > k * abs(mean)
 
 
+def _implausible_method(mean: float, reported: float, k: float) -> bool:
+    """A RELATIVE claim's method measured k times off the paper's own value for it: the
+    experiment is not the paper's (another task, data or scale), so its direction proves
+    nothing. A factor of 100 is a fraction against a percent the scale alignment could not
+    fix (the delta alone decides the unit), not another experiment: not a gap here."""
+    return all(
+        _implausible_gap(m, v, k)
+        for m, v in ((mean, reported), (100 * mean, reported), (mean, 100 * reported))
+    )
+
+
 def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verdict:
     n = len(measurements.per_seed)
     base = measurements.baseline_per_seed
@@ -105,6 +116,15 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
             reason = None if full else ReasonCode.REDUCED_SCALE_CONTRADICTS
         else:
             kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.HIGH_VARIANCE
+        own = math.fsum(measurements.per_seed) / n  # the method's own value, as measured
+        if (
+            full
+            and reported is not None
+            and cfg.implausible_ratio is not None
+            and _implausible_method(own, reported, cfg.implausible_ratio)
+        ):
+            kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP
+            tolerance["method_mean"] = own
 
     # Report numbers in the claim's original direction.
     lo, hi = (ci_low, ci_high) if sign > 0 else (-ci_high, -ci_low)

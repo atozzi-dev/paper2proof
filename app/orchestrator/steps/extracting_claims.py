@@ -163,9 +163,12 @@ def latex_table_rows(paper: IngestedPaper) -> TableRows:
 
 
 def fill_from_tables(claim: Claim, table_rows: TableRows) -> Claim:
-    """A claim without a number takes it from the table its source_ref names, if it can."""
+    """An ABSOLUTE claim without a number takes it from the table its source_ref names, if it
+    can. A RELATIVE claim never does: the row its text names can be the baseline's, and its
+    reported_value (the method's own) can make the verdict INCONCLUSIVE (engine.py)."""
     number = _table_number(claim.source_ref)
-    if claim.reported_value is None and number in table_rows:
+    absolute = claim.claim_type is ClaimType.ABSOLUTE
+    if absolute and claim.reported_value is None and number in table_rows:
         value = _row_value(table_rows[number], claim)
         if value is not None:
             return claim.model_copy(update={"reported_value": value})

@@ -323,6 +323,66 @@ def test_the_gap_rule_leaves_other_outcomes_alone() -> None:
     assert relative_reversal.kind is VerdictKind.NOT_REPRODUCED  # RELATIVE: no ratio rule
 
 
+def relative_with_value(
+    v: float, delta: float, *, metric: str = "rmse", hib: bool = False
+) -> Claim:
+    return relative(delta).model_copy(
+        update={"reported_value": v, "metric": metric, "higher_is_better": hib}
+    )
+
+
+# production, 2026-10-30: KAN against an MLP on a stand-in function, not the Jacobian elliptic
+# functions the claim is about: the direction held, the method's own RMSE was 36 times the paper's
+KAN = relative_with_value(0.000133, -0.000515)
+KAN_RMSE = [0.005386560185047304, 0.004936504655575021, 0.004095082553245369]
+MLP_RMSE = [0.18271744410400606, 0.1246651639379085, 0.13689873141162687]
+
+
+def test_a_relative_claim_whose_method_value_is_k_times_off_is_an_implausible_gap() -> None:
+    """The direction alone cannot reproduce a claim on an experiment that is not the paper's."""
+    measured = m(Scale.FULL, KAN_RMSE, MLP_RMSE)
+    assert decide(KAN, measured, NO_GAP_RULE).kind is VerdictKind.REPRODUCED
+    verdict = decide(KAN, measured, CFG)
+    assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
+    diffs = [x - b for x, b in zip(KAN_RMSE, MLP_RMSE, strict=True)]
+    assert verdict.mean == pytest.approx(sum(diffs) / 3)  # still the difference
+    assert verdict.tolerance["method_mean"] == pytest.approx(sum(KAN_RMSE) / 3)
+    assert verdict.tolerance["rho"] == CFG.rho
+
+
+def test_a_relative_gap_also_replaces_an_accusation() -> None:
+    reversed_far_off = m(Scale.FULL, MLP_RMSE, KAN_RMSE)  # the method worse, 1000 times off
+    assert decide(KAN, reversed_far_off, NO_GAP_RULE).kind is VerdictKind.NOT_REPRODUCED
+    assert decide(KAN, reversed_far_off, CFG).reason is ReasonCode.IMPLAUSIBLE_GAP
+
+
+@pytest.mark.parametrize(
+    ("claim", "method", "base", "kind"),
+    [  # the method's value close to the paper's: the rule never fires
+        (relative_with_value(0.972, 0.126, metric="accuracy", hib=True), [0.97, 0.971, 0.969],
+         [0.845, 0.846, 0.844], VerdictKind.REPRODUCED),
+        (relative_with_value(0.966, 0.02, metric="accuracy", hib=True), [0.94, 0.941, 0.939],
+         [0.967, 0.968, 0.966], VerdictKind.NOT_REPRODUCED),
+        # 94.1% against a fraction: a unit mismatch (100 times), not another experiment
+        (relative_with_value(94.1, 1.7, metric="accuracy", hib=True), [0.90, 0.901, 0.899],
+         [0.93, 0.931, 0.929], VerdictKind.NOT_REPRODUCED),
+    ],
+)  # fmt: skip
+def test_no_relative_gap_near_the_papers_value_or_off_by_a_percent_factor(
+    claim: Claim, method: list[float], base: list[float], kind: VerdictKind
+) -> None:
+    assert decide(claim, m(Scale.FULL, method, base), CFG).kind is kind
+
+
+def test_no_relative_gap_without_a_method_value_or_at_reduced_scale() -> None:
+    """A reduced run is expected to land elsewhere; without the paper's value there is no ratio."""
+    reduced = decide(KAN, m(Scale.REDUCED, KAN_RMSE, MLP_RMSE), CFG)
+    assert reduced.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    no_value = KAN.model_copy(update={"reported_value": None})
+    assert decide(no_value, m(Scale.FULL, KAN_RMSE, MLP_RMSE), CFG).kind is VerdictKind.REPRODUCED
+    assert decide(KAN, m(Scale.FULL, KAN_RMSE, MLP_RMSE), NO_GAP_RULE).reason is None
+
+
 def test_the_implausible_ratio_is_configured() -> None:
     assert VerdictConfig().implausible_ratio == 2.0  # configs written before the rule still load
     assert decide(absolute(0.9), m(Scale.FULL, [0.5, 0.5, 0.5]), CFG).kind is (
