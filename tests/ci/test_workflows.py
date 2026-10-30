@@ -376,7 +376,7 @@ def test_smoke_cron_runs_daily_during_judging_and_reports_failures() -> None:
     triggers = _triggers(WORKFLOWS / "smoke-cron.yml")
     assert triggers["schedule"] == [{"cron": "17 7 * * *"}]  # off the hour: fewer dropped runs
     text = (WORKFLOWS / "smoke-cron.yml").read_text(encoding="utf-8")
-    assert "2026-10-30" in text and "2026-12-15" in text
+    assert "2026-10-30" in text and "2026-12-23" in text  # judging ends on 12-23
     assert "deploy/smoke.sh" in text
     report = _job("smoke-cron.yml", "report")
     assert "failure" in str(report.get("if", ""))
