@@ -1,12 +1,14 @@
 # Paper2Proof
 
 **Do the numbers in this paper hold up?** Paper2Proof takes an arXiv ID, extracts the paper's
-quantitative claims, re-runs the experiment in an isolated, offline Nebius Token Factory sandbox,
-and returns a **deterministic verdict** with a signed, re-runnable **Proof Bundle**.
+quantitative claims, looks for the official code, re-runs the experiment over several seeds in an
+isolated, offline Nebius Token Factory Sandbox, and returns a **deterministic verdict** per claim
+with a signed, re-runnable **Proof Bundle**.
 
 Built for the Nebius × NVIDIA Global AI Hackathon, *Coding and Agentic Engineering* track.
 
-- **Live demo:** <https://146-59-83-160.sslip.io>
+- **Live service:** <https://paper2proof.com> (gallery and replays are public; live runs need an
+  invite code)
 - **Video (3 min):** [VIDEO_URL]
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   **Limitations:** [docs/LIMITATIONS.md](docs/LIMITATIONS.md) ·
@@ -23,7 +25,7 @@ read the paper, plan the experiment, write the code and explain the result. Code
 
 ## For judges: what to try
 
-You need nothing but a browser for the first three. Each takes under two minutes.
+You need nothing but a browser for the first three. The first two take under two minutes each.
 
 1. **Watch a full run in about a minute.** On the home page, under *Recent verdicts*, press
    **▶ Replay** on any run. It replays the recorded events at 10× speed: ingestion, claim
@@ -34,10 +36,11 @@ You need nothing but a browser for the first three. Each takes under two minutes
    against the tolerance band, the conditions, the Judge's explanation, the per-role cost
    receipt and the Proof Bundle download.
 3. **Start a live run.** Enter an arXiv ID (for example `[ARXIV_ID]`) and the invite code
-   **`[INVITE_CODE]`**, then press **Start the run**. A small paper takes a few minutes (our
-   canaries finish in under two); a heavier one runs up to its 30-minute experiment budget. You can
-   follow it live and leave the page: the link keeps working. Each invite code allows 3 runs per day. Runs whose estimated cost is above
-   $0.60 stop for your approval.
+   **`[INVITE_CODE]`**, then press **Start the run**. A small paper takes a few minutes; a
+   heavier one runs up to its 30-minute experiment budget. You can follow it live and leave the
+   page: the link keeps working. Each invite code allows 3 runs per day. Runs whose estimated
+   cost is above $0.60 stop for your approval. Experiments run on CPU (4 vCPU, about 4 GB), so
+   a paper that needs a GPU runs at reduced scale or ends *Inconclusive*.
 4. **Verify a Proof Bundle** (optional, needs Python and [uv](https://docs.astral.sh/uv/)):
 
    ```bash
@@ -48,7 +51,10 @@ You need nothing but a browser for the first three. Each takes under two minutes
 
    It checks the hash of every file and the KMS signature against the published public key,
    [`docs/bundle-public-key.pem`](docs/bundle-public-key.pem). `bundle/reproduce.sh` re-runs the
-   judged experiment on any Linux machine with Docker (on its GPUs if it has an NVIDIA one).
+   judged attempt with the same runner image (by digest), workspace and manifest, with Docker on
+   a disposable Linux machine (on CPU, as the live service ran it). It needs the run's input
+   archives (wheels, repository, data), which are too large for the bundle and are checked
+   against their digests.
 
 A negative result always reads **"Not reproduced under our conditions"**, with those conditions
 listed next to it. It is a statement about our run, never about the authors.
@@ -62,35 +68,88 @@ flowchart LR
     C --> D["Find the code<br/>HF Papers + Tavily + Nano"]
     D --> P["Plan<br/>Ultra"]
     P --> PR["Provision<br/>locked-down container"]
-    PR --> S["Write and smoke-test<br/>Super, sandbox offline"]
-    S --> E["Run k seeds<br/>sandbox offline"]
+    PR --> S["Write and smoke-test<br/>Super, Sandbox offline"]
+    S --> E["Run 3+ seeds<br/>Sandbox offline, CPU"]
     E --> V["Verdict<br/>pure function"]
     V --> J["Explain<br/>Ultra"]
     J --> B["Signed Proof Bundle"]
 ```
 
-- **The control plane** (API, web UI and orchestrator) is one FastAPI process on a host of
-  ours, behind TLS. Its state is SQLite, replicated to Nebius Object Storage with Litestream.
-  Per-run buckets, the image registry and the bundle-signing key (KMS) are on Nebius AI Cloud.
+- **The control plane** (API, web UI and orchestrator) is one FastAPI process on a VPS of ours,
+  behind a TLS reverse proxy, at <https://paper2proof.com>. Its state is SQLite, replicated to
+  Nebius Object Storage with Litestream. Per-run buckets, the image registry and the
+  bundle-signing key (KMS) are on Nebius AI Cloud. Models come from Nebius Token Factory.
 - **Generated code never runs there.** The Coder's smoke runs and the experiment itself run in
-  **Nebius Token Factory Sandboxes**: a fresh microVM per run, with no network interface and no
-  secrets. Inputs are uploaded by content hash and mounted read-only; the job runs as an
-  unprivileged user, and its result files come back to be checked as untrusted data.
-  Provisioning (hash-pinned wheels, the repository, parquet data) runs our own code in a
-  locked-down container on the host, and never executes what it downloads.
-- **Why not GPU jobs.** The design runs the experiment as a Nebius AI Cloud GPU job behind an
-  egress gateway, and that path is implemented and tested (`P2P_EXEC_BACKEND=gpu`). For the
-  hackathon our tenant never got a CPU quota for the gateway, and L40S capacity was not
-  available when we tested, so the live service runs on CPU in Sandboxes. Every verdict lists
-  the hardware it ran on. Details: [docs/specs/hybrid-deploy.md](docs/specs/hybrid-deploy.md),
+  **Nebius Token Factory Sandboxes**: a fresh microVM per run (4 vCPU, about 4 GB, at most one
+  hour), with networking disabled (loopback only) and no secrets. Inputs are uploaded by content
+  hash and mounted read-only; the job runs as an unprivileged user, and its result files come
+  back to be checked as untrusted data.
+- **Provisioning runs only our code.** Hash-locked wheels, a shallow clone of the repository and
+  Hugging Face parquet files are fetched by our provisioner image in a locked-down container on
+  the host (unprivileged, no capabilities, read-only root, capped memory). It installs wheels
+  into a directory without importing them and never runs the repository. Its network reaches
+  the public internet only: private ranges, the host and the metadata service are dropped.
+- **The GPU path is built but not used in production.** The design runs the experiment as a
+  Nebius AI Cloud GPU job (NVIDIA L40S) behind an allowlisting egress gateway, and that path is
+  implemented and tested (`P2P_EXEC_BACKEND=gpu`). Our tenant was never granted the non-GPU
+  vCPU quota the gateway and the Serverless endpoint need, and the isolated GPU job test never
+  passed (an internal error in the isolated subnet, no free L40S elsewhere). So the live
+  service runs every experiment on CPU in Sandboxes, and every verdict lists the hardware it ran
+  on. Details: [docs/specs/hybrid-deploy.md](docs/specs/hybrid-deploy.md),
   [docs/FEEDBACK.md](docs/FEEDBACK.md).
-- **The orchestrator is an explicit state machine** with a single bounded agentic loop (the
-  Coder, at most 8 fixes). Installing packages, creating jobs and touching buckets are done by
-  deterministic code after validation. The Coder can only *ask* for a package.
+- **The orchestrator is an explicit state machine** with a single bounded agentic loop: the
+  Coder, with at most 8 smoke runs, told how many it has left. Installing packages, creating
+  jobs and touching buckets are done by deterministic code after validation. The Coder can only
+  *ask* for a package.
 - **Every model call and every job is checked against a budget before it is made:** per-run
   tokens, $1 of inference, 30 minutes of experiment, and daily caps with a kill switch.
 
 Details, diagrams and the threat model are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Safety guards
+
+A paper is untrusted input, and so is everything a model writes after reading it. These guards
+are in the code, and most have their own tests.
+
+- **Paper text is data, never instructions.** Paper text, repository files, the Coder's own
+  workspace and smoke-run output are wrapped as untrusted documents before they enter a prompt
+  (the delimiter is defanged inside the text, lookalike characters included).
+- **Model-written and repository code never runs on the control plane.** Only Sandboxes run it.
+  The one exception is a local development executor that refuses to start outside
+  `P2P_ENV=dev` and for any paper not on the canary allowlist.
+- **Package policy, decided by code.** The Planner and the Coder only *request* packages. A
+  request must be a plain name and version (no URLs, paths or options); `pip`, `uv`,
+  `setuptools` and `wheel` are denied; the package must exist on PyPI; a name within one or two
+  edits of a top-500 package is refused as a typosquat; any other package needs at least 5
+  releases and 180 days of history. Packages that the official repository (linked by the
+  authors) declares are exempt from those two checks. At most 5 packages per request and 2
+  requests per run. Installs are wheels only, hash-locked, and a package that publishes only a
+  source distribution is refused at planning: nothing is ever built from source.
+- **Deterministic names.** Jobs are `p2p-<kind>-<slug>-<attempt>` and buckets `p2p-run-<slug>`,
+  and every creation looks the name up first, so a retry never creates a duplicate. Sandboxes
+  has no names, so the backend keeps an index on the host, written before each spawn.
+- **Images by digest.** The Sandboxes backend accepts only the configured runner image digest
+  and runs the image imported for it; any other image is refused. Bundles record digests only.
+- **A budget check before every call.** Every model call (each retry included) and every job is
+  reserved in a ledger and checked against per-run and daily caps before it is sent.
+- **A deterministic verdict.** `decide()` is a pure function of the claim, the measurements and
+  the hashed config, with 100% test coverage and property-based tests. The Judge sees the
+  numbers only through a Facts block written by code, and an explanation that names another
+  verdict is discarded for a template.
+- **Stand-in tripwire.** A Coder script that says it uses a proxy, a stand-in, a placeholder or
+  dummy data for the paper's method or data cannot finish until it changes, and the run's
+  Limitations name the line. Scripts that start processes or run other files are refused
+  before they spend a smoke run.
+- **Implausibility checks.** A measured value more than twice off the paper's (same sign) is
+  *Inconclusive* (`IMPLAUSIBLE_GAP`), never an accusation: that is a broken experiment, a
+  stand-in or a unit mismatch, not a wrong claim. This holds for absolute claims, and for
+  relative claims when the paper states the method's own value and the run is at full scale.
+- **Signed bundles.** Every file of the Proof Bundle is hashed into its manifest, scanned for
+  secrets before packing, and the manifest's hash is signed with an asymmetric Nebius KMS key
+  (ECDSA P-256) whose public key is in the repository.
+- **Narrow input, private output.** The only input is an arXiv ID matching
+  `^\d{4}\.\d{4,5}(v\d+)?$`. Live runs are invite-only, runs are private by default, and the
+  public gallery is curated by hand.
 
 ## NVIDIA Nemotron on Nebius Token Factory
 
@@ -118,10 +177,12 @@ ambiguous or missing.
 - **OpenAI compatibility.** The standard `openai` SDK, tool calling and the reasoning switch
   (`chat_template_kwargs`) worked unchanged, so the client is a thin layer with retries,
   rate-limit headers and a cost ledger.
-- **Batch API** at half price runs the claim-extraction evaluation and the routing ablation.
 - **Sandboxes** run every smoke test and every experiment: networking disabled (only the
-  loopback interface), start-up in seconds, content-addressed file uploads and up to 10 MiB of
-  output per run. Moving the execution plane onto them took a day.
+  loopback interface), start-up in seconds and content-addressed file uploads. When the GPU
+  path could not be used, the experiments moved onto them behind the same job interface, so
+  the runner, the manifest, the verdict and the bundle stayed the same.
+- **Batch API** at half price: the claim-extraction evaluation (set C) is written for it; it was
+  not run for this submission.
 
 ## Tavily
 
@@ -133,13 +194,33 @@ run and per day.
 
 ## Evaluation (ReproBench-mini)
 
-| Set | What | Result |
-|---|---|---|
-| A: canaries | Small synthetic papers we wrote, with true and deliberately falsified claims ([eval/canaries](eval/canaries)) | Verdict accuracy [PENDING]; coverage (claims with a decisive verdict) and accuracy on those [PENDING]; **false accusations [PENDING]** (target 0) |
-| B: real papers | arXiv papers with official code and cheap experiments ([eval/set_b.yaml](eval/set_b.yaml)) | [PENDING] |
-| C: extraction | Hand-annotated claims ([eval/set_c](eval/set_c)) | Precision / recall / F1 [PENDING] |
+Latest round, run through the live pipeline (Token Factory models, experiments in Sandboxes on
+CPU):
 
-**Routing ablation** (set C, routed models against Ultra for every role): [PENDING].
+| Set | What | Result | Cost |
+|---|---|---|---|
+| A: canaries | 10 small synthetic papers we wrote, built on scikit-learn, with 16 claims: 8 true and 8 deliberately falsified ([eval/canaries](eval/canaries)) | Verdict accuracy **1.0** (16/16), **0 false accusations** | about $0.27 for the whole set |
+| B: real papers | 5 real arXiv papers picked for the live service's CPU limits ([eval/set_b.yaml](eval/set_b.yaml)) | 1 run reached a verdict, 4 failed before one (below) | about $0.62 for the whole set |
+| C: extraction | Hand-annotated claims ([eval/set_c](eval/set_c)) | Not run for this submission | — |
+| Routing ablation | Set C, routed models against Ultra for every role | Not run for this submission | — |
+
+Set A accuracy over our rounds so far: 0.5 → 0.81 → 0.94 → 0.81 → 0.69 → 0.94 → 1.0. The
+models still vary from round to round (which claims are read, how the experiment is planned and
+written), so a single round is not a guarantee.
+
+Set B is the hard set: real papers, real repositories, real datasets, on CPU and offline. What
+happened, and what changed since:
+
+- **KAN (2404.19756):** *Reproduced*, but the experiment measured a stand-in function, not the
+  paper's. A relative claim whose measured method value is more than twice off the paper's own
+  value is now *Inconclusive* (`IMPLAUSIBLE_GAP`).
+- **Distillation (1503.02531):** the plan asked for the same dataset twice and the run ended in
+  a contract error. A plan now keeps one split per dataset.
+- **InterpretML (1909.09223):** a planned package had no wheel, so provisioning failed. Such a
+  package is now refused at planning.
+- **CatBoost (1706.09516):** the Adult dataset was not available offline. It now maps to a
+  public copy on Hugging Face.
+- **NAU (2001.05016):** the Coder ran out of smoke runs. It now sees how many it has left.
 
 A false accusation, a true claim judged "not reproduced", is the metric we care most about. The
 verdict rule is built to avoid it: a negative verdict needs full scale, at least 3 seeds and a
@@ -147,13 +228,9 @@ whole confidence interval outside the tolerance band.
 
 ## Cost per run
 
-Every run shows a cost receipt with tokens and dollars per role, job time and totals.
-
-| Run | Inference | Cloud | Total |
-|---|---|---|---|
-| Canary paper, CPU only (development) | $0.037 | — | $0.037 |
-| Canary paper in production (Token Factory Sandbox, 4 vCPU) | $0.03 | $0.0017 | $0.03 |
-| Real paper | [PENDING] | [PENDING] | [PENDING] |
+Every run shows a cost receipt with tokens and dollars per role, job time and totals; the
+evaluation table above gives measured totals. Cloud time in Sandboxes is priced as an estimate
+from [`config/pricing.yaml`](config/pricing.yaml), to reconcile with the invoice.
 
 Hard limits per run: $1.00 of inference and 30 minutes of experiment.
 
@@ -230,10 +307,11 @@ account (`icacls var\jobs /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`): a fo
 
 ### Deploying
 
-Infrastructure is Terraform in [`infra/`](infra/README.md). The control plane deploy and its
-checklist are in [docs/DEPLOY.md](docs/DEPLOY.md) (the live service follows its "Hybrid deploy"
-section), operations (invites, gallery curation, takedowns, rotation) in
-[docs/OPERATIONS.md](docs/OPERATIONS.md).
+Infrastructure is Terraform in [`infra/`](infra/README.md) (the live service applies it without
+the egress gateway). The control plane deploy and its checklist are in
+[docs/DEPLOY.md](docs/DEPLOY.md): the live service follows its "Hybrid deploy" section (a VPS,
+a pinned commit under systemd, a TLS reverse proxy). Operations (invites, gallery curation,
+takedowns, rotation) are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ### Repository layout
 
@@ -241,8 +319,8 @@ section), operations (invites, gallery curation, takedowns, rotation) in
 |---|---|
 | `app/` | Control plane: `api`, `orchestrator`, `models`, `ingestion`, `discovery`, `execution`, `verdict`, `bundle`, `domain`, `storage` |
 | `web/` | React + Vite + TypeScript UI |
-| `images/` | The four images: api, provisioner, runner (GPU), runner-cpu |
-| `infra/` | Terraform modules (networks, buckets, registries, IAM, KMS) and the egress gateway's cloud-init |
+| `images/` | The four images: api, provisioner, runner (GPU, not used in production), runner-cpu (the live experiments) |
+| `infra/` | Terraform modules (networks, buckets, registries, IAM, KMS) and the egress gateway's cloud-init (designed deploy, not used in production) |
 | `config/` | Model routing, prices, budgets, verdict tolerances, package allowlists |
 | `schemas/` | JSON Schemas of the manifests, results and events |
 | `eval/` | ReproBench-mini |

@@ -297,8 +297,8 @@ hashes goes into the Proof Bundle.
 - **Capacity:** a GPU job can wait in the queue for many minutes without any error. GPU budgets
   count from the job's start, not its creation. A job still queued after 20 minutes is cancelled
   and the run ends `INCONCLUSIVE (CAPACITY)`.
-- **Smoke runs** use a CPU job in production. Token Factory Sandboxes with networking disabled
-  passed our spike and are implemented as an alternative executor.
+- **Smoke runs** use a CPU job in this design. The live service (hybrid deploy) runs them, and
+  the experiment itself, in Token Factory Sandboxes with networking disabled.
 
 ### 9.3 Network isolation
 
