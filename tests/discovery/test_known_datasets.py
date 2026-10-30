@@ -28,6 +28,11 @@ def _ids(dataset: str, text: str = "") -> list[str]:
         ("IMDb movie reviews", ["stanfordnlp/imdb"]),
         ("SST-2", ["stanfordnlp/sst2"]),
         ("GLUE SST2", ["stanfordnlp/sst2"]),
+        # CatBoost and InterpretML (production, 2026-10-30): UCI Adult, no planned copy
+        ("Adult", ["AiresPucrs/adult-census-income"]),
+        ("adult-income", ["AiresPucrs/adult-census-income"]),
+        ("UCI Adult census income", ["AiresPucrs/adult-census-income"]),
+        ("Adult Income", ["AiresPucrs/adult-census-income"]),
     ],
 )
 def test_known_datasets_are_named(dataset: str, expected: list[str]) -> None:
@@ -46,6 +51,8 @@ def test_known_datasets_are_named(dataset: str, expected: list[str]) -> None:
         "IMDB-M",
         "IMDB-WIKI",  # face images with ages
         "ImageNet",
+        "adult faces",  # lowercase "adult" is a word, not the dataset
+        "Adult patients (MIMIC-III)",
         "",
     ],
 )
@@ -74,4 +81,4 @@ def test_the_text_counts_only_when_the_dataset_field_names_none() -> None:
 
 def test_every_hugging_face_id_is_one_the_provisioner_accepts() -> None:
     assert all(HF_DATASET_ID.fullmatch(k.hf_id) for k in KNOWN)
-    assert all(k.hf_id in k.ids and all(i == i.lower() for i in k.ids) for k in KNOWN)
+    assert all(k.hf_id.lower() in k.ids and all(i == i.lower() for i in k.ids) for k in KNOWN)

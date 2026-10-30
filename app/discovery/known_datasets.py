@@ -16,10 +16,10 @@ class KnownDataset:
     ids: frozenset[str]  # every Hugging Face id of the same data (lowercase): hf_id, legacy ids
 
 
-def _known(name: str, hf_id: str, pattern: str, legacy: str) -> KnownDataset:
-    return KnownDataset(
-        name, hf_id, re.compile(pattern, re.IGNORECASE), frozenset({hf_id.lower(), legacy})
-    )
+def _known(
+    name: str, hf_id: str, pattern: str, legacy: str, flags: int = re.IGNORECASE
+) -> KnownDataset:
+    return KnownDataset(name, hf_id, re.compile(pattern, flags), frozenset({hf_id.lower(), legacy}))
 
 
 # Most specific first: each match is blanked out before the next pattern runs, so Fashion-MNIST
@@ -42,6 +42,16 @@ KNOWN: tuple[KnownDataset, ...] = (
         "imdb",
     ),
     _known("SST-2", "stanfordnlp/sst2", r"\bsst[-_ ]?2\b", "sst2"),
+    # UCI Adult (32,561 rows: the UCI training portion). Case-sensitive: "adult" is also a word
+    # ("adult faces", "Adult patients")
+    _known(
+        "Adult",
+        "AiresPucrs/adult-census-income",
+        r"\bAdult\b(?![-_ ]+(?:patients?|faces?|content|population|subjects?|men|women|humans?"
+        r"|mice|males?|females?)\b)|(?i:\badult[-_ ]?(?:census|income)\b)",
+        "adult",
+        flags=0,
+    ),
 )
 # Data that comes with scikit-learn or is generated in code: never one of the above, even when
 # described as "MNIST-like" (load_digits is 8x8 digits, not MNIST)

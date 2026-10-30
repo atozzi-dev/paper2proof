@@ -29,7 +29,7 @@ from app.domain.models import (
     Scale,
     StepName,
 )
-from app.execution.package_policy import load_policy_config, normalize
+from app.execution.package_policy import PACKAGE_NAME, load_policy_config, normalize
 from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
@@ -105,14 +105,23 @@ def correct_plan(
         seeds += extra
         notes.append(f"seeds raised to {MIN_SEEDS} (the verdict needs at least {MIN_SEEDS})")
     datasets: list[DatasetReq] = []
+    repeated = 0
     for dataset in plan.datasets:  # the provisioner would refuse anything else (fail early)
         valid = HF_DATASET_ID.fullmatch(dataset.id) and (
             dataset.split is None or HF_SPLIT.fullmatch(dataset.split)
         )
+        first = next((d for d in datasets if d.id.lower() == dataset.id.lower()), None)
+        if valid and first is not None:  # its archive is named after the id: one split each
+            repeated += 1
+            notes.append(
+                f"dataset {dataset.id} dropped: {first.id} is already planned and one split per "
+                "dataset is fetched (the experiment holds out part of it for the other split)"
+            )
+            continue
         total = sum(d.max_bytes for d in datasets) + dataset.max_bytes
         if valid and len(datasets) < MAX_DATASETS and total <= MAX_DATASETS_BYTES:
             datasets.append(dataset)
-    if len(datasets) != len(plan.datasets):
+    if len(datasets) + repeated != len(plan.datasets):
         notes.append(
             f"dropped datasets that are invalid or over the cap ({MAX_DATASETS} datasets, "
             f"{MAX_DATASETS_BYTES // 2**30} GiB in total)"
@@ -149,6 +158,24 @@ NAMED_CHARS = 4096  # of a claim's dataset and text fields, matched against the 
 # The package policy's popular names: an authors' package found by its PyPI links is added
 # only if it is one of them (its links are self-declared, a squatter can copy them).
 POPULAR = load_policy_config(Path(__file__).resolve().parents[3] / "config").popular
+
+
+REFUSED_SHOWN = 10
+
+
+def refused_note(names: Sequence[str]) -> str:
+    """The plan note for packages the policy refused. The names are the Planner's: only those
+    the policy can parse are quoted, and at most REFUSED_SHOWN of them."""
+    valid = [n for n in names if PACKAGE_NAME.fullmatch(n)]
+    invalid = len(names) - len(valid)
+    shown = [f"{invalid} invalid name{'s' if invalid != 1 else ''}"] if invalid else []
+    shown += valid[:REFUSED_SHOWN]
+    more = len(valid) - REFUSED_SHOWN
+    return (
+        "refused by the package policy: "
+        + ", ".join(shown)
+        + (f" and {more} more" if more > 0 else "")
+    )
 
 
 class PlanningStep:
@@ -228,14 +255,22 @@ class PlanningStep:
         if authors is not None and not unknown:  # first: the per-request quota never cuts it
             plan = plan.model_copy(update={"packages": [authors, *plan.packages]})
         if self._package_check is not None:
-            plan = plan.model_copy(update={"packages": await self._package_check(plan.packages)})
+            accepted = await self._package_check(plan.packages)
+            allowed = {normalize(p.name) for p in accepted}
+            refused = [
+                p.name
+                for p in plan.packages
+                if normalize(p.name) not in allowed and (authors is None or p.name != authors.name)
+            ]
+            notes = [refused_note(refused)] if refused else []
+            plan = plan.model_copy(update={"packages": accepted, "notes": [*plan.notes, *notes]})
         else:
             plan = plan.model_copy(
                 update={"notes": [*plan.notes, "packages are validated at provisioning"]}
             )
         if authors is not None and unknown:  # its PyPI links are self-declared
             note = (
-                f"the authors' package {authors.name} was not added: it links to the official "
+                f"the authors' package {authors.name} was not added: it links to the "
                 "repository, but such links are self-declared and it is not a known popular "
                 "package"
             )
@@ -244,10 +279,10 @@ class PlanningStep:
             kept = authors.name in {normalize(p.name) for p in plan.packages}
             note = (
                 f"the authors' package {authors.name} was added (its PyPI page links to the "
-                "official repository)"
+                "repository)"
                 if kept
-                else f"the authors' package {authors.name} links to the official repository "
-                "but the package policy refused it"
+                else f"the authors' package {authors.name} links to the repository but the "
+                "package policy refused it"
             )
             plan = plan.model_copy(update={"notes": [*plan.notes, note]})
 
@@ -292,11 +327,13 @@ class PlanningStep:
     async def _authors_package(
         self, ctx: RunContext, plan: Plan, discovery: Discovery
     ) -> PackageReq | None:
-        """The authors' PyPI package, when the plan runs their official repository and the
+        """The authors' PyPI package, when the plan runs the discovered repository and the
         Planner did not plan it (InterpretML: the sources need a compiled library the package
-        ships). A repository found by search could be anybody's: never looked up."""
+        ships). A repository found by search could be anybody's, but only a package whose
+        PyPI page links to that very repository is found, and run() adds it only when it is
+        a known popular one: then it is the project's own package."""
         repo = discovery.repo
-        if plan.mode is not PlanMode.REPO_FIRST or repo is None or not repo.official:
+        if plan.mode is not PlanMode.REPO_FIRST or repo is None:
             return None
         planned = {normalize(p.name) for p in plan.packages}
         name = await authors_package(
