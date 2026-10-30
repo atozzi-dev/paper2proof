@@ -192,7 +192,7 @@ def test_the_judge_falls_back_to_the_reader_in_config() -> None:
     fallbacks = load_models_config(ROOT / "config" / "models.yaml").fallbacks
     assert fallbacks[Role.JUDGE] is Role.READER
     assert fallbacks[Role.PLANNER] is Role.READER
-    assert fallbacks[Role.CODER] is Role.PLANNER
+    assert fallbacks[Role.CODER] is Role.READER  # the Coder runs on the planner's model
 
 
 @respx.mock
