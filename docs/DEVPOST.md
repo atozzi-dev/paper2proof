@@ -172,7 +172,7 @@ GitHub Actions, OpenTelemetry, pytest, Hypothesis, Vitest, Playwright.
 
 - Live service: <https://paper2proof.com>
 - Repository: <https://github.com/atozzi-dev/paper2proof> (Apache-2.0)
-- Video: [VIDEO_URL]
+- Video: <https://youtu.be/ltMqrJTM6R4>
 - Architecture: <https://github.com/atozzi-dev/paper2proof/blob/main/docs/ARCHITECTURE.md>
 - Limitations: <https://github.com/atozzi-dev/paper2proof/blob/main/docs/LIMITATIONS.md>
 - Feedback: <https://github.com/atozzi-dev/paper2proof/blob/main/docs/FEEDBACK.md>
