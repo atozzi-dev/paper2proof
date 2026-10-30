@@ -138,8 +138,9 @@ alignment could not fix). Such a gap is evidence about the experiment, not about
   worse) keeps it so. A broken experiment that looks far better than the paper is not
   caught by this rule.
 - **REDUCED scale** keeps REDUCED_SCALE_ABSOLUTE: it is already inconclusive and says why.
-- **RELATIVE claims are unchanged**: a planted reversal legitimately differs from the
-  claimed delta by several times (and usually has the opposite sign).
+- **RELATIVE claims are never judged on their delta**: a planted reversal legitimately
+  differs from the claimed delta by several times (and usually has the opposite sign). They
+  have their own rule on the method's own value (below).
 - **Opposite signs, or a zero mean or paper value**: no ratio, no change.
 
 Known limit: a mismatch whose numbers happen to be close is not caught. A claim of 74 test
@@ -150,11 +151,37 @@ errors (a count) measured as an 89% error rate has a ratio of 1.2 and stays NOT_
 ```
 delta = claimed_delta or 0.0
 positive = ci_low > 0 and mean >= cfg.rho * delta
+own = mean(per_seed)                       # the method's own value, raw direction
+if scale == FULL and reported_value is not None and implausible_method(own, reported_value):
+    return INCONCLUSIVE(IMPLAUSIBLE_GAP)   # numbers still returned; tolerance["method_mean"] = own
 if positive:  return REPRODUCED if scale == FULL else REPRODUCED_AT_REDUCED_SCALE
 if ci_high <= 0:
     return NOT_REPRODUCED if scale == FULL else INCONCLUSIVE(REDUCED_SCALE_CONTRADICTS)
 return INCONCLUSIVE(HIGH_VARIANCE)
 ```
+
+#### Method gap (RELATIVE)
+
+`reported_value` of a RELATIVE claim is the method's own value, when the paper gives it. The
+direction of a difference measured on an experiment that is not the paper's proves nothing:
+production, 2026-10-30, a KAN against an MLP on a stand-in function (not the Jacobian
+elliptic functions the claim named) measured the method's RMSE at 36 times the paper's and
+was REPRODUCED on the direction alone. So, at full scale:
+
+```
+implausible_method(own, v) = implausible_gap(own, v)
+                             and implausible_gap(100 * own, v) and implausible_gap(own, 100 * v)
+```
+
+- **Any outcome is replaced**, REPRODUCED included: unlike an ABSOLUTE claim, a RELATIVE
+  claim has no window that a far-off method value could legitimately pass.
+- **A factor of 100 is excused**: it is a fraction against a percent (the scale alignment
+  decides a RELATIVE claim's unit from its delta alone, so "94.1% vs 92.4% (+1.7)" keeps the
+  method at 0.941), not another experiment, and the direction still holds.
+- **REDUCED scale is unchanged**: a reduced run is expected to land away from the paper's
+  value, and its verdict already says it ran at reduced scale.
+- `tolerance["method_mean"]` carries `own` for the Judge's Facts (the verdict's `mean` is the
+  difference).
 
 Use `scipy.stats.t.ppf`. If `s == 0`, then `half = 0` (deterministic runs are allowed).
 
@@ -243,6 +270,10 @@ Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`)
   mean and `reported_value` have the same sign, are both non-zero and are more than
   `implausible_ratio` times apart (either way), at any scale, `kind != NOT_REPRODUCED`.
 - **P8 (the gap rule only replaces an accusation or high variance):** compared with
-  `implausible_ratio = inf` (the rule disabled), a verdict either is unchanged or was
-  NOT_REPRODUCED or INCONCLUSIVE/HIGH_VARIANCE and is now INCONCLUSIVE/IMPLAUSIBLE_GAP, for
-  an ABSOLUTE claim at full scale, with the same numbers.
+  `implausible_ratio = None` (the rule disabled), a verdict either is unchanged or, at full
+  scale with the measured mean far off `reported_value`, is now INCONCLUSIVE/IMPLAUSIBLE_GAP
+  with the same numbers; for an ABSOLUTE claim it was NOT_REPRODUCED or
+  INCONCLUSIVE/HIGH_VARIANCE.
+- **P9 (method gap):** for any RELATIVE claim at full scale whose method is measured more
+  than `implausible_ratio` times off `reported_value` (same sign, both non-zero), and not by a
+  factor of about 100, `kind == INCONCLUSIVE` and `reason == IMPLAUSIBLE_GAP`.
