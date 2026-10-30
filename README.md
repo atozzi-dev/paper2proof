@@ -35,8 +35,9 @@ You need nothing but a browser for the first three. The first two take under two
    from in the paper, what the paper says next to what we measured, the confidence interval
    against the tolerance band, the conditions, the Judge's explanation, the per-role cost
    receipt and the Proof Bundle download.
-3. **Start a live run.** Enter an arXiv ID (for example `[ARXIV_ID]`) and the invite code
-   **`[INVITE_CODE]`**, then press **Start the run**. A small paper takes a few minutes; a
+3. **Start a live run.** Enter an arXiv ID (for example `1706.09516`, CatBoost, about 5 minutes,
+   or `0000.00006`, one of our synthetic canary papers, about 2 minutes) and the invite code
+   from the Devpost testing instructions, then press **Start the run**. A small paper takes a few minutes; a
    heavier one runs up to its 30-minute experiment budget. You can follow it live and leave the
    page: the link keeps working. Each invite code allows 3 runs per day. Runs whose estimated
    cost is above $0.60 stop for your approval. Experiments run on CPU (4 vCPU, about 4 GB), so
@@ -194,33 +195,43 @@ run and per day.
 
 ## Evaluation (ReproBench-mini)
 
-Latest round, run through the live pipeline (Token Factory models, experiments in Sandboxes on
-CPU):
+Latest round (2026-10-30), run through the live pipeline (Token Factory models, experiments in
+Sandboxes on CPU):
 
 | Set | What | Result | Cost |
 |---|---|---|---|
-| A: canaries | 10 small synthetic papers we wrote, built on scikit-learn, with 16 claims: 8 true and 8 deliberately falsified ([eval/canaries](eval/canaries)) | Verdict accuracy **1.0** (16/16), **0 false accusations** | about $0.27 for the whole set |
-| B: real papers | 5 real arXiv papers picked for the live service's CPU limits ([eval/set_b.yaml](eval/set_b.yaml)) | 1 run reached a verdict, 4 failed before one (below) | about $0.62 for the whole set |
+| A: canaries | 10 small synthetic papers we wrote, built on scikit-learn, with 16 claims: 8 true and 8 deliberately falsified ([eval/canaries](eval/canaries)) | Verdict accuracy **1.0** (16/16), **0 false accusations** | about $0.28 for the whole set |
+| B: real papers | 5 real arXiv papers picked for the live service's CPU limits ([eval/set_b.yaml](eval/set_b.yaml)) | 3 runs reached a verdict, all *Inconclusive* with a stated reason; 2 failed before one; **0 false accusations** | about $0.74 for the whole set |
 | C: extraction | Hand-annotated claims ([eval/set_c](eval/set_c)) | Not run for this submission | — |
 | Routing ablation | Set C, routed models against Ultra for every role | Not run for this submission | — |
 
-Set A accuracy over our rounds so far: 0.5 → 0.81 → 0.94 → 0.81 → 0.69 → 0.94 → 1.0. The
-models still vary from round to round (which claims are read, how the experiment is planned and
-written), so a single round is not a guarantee.
+Set A accuracy over our rounds so far: 0.5 → 0.81 → 0.94 → 0.81 → 0.69 → 0.94 → 1.0 → 0.94 →
+1.0, with no false accusation in the last three rounds. The models still vary from round to round
+(which claims are read, how the experiment is planned and written), so a single round is not a
+guarantee. Each miss we found became a check in code: the last one (a Coder that added an option
+the paper does not give to scikit-learn's data generator, which made a planted false claim look
+true) is now named to the Coder before it can finish.
 
-Set B is the hard set: real papers, real repositories, real datasets, on CPU and offline. What
-happened, and what changed since:
+Set B is the hard set: real papers, real repositories, real datasets, on CPU and offline. In the
+latest round:
 
-- **KAN (2404.19756):** *Reproduced*, but the experiment measured a stand-in function, not the
-  paper's. A relative claim whose measured method value is more than twice off the paper's own
-  value is now *Inconclusive* (`IMPLAUSIBLE_GAP`).
-- **Distillation (1503.02531):** the plan asked for the same dataset twice and the run ended in
-  a contract error. A plan now keeps one split per dataset.
-- **InterpretML (1909.09223):** a planned package had no wheel, so provisioning failed. Such a
-  package is now refused at planning.
-- **CatBoost (1706.09516):** the Adult dataset was not available offline. It now maps to a
-  public copy on Hugging Face.
-- **NAU (2001.05016):** the Coder ran out of smoke runs. It now sees how many it has left.
+- **CatBoost (1706.09516):** ran on the Adult dataset (a public Hugging Face copy). CatBoost's
+  logloss came out at 0.274 against the paper's 0.2695, but its edge over LightGBM was smaller
+  than claimed and the confidence interval reached zero: *Inconclusive* (`HIGH_VARIANCE`).
+- **KAN (2404.19756):** KAN beat the MLP on all three special-function claims, but with errors
+  about 40 times the paper's (a short CPU training): *Inconclusive* (`IMPLAUSIBLE_GAP`, and
+  `HIGH_VARIANCE` for one claim). An earlier round had called a similar run *Reproduced* on a
+  stand-in function; the relative implausibility rule exists because of it.
+- **Distillation (1503.02531):** the experiment read the smoke-test data in the full run and
+  stopped: *Inconclusive* (`RUNTIME_ERROR`).
+- **InterpretML (1909.09223):** the packages, repository and data did not fit the sandbox's disk,
+  so no smoke run could start (`SMOKE_EXHAUSTED`).
+- **NAU (2001.05016):** the Coder did not get a passing smoke run within its 8 (`SMOKE_EXHAUSTED`).
+
+Over the rounds, set B's failures turned into fixes in code: one split per dataset, no
+sdist-only packages, the authors' package for a repository found by search, a public copy of
+Adult, the whole time allowance in Sandboxes, refusals for flat parquet globs, and the relative
+implausibility rule. What is left is mostly what a 4 vCPU sandbox cannot do in 30 minutes.
 
 A false accusation, a true claim judged "not reproduced", is the metric we care most about. The
 verdict rule is built to avoid it: a negative verdict needs full scale, at least 3 seeds and a

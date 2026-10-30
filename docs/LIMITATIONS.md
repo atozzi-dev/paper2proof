@@ -101,8 +101,11 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
   4 vCPUs and about 4 GB of memory, for at most 30 minutes, with $1 of inference. Every
   experiment gets the whole 30 minutes, whatever the plan estimated; one that needs longer for
   its seeds ends Inconclusive (`BUDGET`). Anything that needs a GPU (deep-network training, LLM
-  papers) runs only at a much reduced scale, or ends Inconclusive. The GPU path (one NVIDIA L40S per run, as a Nebius AI Cloud job) is
-  implemented and tested but not used in production: see
+  papers) runs only at a much reduced scale, or ends Inconclusive. A sandbox also has a fixed
+  disk: a plan whose packages, repository and data do not fit (InterpretML with `interpret`,
+  LightGBM and XGBoost) fails its smoke runs and ends `SMOKE_EXHAUSTED`. The GPU path (one
+  NVIDIA L40S per run, as a Nebius AI Cloud job) is implemented and tested but not used in
+  production: see
   [specs/hybrid-deploy.md](specs/hybrid-deploy.md). Every verdict lists the hardware it ran on.
 - **Capacity.** With no capacity available for the experiment (the platform refuses, or the job
   is still queued after 20 minutes) the run ends **Inconclusive (capacity)**. A used-up project
@@ -110,8 +113,8 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
 
 ## Known failure cases on real papers
 
-Our real-paper evaluation set (`eval/set_b.yaml`) shows where runs stop before a verdict. Each
-case below is handled by the current code as described; the README has the latest numbers.
+Our real-paper evaluation set (`eval/set_b.yaml`) shows where runs stop before a verdict. The
+README has the latest numbers. Fixed in code over our rounds:
 
 - **The same dataset planned twice** ended in a contract error. A plan now keeps one split per
   dataset.
@@ -125,6 +128,19 @@ case below is handled by the current code as described; the README has the lates
 - **A stand-in function** measured in place of the paper's gave a *Reproduced* relative claim.
   The relative implausibility rule above now makes such a run Inconclusive when the paper states
   the method's own value; a stand-in whose numbers happen to be close is still not caught.
+- **A parquet glob that missed the data** (the files sit in `data/`) failed only in the
+  experiment. Such a glob is now refused before a smoke run.
+- **A planned version the policy could not parse** made it refuse the authors' package. The
+  package is now judged without that version.
+
+Still open in the latest round:
+
+- **A sandbox's disk** can be too small for a heavy stack (InterpretML: `interpret`, LightGBM,
+  XGBoost, the repository and the data), and no smoke run can start.
+- **The Coder's own bugs**: on NAU it found no passing smoke run within 8, and on Distillation
+  the full run read the smoke-test data, which exists only in smoke runs.
+- **CPU and 30 minutes**: deep networks (Distillation, KAN) train far less than in the paper,
+  so their numbers land far from it and the verdict is *Inconclusive*.
 
 ## Security boundaries
 

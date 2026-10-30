@@ -26,7 +26,8 @@ summary comes first, ranked by impact.
    endpoint, but metrics need an extra collector, and alerts cover only VMs and buckets.
 
 **Smaller gaps:** GPU jobs wait for capacity with no state detail; Sandboxes pricing is not
-documented, and its files API answers a large upload with a bare 502; the model catalog and `/v1/models` disagree, and `/v1/models` has no context
+documented, its files API answers a large upload with a bare 502, and an instance that runs
+out of disk (no size documented) says so only in the operation's `error` field; the model catalog and `/v1/models` disagree, and `/v1/models` has no context
 length; Super ignores `response_format: json_schema`, and the thinking switch works only through
 `chat_template_kwargs`; the Batch API wire format is not shown in full; the Python SDK needs an
 undeclared package on Windows; tracing ingest is gRPC-only.
@@ -47,6 +48,25 @@ which worked on the first call.
 - **Severity:** minor
 
 ## Token Factory Sandboxes
+
+### 2026-10-30 — An instance runs out of disk with no limit documented, and only the operation says so
+- **Context:** eval set B, InterpretML (1909.09223): smoke runs of an experiment with
+  `interpret`, `lightgbm` and `xgboost` installed, the authors' repository and a parquet
+  dataset mounted as input files (A-30).
+- **What happened:** every instance failed about 5 s after it started, with no exit code and
+  no output. Only `GET /v1/operations/<uuid>` showed why: `status: FAILED`,
+  `error: RemoteCallError('OSError', '28', 'No space left on device (os error 28)')`. The
+  instance limits list `instance_max_layer_bytes` (12 GiB) but no disk or tmpfs size, and the
+  4 vCPU / ~3.8 GiB shape has no larger variant we could find.
+- **Expected:** the writable disk size of an instance documented next to its CPU and memory,
+  a way to ask for more, and the failure reason in the operation's `result` (or a distinct
+  status) so a client can tell "the sandbox could not hold the inputs" from "the program
+  failed".
+- **Impact:** the Coder spent its 8 smoke runs on a failure it could not fix, and the run
+  ended `SMOKE_EXHAUSTED`; finding the cause took a manual operation lookup.
+- **Suggestion:** document the per-instance disk, offer larger shapes, and report ENOSPC as a
+  structured error.
+- **Severity:** major
 
 ### 2026-10-29 — The Sandboxes image import fails on an image referenced by digest
 - **Context:** importing `p2p-runner-cpu` from our Nebius Container Registry into Sandboxes (H-03, plan B of the hybrid deploy).

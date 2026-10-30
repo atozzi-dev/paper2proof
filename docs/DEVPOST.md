@@ -113,12 +113,12 @@ Latest evaluation round, through the live pipeline:
 
 | Set | Result | Cost |
 |---|---|---|
-| A: 10 synthetic scikit-learn papers, 16 planted true and false claims | accuracy **1.0** (16/16), **0 false accusations** | about $0.27 for the set |
-| B: 5 real papers (Distillation, CatBoost, InterpretML, NAU, KAN) | 1 verdict, 4 runs failed before a verdict; the current code addresses each cause | about $0.62 for the set |
+| A: 10 synthetic scikit-learn papers, 16 planted true and false claims | accuracy **1.0** (16/16), **0 false accusations** | about $0.28 for the set |
+| B: 5 real papers (Distillation, CatBoost, InterpretML, NAU, KAN) | 3 runs reached a verdict, all *Inconclusive* with a stated reason (CatBoost on real Adult data, KAN, Distillation); 2 failed before one (InterpretML: sandbox disk; NAU: no passing smoke run); **0 false accusations** | about $0.74 for the set |
 | C (claim extraction) and the routing ablation | not run for this submission | — |
 
-- Set A accuracy moved over our rounds (0.5 → 0.81 → 0.94 → 0.81 → 0.69 → 0.94 → 1.0): model
-  variance remains, and we report it.
+- Set A accuracy moved over our rounds (0.5 → 0.81 → 0.94 → 0.81 → 0.69 → 0.94 → 1.0 → 0.94 →
+  1.0): model variance remains, and we report it. Every miss became a check in code.
 - Deliberately falsified claims caught as *Not reproduced under our conditions*, with no true
   claim accused.
 - A Proof Bundle that a stranger can verify with standard tools, with a script that re-runs the
@@ -153,13 +153,15 @@ GitHub Actions, OpenTelemetry, pytest, Hypothesis, Vitest, Playwright.
 ## Testing instructions
 
 - **Live service:** <https://paper2proof.com> (no login needed for the gallery and replays).
-- **Invite code for live runs:** `[INVITE_CODE]` (3 runs per day).
+- **Invite code for live runs:** `[INVITE_CODE]` (3 runs per day; only in this private field,
+  never in the public text).
 - **Quick look (1 minute, free):** on the home page, under *Recent verdicts*, press **▶ Replay**
   on a run. It replays the recorded run at 10× speed; nothing is executed.
 - **A verdict:** press **Open** on a gallery run to see the claim, the measured interval
   against the tolerance band, the conditions, the explanation, the cost receipt and the Proof
   Bundle.
-- **A live run:** enter an arXiv ID such as `[ARXIV_ID]` and the invite code, then press
+- **A live run:** enter an arXiv ID such as `1706.09516` (CatBoost, about 5 minutes) or `0000.00006`
+  (one of our synthetic canary papers, about 2 minutes) and the invite code, then press
   **Start the run**. A small paper takes a few minutes; the link keeps working if you leave the
   page. Experiments run on CPU, so a paper that needs a GPU runs at reduced scale or ends
   *Inconclusive*.
