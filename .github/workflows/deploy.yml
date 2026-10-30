@@ -19,11 +19,15 @@
 # Setup (environments, variables, secrets): see the A-05 checklist in the issue notes.
 # deploy/endpoint.sh belongs to A-14 (docs/DEPLOY.md). Its very first run (--bootstrap) is the
 # human step H-05, never this workflow.
+#
+# The live service runs the hybrid deploy (docs/specs/hybrid-deploy.md), updated from develop on
+# its host: this workflow targets the Serverless design, which our tenant cannot run (no CPU
+# quota), so it starts only by hand, never on a merge into main. It has not completed a run: on
+# 2026-10-30 its scan step failed on the OCI archives (trivy reads a `docker save` tar or an OCI
+# layout directory, not an OCI tar).
 name: deploy
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       skip_terraform:

@@ -130,10 +130,14 @@ def test_id_token_only_in_the_main_only_prod_deploy_job() -> None:
     assert "github.ref == 'refs/heads/main'" in str(deploy.get("if", ""))
 
 
-def test_deploy_runs_only_from_main_and_never_concurrently() -> None:
+def test_deploy_runs_only_by_hand_from_main_and_never_concurrently() -> None:
+    """The live service is the hybrid deploy, updated from develop on its host
+    (docs/specs/hybrid-deploy.md): a merge into main must not start the Serverless deploy,
+    which this tenant cannot run (2026-10-30: its scan step failed on the first merge)."""
     triggers = _triggers(WORKFLOWS / "deploy.yml")
-    assert set(triggers) <= {"push", "workflow_dispatch"}
-    assert triggers["push"]["branches"] == ["main"]
+    assert set(triggers) == {"workflow_dispatch"}
+    for job in ("build", "deploy"):  # a dispatch picks its ref: the jobs pin main themselves
+        assert "github.ref == 'refs/heads/main'" in str(_job("deploy.yml", job).get("if", ""))
     concurrency = _job("deploy.yml", "deploy")["concurrency"]
     assert concurrency["cancel-in-progress"] is False
 
@@ -328,6 +332,19 @@ def test_smoke_cron_follows_the_url_of_the_last_deploy() -> None:
     assert _job("smoke-cron.yml", "smoke")["permissions"]["actions"] == "read"
 
 
+def test_smoke_cron_checks_the_live_service_when_no_deploy_recorded_a_url() -> None:
+    """No deploy.yml run ever succeeds in the hybrid deploy: without a fallback the daily smoke
+    would fail, and open an issue, every day of judging."""
+    step = _step("smoke-cron.yml", "smoke", "Smoke test")
+    assert step["env"]["P2P_API_URL"] == "${{ vars.P2P_API_URL || 'https://paper2proof.com' }}"
+    run = step["run"]
+    target = run.index('echo "smoke target')
+    assert '[[ "$P2P_API_URL" =~ ^https://' in run[:target], "the final URL, whatever its source"
+    assert "jq -e" in run and "pipefail" in run, "a 200 from anything but the service is no pass"
+    assert "--location" not in run and " -L " not in run
+    assert "github.ref == 'refs/heads/main'" in str(_job("smoke-cron.yml", "smoke").get("if", ""))
+
+
 def test_smoke_never_gets_the_admin_token() -> None:
     for workflow, job, name in (
         ("deploy.yml", "deploy", "Smoke test"),
@@ -357,7 +374,7 @@ def test_ci_runs_every_gate_on_pull_requests() -> None:
 
 def test_smoke_cron_runs_daily_during_judging_and_reports_failures() -> None:
     triggers = _triggers(WORKFLOWS / "smoke-cron.yml")
-    assert triggers["schedule"] == [{"cron": "0 7 * * *"}]
+    assert triggers["schedule"] == [{"cron": "17 7 * * *"}]  # off the hour: fewer dropped runs
     text = (WORKFLOWS / "smoke-cron.yml").read_text(encoding="utf-8")
     assert "2026-10-30" in text and "2026-12-15" in text
     assert "deploy/smoke.sh" in text
