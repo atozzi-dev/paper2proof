@@ -22,6 +22,7 @@ class FakeModelClient:
         self.case = case
         self.calls: list[tuple[Role, str, str]] = []
         self.requests: list[tuple[Role, list[Message]]] = []  # what each call was sent
+        self.tool_choices: list[ToolChoice | None] = []  # the tool_choice of each complete()
         self._cursor: dict[tuple[Role, str, str], int] = defaultdict(int)
 
     def _next(self, role: Role, prompt: str | None) -> Completion:
@@ -60,6 +61,7 @@ class FakeModelClient:
         prompt: str | None = None,
     ) -> Completion:
         self.requests.append((role, list(messages)))
+        self.tool_choices.append(tool_choice)
         return self._next(role, prompt)
 
     async def structured(
