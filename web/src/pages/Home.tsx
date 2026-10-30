@@ -74,7 +74,7 @@ export function HomePage() {
           <p className="lead">
             Give it an arXiv ID. Paper2Proof extracts the paper&rsquo;s claims, re-runs the experiment in an isolated
             Nebius sandbox and returns a verdict decided by a fixed statistical rule, with a signed Proof Bundle anyone
-            can re-run.
+            can verify.
           </p>
 
           <form className="card start-form" onSubmit={submit} noValidate aria-describedby={error ? ids.error : undefined}>

@@ -75,7 +75,7 @@ export function AboutPage() {
             listed with every verdict).
           </li>
           <li>A pure function compares the measurements with the claim and returns the verdict.</li>
-          <li>Everything is packed into a signed Proof Bundle that anyone can re-run.</li>
+          <li>Everything is packed into a signed Proof Bundle that anyone can verify.</li>
         </ol>
       </section>
 
