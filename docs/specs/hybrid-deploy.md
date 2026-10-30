@@ -93,7 +93,12 @@ no network interface (spike S3), at most 1 hour per instance. The runner, the ma
 results contract, the verdict and the bundle are the same. The image is `p2p-runner-cpu`: the
 same entrypoint and package versions as `p2p-runner`, with PyTorch CPU wheels, imported once
 into Sandboxes (`config/sandbox_images.yaml`, digest → image UUID). The judged hardware the
-bundle records is the Sandboxes platform (`sandbox`), never a GPU.
+bundle records is the Sandboxes platform (`sandbox`), never a GPU. The exec job's
+`budget_seconds` is `min(1800, floor((gpu_minutes - spent) * 60) - 300)`, the run's whole
+remaining allowance (1500 s with today's 30 minutes), not the Planner's estimate; the job is
+still reserved through the ledger for its watchdog, `budget_seconds + 300`: a CPU sandbox costs cents per hour and stops when the
+script does, while a job that outlives a low estimate ends without enough seeds (KAN, eval set
+B, 2026-10-30). On the GPU path the estimate still caps it.
 
 **`SandboxesJobBackend` (`app/execution/sandbox_jobs.py`)** is a `JobBackend` for `SMOKE` and
 `EXEC` specs only, so `ExecutingStep`, `JobSmokeExecutor`, the ledger, the budget and the reaper
