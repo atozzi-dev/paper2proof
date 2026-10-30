@@ -12,7 +12,7 @@ def test_one_match_per_role_resolves() -> None:
     assert resolved[Role.PLANNER].model_id == ULTRA
     assert resolved[Role.UTILITY].model_id == NANO
     assert resolved[Role.VISION].model_id == "nvidia/Nemotron-3.5-Super-VL"  # spike S-2
-    assert resolved[Role.CODER].model_id == SUPER  # Nemotron 3 Super retires on 2026-11-09
+    assert resolved[Role.CODER].model_id == ULTRA  # Super VL ran no smoke test on set B
     assert resolved[Role.UTILITY].context_window is None
     assert set(resolved) == set(Role)
 
@@ -35,7 +35,7 @@ def test_exact_id_overrides_match() -> None:
     cfg = config()
     data = [*models_list(), {"id": "nvidia/Nemotron-3.5-Super-VL-FP8", "object": "model"}]
     roles = dict(cfg.roles)
-    for role in (Role.READER, Role.CODER, Role.VISION):  # one model since the retirement
+    for role in (Role.READER, Role.VISION):  # one model since the retirement
         roles[role] = roles[role].model_copy(update={"exact_id": SUPER})
     resolved = resolve_roles(data, cfg.model_copy(update={"roles": roles}))
     assert resolved[Role.READER].model_id == SUPER
