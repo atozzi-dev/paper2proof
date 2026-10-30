@@ -52,7 +52,16 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
 - **Smoke runs.** The Coder has at most 8 smoke runs to get a passing script, and is told how
   many it has left after each one. A run that never gets a passing smoke run fails
   (`SMOKE_EXHAUSTED`) without a verdict. A script that starts processes or runs other files is
-  refused before it spends a smoke run.
+  refused before it spends a smoke run, and so is one that looks for a dataset's parquet files
+  with a non-recursive pattern: Hugging Face keeps them in subfolders, and smoke runs only see
+  a small subset, so that mistake would show only in the experiment.
+- **Extra options on generated data.** When the script calls a scikit-learn data generator
+  (`make_classification`, `make_moons`, ...) with an option away from the library's default
+  that neither the paper nor the claim gives, `finish` names it once and asks the Coder to
+  remove it: an extra option changes the paper's data. The Coder can confirm it by finishing
+  again unchanged, and the check reads names and numbers, not prose: an option the paper
+  describes only in words can be flagged, and a changed option written elsewhere (a variable,
+  another function) is not seen.
 - **Percent vs fraction.** The Coder declares the metric's unit (`fraction`, `percent` or
   `raw`), and the smoke run checks it. For values between 0 and 1 both units fit, so the
   declaration alone decides. Any conversion is printed as a "Scale:" line and recorded in
@@ -85,11 +94,14 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
   only and hash-locked: a package that publishes only a source distribution is refused at
   planning, and nothing is built from source. A planned package that fails the policy is
   dropped with a `PACKAGE_REJECTED` warning and the experiment is written without it; a package
-  the Coder asks for later that fails the policy ends the run.
+  the Coder asks for later that fails the policy ends the run. A planned version that is not a
+  plain specifier (`0.7.3`, `latest`) is dropped, and the package is judged and installed at
+  its newest compatible version.
 - **CPU only in the live service.** Experiments run in a Nebius Token Factory Sandbox with
-  4 vCPUs and about 4 GB of memory, for at most 30 minutes, with $1 of inference. Anything that
-  needs a GPU (deep-network training, LLM papers) runs only at a much reduced scale, or ends
-  Inconclusive. The GPU path (one NVIDIA L40S per run, as a Nebius AI Cloud job) is
+  4 vCPUs and about 4 GB of memory, for at most 30 minutes, with $1 of inference. Every
+  experiment gets the whole 30 minutes, whatever the plan estimated; one that needs longer for
+  its seeds ends Inconclusive (`BUDGET`). Anything that needs a GPU (deep-network training, LLM
+  papers) runs only at a much reduced scale, or ends Inconclusive. The GPU path (one NVIDIA L40S per run, as a Nebius AI Cloud job) is
   implemented and tested but not used in production: see
   [specs/hybrid-deploy.md](specs/hybrid-deploy.md). Every verdict lists the hardware it ran on.
 - **Capacity.** With no capacity available for the experiment (the platform refuses, or the job
