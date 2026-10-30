@@ -1,0 +1,380 @@
+{
+  "cases": [
+    {
+      "arxiv_id": "0000.00006",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c2",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "breast-cancer-svm",
+      "run": {
+        "cost_usd": 0.028003,
+        "duration_s": 97.452338,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m661j78nxcn2jfvc9s5snyb1",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00004",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c2",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "digits-knn-pca",
+      "run": {
+        "cost_usd": 0.035612,
+        "duration_s": 99.846598,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m661ne94fctps9tfkdwjd2nb",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00001",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 1,
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "truth": 1
+      },
+      "name": "digits-logreg",
+      "run": {
+        "cost_usd": 0.025412,
+        "duration_s": 103.097062,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m661rn87kxk7022b42hecvz6",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00002",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c2",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "digits-mlp",
+      "run": {
+        "cost_usd": 0.034051,
+        "duration_s": 103.530829,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m661vw2h9jvp0zx7aspjc35q",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00003",
+      "claims": [
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 1,
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "truth": 1
+      },
+      "name": "digits-naive-bayes",
+      "run": {
+        "cost_usd": 0.019893,
+        "duration_s": 87.863024,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m661z2wkgk2tprygmksgkyzr",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00010",
+      "claims": [
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c2",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "digits-tree",
+      "run": {
+        "cost_usd": 0.024269,
+        "duration_s": 95.457204,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m6621v15cjckv6hmjyqmabyw",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00008",
+      "claims": [
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c2",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "friedman-boosting",
+      "run": {
+        "cost_usd": 0.046291,
+        "duration_s": 128.265025,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m66251xrx3g3a27z0306xm45",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00007",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c2",
+          "reason": null,
+          "truth_id": "c1"
+        },
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c2"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 2,
+        "precision": 1.0,
+        "predicted": 2,
+        "recall": 1.0,
+        "truth": 2
+      },
+      "name": "moons-forest",
+      "run": {
+        "cost_usd": 0.024738,
+        "duration_s": 93.688913,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m6629660msa4pg60z8bekh5f",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00009",
+      "claims": [
+        {
+          "expected": "NOT_REPRODUCED",
+          "planted": true,
+          "predicted": "NOT_REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 1,
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "truth": 1
+      },
+      "name": "synthetic-tree",
+      "run": {
+        "cost_usd": 0.025777,
+        "duration_s": 113.788708,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m662cd5hq1z9p58fftvqr8r9",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "arxiv_id": "0000.00005",
+      "claims": [
+        {
+          "expected": "REPRODUCED",
+          "planted": false,
+          "predicted": "REPRODUCED",
+          "predicted_id": "c1",
+          "reason": null,
+          "truth_id": "c1"
+        }
+      ],
+      "extraction": {
+        "f1": 1.0,
+        "matched": 1,
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "truth": 1
+      },
+      "name": "wine-boosting",
+      "run": {
+        "cost_usd": 0.017028,
+        "duration_s": 89.228334,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m662g2qjvmvezwdzq35a4dv2",
+        "status": "COMPLETED"
+      }
+    }
+  ],
+  "cost": {
+    "median_duration_s": 98.649468,
+    "median_usd_per_claim": 0.017417000000000002,
+    "runs_without_cost": 0,
+    "total_usd": 0.281074
+  },
+  "extraction": {
+    "f1": 1.0,
+    "matched": 16,
+    "precision": 1.0,
+    "predicted": 16,
+    "recall": 1.0,
+    "truth": 16
+  },
+  "generated_at": "2026-10-30T09:34:47.226215Z",
+  "kind": "set_a",
+  "verdicts": {
+    "accuracy": 1.0,
+    "claims": 16,
+    "correct": 16,
+    "coverage": 1.0,
+    "false_accusations": 0,
+    "inconclusive": 0,
+    "judged": 16,
+    "judged_accuracy": 1.0,
+    "judged_correct": 16,
+    "missing": 0
+  }
+}
