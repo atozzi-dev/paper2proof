@@ -41,7 +41,7 @@ A refused request exits with status 1 and prints the HTTP status and the server'
 - Codes are shown once and never stored: only `sha256(code)` is. Lost codes cannot be
   recovered; create a new one and revoke the old one by its id.
 - Give every invite an expiry. For the judges: one code in the Devpost testing instructions,
-  `invite create --expires 2026-12-16T00:00:00Z` (the day after judging ends). For
+  `invite create --expires 2026-12-24T00:00:00Z` (the day after judging ends). For
   `smoke-cron`: a separate code with `--quota 1` and the same expiry, stored only as the
   `P2P_SMOKE_INVITE` secret of the GitHub environment `smoke`.
 - One invite per person or group, so one leaked code can be revoked alone.
@@ -109,7 +109,7 @@ For paper authors (README, "For paper authors") and anyone named in a run:
 
 ## Rotate after judging
 
-Judging ends on 2026-12-15. Afterwards every credential that existed during judging is replaced
+Judging ends on 2026-12-23. Afterwards every credential that existed during judging is replaced
 or deleted, in one maintenance window. Values are generated and loaded in a shell, never
 written to a file, a ticket or a chat. The order matters: **load every new value, redeploy
 once, verify, and only then delete the old credentials.**
@@ -189,7 +189,7 @@ public key and say which bundles the old one signed.
 
 - [ ] `P2P_ADMIN_TOKEN` (environment `prod`): `gh secret set P2P_ADMIN_TOKEN --env prod` with
       the new `ADMIN_TOKEN` (it reads the value from stdin).
-- [ ] `P2P_SMOKE_INVITE` (environment `smoke`): `smoke-cron` stops after 2026-12-15. Revoke
+- [ ] `P2P_SMOKE_INVITE` (environment `smoke`): `smoke-cron` stops after 2026-12-23. Revoke
       the invite (`invite revoke --code-stdin`) and delete the secret
       (`gh secret delete P2P_SMOKE_INVITE --env smoke`); create a new one only if the demo stays
       up.
