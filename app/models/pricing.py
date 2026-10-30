@@ -26,7 +26,10 @@ class Pricing:
     def load(cls, path: Path = DEFAULT_PATH) -> "Pricing":
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         prices = {k: ModelPrice.model_validate(v) for k, v in raw["models"].items()}
-        return cls(prices, float(raw.get("batch_discount", 1.0)))
+        discount = float(raw.get("batch_discount", 1.0))
+        if not 0 < discount <= 1:  # 0 would reserve nothing for a batch (invariant 7)
+            raise ValueError(f"batch_discount must be in (0, 1], got {discount}")
+        return cls(prices, discount)
 
     def price(self, model_id: str) -> ModelPrice | None:
         return self._prices.get(model_id.lower())
@@ -50,6 +53,30 @@ class Pricing:
 def estimate_tokens(text: str) -> int:
     """Rough upper-ish estimate (4 characters per token) used only for budget reservations."""
     return math.ceil(len(text) / 4)
+
+
+# What one image costs as input, whatever its encoded size: Nemotron VL reads a page as up to
+# 12 tiles of 256 tokens plus a thumbnail (~3.3k); rounded up. Base64 is not text.
+IMAGE_TOKENS = 4096
+
+
+def estimate_message_tokens(messages: list[dict[str, object]]) -> int:
+    """estimate_tokens over the messages, with each image part counted as IMAGE_TOKENS."""
+    images = 0
+    plain: list[dict[str, object]] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            parts: list[object] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    images += 1
+                    parts.append({"type": "image_url"})
+                else:
+                    parts.append(part)
+            message = {**message, "content": parts}
+        plain.append(message)
+    return estimate_tokens(str(plain)) + images * IMAGE_TOKENS
 
 
 # --- Nebius AI Cloud prices (USD per hour), `cloud:` section of config/pricing.yaml ----------

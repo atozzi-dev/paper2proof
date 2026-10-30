@@ -1,12 +1,14 @@
+# Pull request and branch checks (architecture §13). Nothing here holds a credential, writes to
+# the repository, pushes an image or spends money: `make test-live` and `make eval` never run in CI.
+# Every action is pinned to a full commit SHA (tests/ci/test_workflows.py checks the policy).
 name: ci
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,8 +16,11 @@ concurrency:
 
 jobs:
   lint-test:
+    name: lint, test, licenses, web build
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
+    permissions:
+      contents: read
     env:
       P2P_ENV: test
     steps:
@@ -23,8 +28,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Caches are fine here: this job has no credentials, and a pull request's cache is
+      # scoped to its own ref, so it cannot poison the cache of main or develop.
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
+          version: "0.13.1"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
@@ -47,3 +55,62 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: License gate (no GPL/AGPL in shipped dependencies)
+        run: make licenses
+
+      - name: Build web
+        run: npm run build --prefix web
+
+  tf-check:
+    name: terraform fmt, validate, tflint, checkov
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.4"
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.64.0
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # Validation only: `init -backend=false`, never the state backend or a cloud API.
+      - name: Terraform checks
+        run: make tf-check
+
+  # Pull requests only: on main the deploy workflow builds (and scans) the same images.
+  images:
+    name: build the four images (no push) + size check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The GPU runner image needs more disk than a fresh runner has free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build images
+        run: make images IMAGE_TAG=ci

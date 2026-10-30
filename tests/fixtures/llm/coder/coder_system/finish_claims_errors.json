@@ -1,0 +1,65 @@
+[
+ {
+  "tool_calls": [
+   {
+    "id": "call_1",
+    "name": "write_file",
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('ok')\\n\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_2",
+    "name": "run_smoke",
+    "arguments": "{\"script\": \"train.py\"}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_3",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"baseline/top1_accuracy\", \"unit\": \"fraction\"}]}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_5",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": null, \"unit\": \"fraction\"}, {\"claim_id\": \"c2\", \"key\": \"top1_accuracy\", \"baseline_key\": null, \"unit\": \"fraction\"}]}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_6",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"baseline/top1_accuracy\", \"unit\": \"fraction\"}, {\"claim_id\": \"c2\", \"key\": \"missing/key\", \"baseline_key\": null, \"unit\": \"fraction\"}]}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_7s",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"top1_accuracy\", \"unit\": \"fraction\"}], \"unmeasured\": [{\"claim_id\": \"c2\", \"reason\": \"the paper's test split is not public\"}]}"
+   }
+  ]
+ },
+ {
+  "tool_calls": [
+   {
+    "id": "call_7",
+    "name": "finish",
+    "arguments": "{\"entrypoint\": \"train.py\", \"args\": [], \"expected_outputs\": [], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"baseline/top1_accuracy\", \"unit\": \"fraction\"}], \"unmeasured\": [{\"claim_id\": \"c2\", \"reason\": \"the paper's test split is not public\"}]}"
+   }
+  ]
+ }
+]

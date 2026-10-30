@@ -1,0 +1,34 @@
+# Ground truth for this canary (eval set A, A-29). `verdicts` is {claim_id: expected_verdict}
+# under config/verdict.yaml at full scale; `claims` are the paper's claims as Claim fields plus
+# `planted` (a false claim planted on purpose). Checked by tests/eval/test_canaries.py.
+# Planted: c2 reverses the direction (the standardized SVM is about 0.027 ROC AUC better).
+arxiv_id: "0000.00006"
+title: "Do Kernel Machines Need Feature Scaling? Evidence from Breast Cancer Diagnosis"
+seeds: [0, 1, 2]
+verdicts:
+  c1: REPRODUCED
+  c2: NOT_REPRODUCED
+claims:
+  - id: c1
+    planted: false
+    text: The RBF SVM on raw features reaches a test ROC AUC of 0.966 ± 0.005 on breast cancer.
+    claim_type: ABSOLUTE
+    metric: roc_auc
+    higher_is_better: true
+    dataset: scikit-learn breast cancer
+    setting: stratified 70/30 split per seed, RBF SVC C=1.0 gamma=scale, raw features
+    reported_value: 0.966
+    reported_std: 0.005
+    source_ref: Table 1
+  - id: c2
+    planted: true
+    text: The RBF SVM on raw features outperforms the standardized SVM by 0.020 ROC AUC.
+    claim_type: RELATIVE
+    metric: roc_auc
+    higher_is_better: true
+    dataset: scikit-learn breast cancer
+    setting: same split per seed for both models
+    reported_value: null
+    baseline_name: standardized RBF SVM
+    claimed_delta: 0.020
+    source_ref: Table 1

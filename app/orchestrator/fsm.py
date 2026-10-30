@@ -16,7 +16,8 @@ from typing import Protocol
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import ErrorCode, RunStatus, StepName
-from app.execution.backend import JobBackend
+from app.execution.backend import CapacityError, JobBackend, QuotaExceeded
+from app.observability import metrics, tracing
 from app.orchestrator.budget import Budget, BudgetExceeded, BudgetLimits, KillSwitchActive
 from app.orchestrator.context import RunContext
 from app.storage.store import StateConflict, Store
@@ -101,8 +102,18 @@ class Orchestrator:
             return current
         task = asyncio.create_task(self._drive(run_id), name=f"run-{run_id}")
         self._tasks[run_id] = task
+        metrics.run_driven(+1)
         task.add_done_callback(lambda t: self._tasks.pop(run_id, None) if t is task else None)
+        task.add_done_callback(lambda _: metrics.run_driven(-1))
         return task
+
+    async def shutdown(self) -> None:
+        """Stop driving runs (process exit): their jobs keep running and the next start
+        resumes them from their last unfinished step."""
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def resume_all(self) -> list["asyncio.Task[RunStatus]"]:
         """On startup: restart every non-terminal run from its last unfinished step."""
@@ -125,6 +136,7 @@ class Orchestrator:
         return max(attempts, default=0) + 1
 
     async def _drive(self, run_id: str) -> RunStatus:
+        tracing.current_run.set(run_id)  # this task's logs and spans belong to the run
         async with self._slots:
             run = await self._store.get_run(run_id)
             if run is None:
@@ -173,6 +185,17 @@ class Orchestrator:
             return _Ending(RunStatus.FAILED, ErrorCode.KILL_SWITCH, message)
         except P2PError as err:
             return _Ending(RunStatus.FAILED, err.code, err.message)
+        except QuotaExceeded as err:  # never retried: an operator has to raise it
+            quotas = ", ".join(err.quotas)
+            log.error(
+                "cloud quota exceeded",
+                extra={"run_id": ctx.run_id, "quotas": quotas, "alert": True},
+            )
+            message = f"a cloud project quota is used up ({quotas}): an operator must raise it"
+            return _Ending(RunStatus.FAILED, ErrorCode.CAPACITY, message)
+        except CapacityError:  # a job outside EXECUTING (which falls back on its own)
+            message = "no capacity on the platform for this job right now: try again later"
+            return _Ending(RunStatus.FAILED, ErrorCode.CAPACITY, message)
         except Exception:
             log.exception("step failed", extra={"run_id": ctx.run_id, "step": ctx.step.value})
             message = f"internal error in step {ctx.step.value}"
@@ -209,7 +232,10 @@ class Orchestrator:
             jobs=self._jobs,
             cpu_pool=self._cpu_pool,
         )
-        result = await self._execute(ctx)
+        with tracing.step_span(run_id, step.value, attempt) as span:
+            result = await self._execute(ctx)
+            if isinstance(result, _Ending) and result.error_code is not None:
+                tracing.fail(span, result.error_code.value)
         ending = result if isinstance(result, _Ending) else await self._check(ctx, result)
         if ending is not None:
             return await self._finish(ctx, started, ending)
@@ -231,12 +257,14 @@ class Orchestrator:
     async def _emit_finished(
         self, ctx: RunContext, started: float, *, ok: bool, error_code: ErrorCode | None
     ) -> None:
+        elapsed = time.monotonic() - started
+        metrics.step_finished(ctx.step.value, elapsed)
         payload: dict[str, object] = {
             "step": ctx.step,
             "attempt": ctx.attempt,
             "ok": ok,
             "error_code": error_code,
-            "duration_ms": int((time.monotonic() - started) * 1000),
+            "duration_ms": int(elapsed * 1000),
         }
         await self._emit(ctx.run_id, EventType.STEP_FINISHED, payload)
 
@@ -253,6 +281,7 @@ class Orchestrator:
             run_status=status,
         )
         ok = status is RunStatus.COMPLETED
+        metrics.run_ended(status.value)
         await self._emit_finished(ctx, started, ok=ok, error_code=code)
         if code is not None and not ok and status is not RunStatus.CANCELLED:
             message = (ending.message or code.value)[:MAX_ERROR_MESSAGE]

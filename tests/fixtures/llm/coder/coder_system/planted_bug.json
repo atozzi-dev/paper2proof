@@ -40,7 +40,7 @@
    {
     "id": "call_5",
     "name": "finish",
-    "arguments": "{\"entrypoint\": \"workspace/train.py\", \"args\": [], \"expected_outputs\": [\"metrics.json\"]}"
+    "arguments": "{\"entrypoint\": \"workspace/train.py\", \"args\": [], \"expected_outputs\": [\"metrics.json\"], \"measures\": [{\"claim_id\": \"c1\", \"key\": \"top1_accuracy\", \"baseline_key\": \"baseline/top1_accuracy\", \"unit\": \"fraction\"}]}"
    }
   ]
  }

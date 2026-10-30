@@ -19,7 +19,7 @@ from app.domain.models import (
     Verdict,
     VerdictKind,
 )
-from app.storage.store import Store
+from app.storage.store import JOB_ACTIVE, TERMINAL_STEP_STATUSES, Store
 from tests.conftest import alembic_config as _alembic
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +127,21 @@ async def test_record_job_is_idempotent_by_name(store: Store) -> None:
     assert first == second
 
 
+async def test_record_job_keeps_where_the_job_runs(store: Store) -> None:
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    await store.record_job(
+        RUN, "exec", "p2p-exec-x-1", "job-1", "p2p-run-x",
+        platform="gpu-l40s-d", preset="1gpu-16vcpu-96gb",
+    )  # fmt: skip
+    await store.record_job(RUN, "exec", "p2p-exec-x-2", "job-2", "p2p-run-x")
+    first, second = await store.get_job("p2p-exec-x-1"), await store.get_job("p2p-exec-x-2")
+    assert first is not None and (first.platform, first.preset) == (
+        "gpu-l40s-d",
+        "1gpu-16vcpu-96gb",
+    )
+    assert second is not None and (second.platform, second.preset) == (None, None)
+
+
 async def test_get_job_returns_the_first_submission(store: Store) -> None:
     await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
     at = datetime(2026, 10, 15, 12, tzinfo=UTC)
@@ -141,6 +156,21 @@ async def test_get_job_returns_the_first_submission(store: Store) -> None:
         "SUBMITTED",
         at,
     )
+
+
+async def test_a_job_leaving_the_queue_is_marked_active_once(store: Store) -> None:
+    """The deadline then counts from activation; a settled job is never reopened."""
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    at = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    await store.record_job(RUN, "exec", "p2p-exec-x-1", "job-1", "p2p-run-x", at=at)
+    first = at + timedelta(minutes=40)
+    assert await store.mark_job_active("p2p-exec-x-1", deadline=first)
+    assert not await store.mark_job_active("p2p-exec-x-1", deadline=first + timedelta(hours=1))
+    job = await store.get_job("p2p-exec-x-1")
+    assert job is not None and (job.status, job.deadline) == (JOB_ACTIVE, first)
+    await store.update_job("p2p-exec-x-1", "SUCCEEDED")
+    assert not await store.mark_job_active("p2p-exec-x-1", deadline=first)
+    assert JOB_ACTIVE not in TERMINAL_STEP_STATUSES  # the reaper still settles an active job
 
 
 async def test_claims_and_verdicts_round_trip(store: Store) -> None:
@@ -183,6 +213,26 @@ def test_migrations_upgrade_and_downgrade_on_an_empty_db(tmp_path: Path) -> None
     assert {"invites", "ledger_daily"} <= tables
     command.downgrade(cfg, "base")
     assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
+    engine.dispose()
+
+
+def test_overlay_digests_from_the_single_provision_job_are_dropped(tmp_path: Path) -> None:
+    # recorded while the job that wrote the cache also parsed untrusted datasets (A-06)
+    db_path = tmp_path / "trust.db"
+    cfg = _alembic(db_path)
+    command.upgrade(cfg, "0005")
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO overlay_digests (cache_key, sha256, run_id, created_at)"
+                " VALUES (:k, :s, NULL, '2026-10-15 10:00:00')"
+            ),
+            {"k": "a" * 64, "s": "b" * 64},
+        )
+    command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM overlay_digests")).scalar() == 0
     engine.dispose()
 
 

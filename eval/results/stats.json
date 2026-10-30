@@ -1,0 +1,24 @@
+{
+  "ablation": null,
+  "generated_at": "2026-10-30T09:38:45.975810Z",
+  "set_a": {
+    "claims": 16,
+    "coverage": 1.0,
+    "extraction_f1": 1.0,
+    "false_accusations": 0,
+    "judged_accuracy": 1.0,
+    "median_duration_s": 98.6495,
+    "median_usd_per_claim": 0.0174,
+    "papers": 10,
+    "verdict_accuracy": 1.0
+  },
+  "set_b": {
+    "failed_runs": 2,
+    "inconclusive_rate": 1.0,
+    "median_duration_s": 280.6335,
+    "median_usd_per_claim": 0.0602,
+    "papers": 5,
+    "verdicts": 6
+  },
+  "set_c": null
+}

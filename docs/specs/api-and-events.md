@@ -23,13 +23,18 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | POST | `/api/runs/{id}/approve` | owner | — | `204` · `409` if not in AWAITING_APPROVAL |
 | POST | `/api/runs/{id}/reject` | owner | — | `204` |
 | POST | `/api/runs/{id}/cancel` | owner | — | `202` |
-| GET | `/api/runs/{id}/bundle` | same as run | — | `302` to a 5-minute presigned URL · `404` |
+| GET | `/api/runs/{id}/bundle` | same as run | — | `302` to a 5-minute presigned URL (`200` with the archive when the store can't presign: local store in dev) · `404` until built (`docs/specs/proof-bundle.md`) |
 | GET | `/api/gallery` | — | — | `[RunCard]` |
 | GET | `/api/stats` | — | — | eval numbers, aggregate spend, runs by verdict |
 | POST | `/admin/drain` | admin | `{"on": bool}` | `204` |
 | POST | `/admin/kill-switch` | admin | `{"on": bool}` | `204` |
-| POST | `/admin/gallery/{id}` | admin | `{"listed": bool}` | `204` |
-| POST | `/admin/invites` | admin | `{"quota_per_day": int, "expires_at": iso}` | `201 {"code"}` (shown once) |
+| GET | `/admin/runs` | admin | query `listed` (optional bool), `limit` (1–200, default 50) | `[AdminRun]`, newest first: `{id, arxiv_id, status, listed, created_at, verdicts: [VerdictKind]}` (curation candidates) |
+| POST | `/admin/gallery/{id}` | admin | `{"listed": bool, "reviewed": bool = false}` | `204` · `404` · `409` when listing a run that is not terminal, or one with a `NOT_REPRODUCED` verdict without `"reviewed": true` (architecture §16.1). Listing stores `verdict_summary` (the verdict kinds) for the gallery card; unlisting always succeeds (takedown) |
+| POST | `/admin/invites` | admin | `{"quota_per_day": int = 3, "expires_at": iso \| null}` | `201 {"code"}` (shown once: only its sha256 is stored) |
+| GET | `/admin/invites` | admin | — | `[InviteView]`: `{id, quota_per_day, used_today, used_on, expires_at, active}`; `id` is the first 12 hex characters of the code's sha256, never the code |
+| POST | `/admin/invites/revoke` | admin | `{"id": hex}` (12–64 characters: a prefix of the code's sha256) | `204` (the invite expires now: no new session, no new run) · `404` · `409` if the prefix matches several invites |
+
+Admin routes are not part of the public OpenAPI schema (`/api/openapi.json`). `python -m app.admin_cli` calls them with the admin token read from `ADMIN_TOKEN` or a prompt, never from the command line (docs/OPERATIONS.md).
 
 `arxiv_id` must match `^\d{4}\.\d{4,5}(v\d+)?$`.
 
@@ -63,7 +68,7 @@ Source: architecture §9.3, §11.1, §11.3, §16.1 (v0.2). Normative.
 | `egress.blocked` | `{host, subnet}` (from gateway logs, best effort) |
 | `verdict.ready` | `{claim_id, verdict: Verdict, explanation_md}` |
 | `cost.update` | `{inference_usd, cloud_usd, total_usd}` |
-| `warning` | `{code, message}` (non-fatal: `DISCOVERY_DEGRADED`, ABSOLUTE claim at REDUCED scale, …) |
+| `warning` | `{code, message}`, non-fatal. Codes: `DISCOVERY_DEGRADED` (Tavily, HF or the search ranker unavailable), `ABSOLUTE_AT_REDUCED_SCALE` (plan tests an ABSOLUTE claim at reduced scale), `PACKAGE_REJECTED` (a planned package failed the policy), `DATASET_UNAVAILABLE` (a planned Hugging Face dataset cannot be fetched, still after one re-plan: the experiment runs without it), `CLAIM_NOT_MEASURED` (the experiment does not measure a planned claim: its verdict is INCONCLUSIVE with reason NOT_MEASURED), `PACKAGES_REQUESTED` (the Coder asked for packages: back to PROVISIONING), `REPO_SNAPSHOT_UNAVAILABLE` (the Coder works without repository files), `REPO_TOO_LARGE` (GitHub reports the official repository above the 1 GiB clone cap: it is not fetched and the experiment is written without it), `STAND_IN_FLAGGED` (the Coder's script said it uses a stand-in for the paper's method or data: finish refused it until it changed; the run's Limitations name the line), `VISION_PAGE_SKIPPED` (the Vision role could not read one page image of a PDF paper: the other pages still count), `JOB_PREEMPTED` (the GPU job was preempted: retried once on demand, or not when the budget does not allow it), `NO_GPU_CAPACITY` (the platform had no GPU capacity for the job: retried in 2 minutes, then on the fallback platform, then INCONCLUSIVE/CAPACITY), `BUNDLE_UNSIGNED` (the Proof Bundle was stored without a signature: KMS unavailable), `BUNDLE_FAILED` (no Proof Bundle could be built; the verdict stands). New codes are added here first |
 | `error` | `{code, message}` (no stack traces) |
 
 All payloads are pydantic models in `app/domain/events.py`. `schemas/events.schema.json` is generated from them (`uv run python scripts/export_schemas.py`); a contract test fails if it is stale. The frontend imports TypeScript types generated from the OpenAPI schema (`npm run gen:types`).

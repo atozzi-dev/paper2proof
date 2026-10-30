@@ -80,7 +80,13 @@ def test_untrusted_results_are_validated_and_capped() -> None:
         "stdout": "x" * 100_000,
         "stderr": "Traceback",
         "duration_s": 3.5,
-        "metrics": {"acc": 0.9, "bad": float("nan"), "text": "no", "baseline/acc": 0.8},
+        "metrics": {
+            "acc": 0.9,
+            "bad": float("nan"),
+            "text": "no",
+            "baseline/acc": 0.8,
+            "huge": 10**400,
+        },
     }
     result = parse_smoke_result(raw)
     assert result.exit_code == 1

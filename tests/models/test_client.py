@@ -1,3 +1,6 @@
+import asyncio
+from typing import Any
+
 import httpx
 import pytest
 import respx
@@ -246,3 +249,322 @@ async def test_tool_call_turns_are_sent_in_openai_format(client: TokenFactoryCli
         }
     ]
     assert sent[-1] == {"role": "tool", "tool_call_id": "call_1", "content": "print(1)"}
+
+
+@respx.mock
+async def test_exhausted_429s_cost_nothing(store: Store, client: TokenFactoryClient) -> None:
+    """A 429 is refused before any work: retries that all hit the rate limit are free."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(
+        return_value=httpx.Response(429, json={"error": "rate"})
+    )
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) == 0
+    assert await client.budget.run_spend(RUN, SpendKind.INFERENCE_USD) == 0
+
+
+@respx.mock
+async def test_connection_errors_cost_nothing(store: Store, client: TokenFactoryClient) -> None:
+    """Never sent: nothing to bill."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) == 0
+
+
+@respx.mock
+async def test_only_attempts_the_provider_processed_are_charged(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    await _run(store)
+    other = "r_01jb7z00000000000000000009"
+    await store.create_run(other, "2106.09685", created_by=None, claim_hint=None, budget={})
+    rate = httpx.Response(429, json={"error": "rate"})
+    down = httpx.Response(503, json={})
+    route = respx.post(f"{BASE}chat/completions").mock(side_effect=[rate, down, rate, down])
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    route.side_effect = [down, down, down, down]
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=other)
+    mixed = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    all_503 = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
+    assert mixed > 0 and mixed * 2 == all_503  # 2 of the 4 attempts reached the model
+
+
+@respx.mock
+async def test_an_image_is_reserved_as_a_fixed_token_count(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """A 2 MB page PNG is not 700k tokens of text: it fits the run's inference cap."""
+    from app.models.pricing import IMAGE_TOKENS
+
+    await _run(store)
+    body = completion("{}").json()
+    body.pop("usage")  # charged what was reserved
+    route = respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(200, json=body))
+    url = "data:image/png;base64," + "A" * 2_000_000
+    content: list[dict[str, object]] = [
+        {"type": "text", "text": "Read the table."},
+        {"type": "image_url", "image_url": {"url": url}},
+    ]
+    await client.complete(Role.VISION, [Message(role="user", content=content)], run_id=RUN)
+    assert route.call_count == 1
+    reserved = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    assert IMAGE_TOKENS <= reserved < IMAGE_TOKENS + 200
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.RemoteProtocolError("server disconnected"), httpx.ReadError("connection reset")],
+)
+@respx.mock
+async def test_a_connection_lost_after_sending_is_charged_like_a_timeout(
+    store: Store, client: TokenFactoryClient, error: Exception
+) -> None:
+    """The request went out: the provider may have generated it all."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(side_effect=error)
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) > 0
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
+
+
+@pytest.mark.parametrize("status", [504, 524, 408])
+@respx.mock
+async def test_a_gateway_timeout_is_charged_like_a_timeout(
+    store: Store, client: TokenFactoryClient, status: int
+) -> None:
+    """408 too: the server gave up waiting, possibly after the generation started."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(status, json={}))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
+
+
+@respx.mock
+async def test_a_cancel_after_a_timeout_still_charges_the_timed_out_attempt(
+    store: Store, client: TokenFactoryClient, sleeps: Sleeps
+) -> None:
+    """Cancelled in the backoff after a 504: that attempt may have been generated in full."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(504, json={}))
+    sleeps.interrupt = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) > 0
+
+
+def test_every_image_part_counts_and_other_parts_stay_text() -> None:
+    from app.models.pricing import IMAGE_TOKENS, estimate_message_tokens, estimate_tokens
+
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 10**6}}
+    other = {"type": "input_image", "data": "B" * 4000}  # not stripped: counted as text
+    three = estimate_message_tokens([{"role": "user", "content": [image, image, image]}])
+    assert 3 * IMAGE_TOKENS <= three < 3 * IMAGE_TOKENS + 100
+    assert estimate_message_tokens([{"role": "user", "content": [other]}]) >= estimate_tokens(
+        "B" * 4000
+    )
+
+
+@respx.mock
+async def test_attempts_before_a_final_client_error_are_still_charged(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """503, 503, then a 400: the two processed attempts are billed, the 400 is not."""
+    await _run(store)
+    other = "r_01jb7z00000000000000000009"
+    await store.create_run(other, "2106.09685", created_by=None, claim_hint=None, budget={})
+    down, bad = httpx.Response(503, json={}), httpx.Response(400, json={})
+    route = respx.post(f"{BASE}chat/completions").mock(side_effect=[down, down, bad])
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    route.side_effect = [down, down, down, down]
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=other)
+    two = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    four = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
+    assert two > 0 and two * 2 == four
+
+
+async def _fill_run_tokens_out(store: Store, leave: int) -> None:
+    """Spend the run's tokens_out cap (config/budgets.yaml: 150k) down to `leave` tokens."""
+    from datetime import UTC, datetime
+
+    await store.add_ledger_entry(RUN, datetime.now(UTC).date(), "tokens_out", 150_000 - leave)
+
+
+@respx.mock
+async def test_a_retry_is_reserved_before_it_is_sent(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """Invariant 7 holds for retries too: room for one Utility attempt (1500 out), a 503, and
+    the retry is refused by the budget instead of going out unreserved."""
+    await _run(store)
+    await _fill_run_tokens_out(store, leave=1500)
+    route = respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion()]
+    )
+    with pytest.raises(BudgetExceeded):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert route.call_count == 1
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_IN) > 0  # the 503 was processed
+    assert client.budget._inflight == {}  # every kind released, not only tokens_out
+
+
+@respx.mock
+async def test_a_retried_call_is_charged_its_usage_once(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion(tokens=(10, 5))]
+    )
+    await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+
+
+@respx.mock
+async def test_a_cancel_during_the_settle_still_commits_every_reservation(
+    store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second cancel must not leave reservations in flight (false BudgetExceeded later)."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=completion(tokens=(10, 5)))
+    entered, gate, written = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    real, writes = store.add_ledger_entry, []
+
+    async def slow(*args: Any, **kwargs: Any) -> None:
+        entered.set()
+        await gate.wait()
+        await real(*args, **kwargs)
+        writes.append(args)
+        if len(writes) == 3:  # tokens in, tokens out, dollars
+            written.set()
+
+    monkeypatch.setattr(store, "add_ledger_entry", slow)
+    task = asyncio.create_task(client.complete(Role.UTILITY, USER, run_id=RUN))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.set()
+    await asyncio.wait_for(written.wait(), timeout=5)
+    assert client.budget._inflight == {}
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+    assert await client.budget.run_spend(RUN, SpendKind.INFERENCE_USD) > 0
+
+
+@respx.mock
+async def test_a_failed_ledger_write_still_releases_the_other_reservations(
+    store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(return_value=completion(tokens=(10, 5)))
+    real, calls = store.add_ledger_entry, []
+
+    async def first_fails(*args: Any, **kwargs: Any) -> None:
+        calls.append(args)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_ledger_entry", first_fails)
+    with pytest.raises(OSError, match="disk full"):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert len(calls) == 3  # tokens in, tokens out, dollars: every reservation committed
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 5
+
+
+@respx.mock
+async def test_a_failed_ledger_write_keeps_the_actual_held(
+    store: Store, client: TokenFactoryClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retried call holds two tokens_out reservations: when the write of the actual fails,
+    the actual stays held in memory and the other reservation is released at 0."""
+    await _run(store)
+    respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion(tokens=(10, 5))]
+    )
+    real, failed = store.add_ledger_entry, []
+
+    async def tokens_out_fails_once(*args: Any, **kwargs: Any) -> None:
+        if args[2] == "tokens_out" and not failed:
+            failed.append(args)
+            raise OSError("disk full")
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_ledger_entry", tokens_out_fails_once)
+    with pytest.raises(OSError, match="disk full"):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    # the 5 tokens out that could not be written stay held: counted once, never twice
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == 0
+    assert client.budget._inflight_total(SpendKind.TOKENS_OUT, RUN, None) == 5
+
+
+@respx.mock
+async def test_a_retry_refused_on_dollars_releases_its_token_reservations(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """The retry's tokens are reserved, its dollars are refused: nothing stays in flight."""
+    from datetime import UTC, datetime
+
+    await _run(store)
+    estimate = client.pricing.estimate(client.resolved[Role.UTILITY].model_id, 1, 1500)
+    await store.add_ledger_entry(  # room for one attempt's dollars, not two
+        RUN, datetime.now(UTC).date(), "inference_usd", 1.00 - 1.5 * estimate
+    )
+    route = respx.post(f"{BASE}chat/completions").mock(
+        side_effect=[httpx.Response(503, json={}), completion()]
+    )
+    with pytest.raises(BudgetExceeded):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)
+    assert route.call_count == 1
+    assert client.budget._inflight == {}
+
+
+@respx.mock
+async def test_a_cancel_in_the_backoff_charges_only_the_attempts_made(
+    store: Store, client: TokenFactoryClient, sleeps: Sleeps
+) -> None:
+    """No request is in flight during the backoff: one 503 costs one input, not two."""
+    await _run(store)
+    other = "r_01jb7z00000000000000000009"
+    await store.create_run(other, "2106.09685", created_by=None, claim_hint=None, budget={})
+    route = respx.post(f"{BASE}chat/completions").mock(return_value=httpx.Response(503, json={}))
+    with pytest.raises(P2PError):
+        await client.complete(Role.UTILITY, USER, run_id=other)  # four 503s, no fallback
+    assert route.call_count == 4
+    sleeps.interrupt = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await client.complete(Role.UTILITY, USER, run_id=RUN)  # one 503, then cancelled
+    one = await client.budget.run_spend(RUN, SpendKind.TOKENS_IN)
+    four = await client.budget.run_spend(other, SpendKind.TOKENS_IN)
+    assert one > 0 and one * 4 == four
+
+
+@respx.mock
+async def test_a_cancel_while_the_request_is_out_charges_it_in_full(
+    store: Store, client: TokenFactoryClient
+) -> None:
+    """A cancelled request may still be generated (and billed) to the end, like a timeout."""
+    await _run(store)
+    sent = asyncio.Event()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        sent.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    respx.post(f"{BASE}chat/completions").mock(side_effect=hang)
+    task = asyncio.create_task(client.complete(Role.UTILITY, USER, run_id=RUN))
+    await sent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    out_cap = client.config.roles[Role.UTILITY].max_output
+    assert await client.budget.run_spend(RUN, SpendKind.TOKENS_OUT) == out_cap

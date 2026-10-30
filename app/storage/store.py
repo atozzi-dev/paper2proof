@@ -1,5 +1,6 @@
 """Persistence API used by the orchestrator, API and reaper. One writer process (the endpoint)."""
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
@@ -37,6 +38,7 @@ from app.storage.tables import (
 )
 
 TERMINAL_STEP_STATUSES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+JOB_ACTIVE = "ACTIVE"  # a job row that left the platform queue (its deadline counts from then)
 
 
 class StateConflict(Exception):
@@ -99,6 +101,50 @@ class JobRecord(_Record):
     status: str
     deadline: datetime | None
     created_at: datetime
+    gpu_seconds: float | None = None
+    cost_usd: float | None = None
+    platform: str | None = None
+    preset: str | None = None
+
+
+def _job_record(row: JobRow) -> JobRecord:
+    return JobRecord(
+        name=row.name,
+        kind=row.kind,
+        run_id=row.run_id,
+        nebius_job_id=row.nebius_job_id,
+        status=row.status,
+        deadline=row.deadline,
+        created_at=row.created_at,
+        gpu_seconds=row.gpu_seconds,
+        cost_usd=row.cost_usd,
+        platform=row.platform,
+        preset=row.preset,
+    )
+
+
+class ModelCallRecord(_Record):
+    step: str | None
+    role: str
+    model_id: str
+    prompt_version: str | None
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float | None
+
+
+class InviteRecord(_Record):
+    code_hash: str
+    quota_per_day: int
+    used_today: int
+    used_on: date | None
+    expires_at: datetime | None
+
+    def active(self, now: datetime) -> bool:
+        expires = self.expires_at
+        if expires is not None and expires.tzinfo is None:  # SQLite returns naive UTC
+            expires = expires.replace(tzinfo=UTC)
+        return expires is None or expires > now
 
 
 class DailySpend(_Record):
@@ -287,6 +333,8 @@ class Store:
         *,
         deadline: datetime | None = None,
         at: datetime | None = None,
+        platform: str | None = None,
+        preset: str | None = None,
     ) -> int:
         """Insert-or-ignore by the deterministic job name; returns the row id either way."""
         async with self._session() as s, s.begin():
@@ -301,6 +349,8 @@ class Store:
                     status="SUBMITTED",
                     deadline=deadline,
                     created_at=at or utcnow(),
+                    platform=platform,
+                    preset=preset,
                 )
                 .on_conflict_do_nothing(index_elements=["name"])
             )
@@ -312,16 +362,77 @@ class Store:
     async def get_job(self, name: str) -> JobRecord | None:
         async with self._session() as s:
             row = await s.scalar(select(JobRow).where(JobRow.name == name))
-            if row is None:
-                return None
-            return JobRecord(
-                name=row.name,
-                kind=row.kind,
-                run_id=row.run_id,
-                nebius_job_id=row.nebius_job_id,
-                status=row.status,
-                deadline=row.deadline,
-                created_at=row.created_at,
+            return None if row is None else _job_record(row)
+
+    async def list_jobs(self, run_id: str) -> list[JobRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(JobRow).where(JobRow.run_id == run_id).order_by(JobRow.id)
+            )
+            return [_job_record(row) for row in rows]
+
+    async def unsettled_jobs(self) -> list[JobRecord]:
+        """Jobs whose final state and cost were never written (the reaper settles them)."""
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(JobRow)
+                .where(JobRow.status.not_in(TERMINAL_STEP_STATUSES))
+                .order_by(JobRow.id)
+            )
+            return [_job_record(row) for row in rows]
+
+    async def settle_job(
+        self,
+        name: str,
+        status: str,
+        *,
+        cost_usd: float,
+        gpu_seconds: float | None,
+        ledger: Sequence[tuple[str | None, date, str, float]],
+    ) -> bool:
+        """Write a job's final state and cost together with its ledger entries (run_id, day,
+        kind, amount), in one transaction and only once: a compare-and-set on the row's status,
+        False when it was settled already. The reaper's charge for unwatched jobs."""
+        async with self._session() as s, s.begin():
+            moved = await self._cas(
+                s,
+                update(JobRow)
+                .where(JobRow.name == name, JobRow.status.not_in(TERMINAL_STEP_STATUSES))
+                .values(status=status, cost_usd=cost_usd, gpu_seconds=gpu_seconds),
+            )
+            if not moved:
+                return False
+            for run_id, day, kind, amount in ledger:
+                s.add(LedgerEntry(run_id=run_id, day=day, kind=kind, amount=amount))
+            return True
+
+    async def list_model_calls(self, run_id: str) -> list[ModelCallRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(ModelCallRow).where(ModelCallRow.run_id == run_id).order_by(ModelCallRow.id)
+            )
+            return [
+                ModelCallRecord(
+                    step=row.step,
+                    role=row.role,
+                    model_id=row.model_id,
+                    prompt_version=row.prompt_version,
+                    tokens_in=row.tokens_in,
+                    tokens_out=row.tokens_out,
+                    cost_usd=row.cost_usd,
+                )
+                for row in rows
+            ]
+
+    async def mark_job_active(self, name: str, *, deadline: datetime) -> bool:
+        """A submitted job left the queue: its deadline now counts from then. Only once, and
+        never for a settled job (compare-and-set on the SUBMITTED status)."""
+        async with self._session() as s, s.begin():
+            return await self._cas(
+                s,
+                update(JobRow)
+                .where(JobRow.name == name, JobRow.status == "SUBMITTED")
+                .values(status=JOB_ACTIVE, deadline=deadline),
             )
 
     async def update_job(
@@ -405,6 +516,10 @@ class Store:
                     explanation=explanation,
                 )
             )
+
+    async def set_verdict_summary(self, run_id: str, summary: str | None) -> None:
+        async with self._session() as s, s.begin():
+            await s.execute(update(Run).where(Run.id == run_id).values(verdict_summary=summary))
 
     async def get_verdict(self, run_id: str, claim_id: str) -> Verdict | None:
         async with self._session() as s:
@@ -602,13 +717,36 @@ class Store:
                 .values(approval=decision),
             )
 
-    async def set_listed(self, run_id: str, listed: bool) -> bool:
+    async def set_listed(
+        self, run_id: str, listed: bool, *, verdict_summary: str | None = None
+    ) -> bool:
+        """Gallery membership (admin curation). A summary, when given, replaces the card's."""
         async with self._session() as s, s.begin():
             run = await s.get(Run, run_id)
             if run is None:
                 return False
             run.listed = listed
+            if verdict_summary is not None:
+                run.verdict_summary = verdict_summary
             return True
+
+    async def list_runs(self, *, limit: int, listed: bool | None = None) -> list[RunRecord]:
+        """Newest first, optionally only listed or unlisted runs (admin curation)."""
+        query = select(Run).order_by(Run.created_at.desc(), Run.id.desc()).limit(limit)
+        if listed is not None:
+            query = query.where(Run.listed.is_(listed))
+        async with self._session() as s:
+            return [_run_record(r) for r in await s.scalars(query)]
+
+    async def verdict_kinds(self, run_id: str) -> list[VerdictKind]:
+        """The run's verdict kinds, in claim order."""
+        async with self._session() as s:
+            rows = await s.scalars(
+                select(VerdictRow.verdict)
+                .where(VerdictRow.run_id == run_id)
+                .order_by(VerdictRow.claim_id)
+            )
+            return [VerdictKind(v) for v in rows]
 
     async def list_gallery(self, limit: int = 100) -> list[RunRecord]:
         async with self._session() as s:
@@ -647,6 +785,36 @@ class Store:
                     expires_at=expires_at,
                 )
             )
+
+    async def list_invites(self) -> list[InviteRecord]:
+        async with self._session() as s:
+            rows = await s.scalars(select(InviteRow).order_by(InviteRow.code_hash))
+            return [
+                InviteRecord(
+                    code_hash=r.code_hash,
+                    quota_per_day=r.quota_per_day,
+                    used_today=r.used_today,
+                    used_on=r.used_on,
+                    expires_at=r.expires_at,
+                )
+                for r in rows
+            ]
+
+    async def revoke_invite(self, hash_prefix: str, now: datetime) -> int:
+        """Expire the one invite whose code hash starts with `hash_prefix` (never later than it
+        already expires). Returns how many invites match: anything but 1 changes nothing."""
+        matching = InviteRow.code_hash.startswith(hash_prefix, autoescape=True)
+        async with self._session() as s, s.begin():
+            count = int(
+                (await s.scalar(select(func.count()).select_from(InviteRow).where(matching))) or 0
+            )
+            if count == 1:
+                await s.execute(
+                    update(InviteRow)
+                    .where(matching, InviteRow.expires_at.is_(None) | (InviteRow.expires_at > now))
+                    .values(expires_at=now)
+                )
+            return count
 
     async def invite_valid(self, code_hash: str, now: datetime) -> bool:
         async with self._session() as s:

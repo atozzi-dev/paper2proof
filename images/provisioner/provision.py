@@ -1,15 +1,18 @@
-"""Provisioner: runs in the PROVISION job (CPU, allowlisted egress, no secrets).
+"""Provisioner: runs in the provision and fetch jobs (CPU, allowlisted egress, no secrets).
 
 Reads the manifest injected at /etc/p2p/provision.json (written by deterministic orchestrator
-code), then:
-- locks the extra packages with hashes against the runner image's constraints (wheels only,
-  never sdists), checks every transitive dependency against the denylist and typosquat list,
-  and installs only what the runner image doesn't already have into an overlay;
-- shallow-clones the official repository (no hooks, no submodules, no LFS) and records its
-  commit; nothing from the repository is executed;
-- downloads datasets as parquet archives after checking their size, builds the smoke subset
-  from the downloaded files (no dataset loading scripts, ever);
-- writes everything to /mnt/run/staging/ (and verified overlays to the shared cache).
+code). Its `phase` selects one of two jobs, run one after the other (execution-contracts §5):
+- `packages` (the provision job, the only one that mounts the shared cache read-write): locks
+  the extra packages with hashes against the runner image's constraints (wheels only, never
+  sdists), checks every transitive dependency against the denylist and typosquat list, and
+  installs only what the runner image doesn't already have into an overlay; publishes verified
+  overlays to the cache. Its inputs are the package list and PyPI wheels, nothing else;
+- `fetch` (no cache mount, and it refuses to start when one is there): shallow-clones the
+  official repository (no hooks, no submodules, no LFS) and records its commit; nothing from
+  the repository is executed; downloads datasets as parquet archives after checking their size
+  and builds the smoke subset from the downloaded files (no dataset loading scripts, ever).
+  These bytes are untrusted, so whatever they could do stays inside the run's own bucket.
+Both write to /mnt/run/staging/, each its own files.
 
 Every external command is an argv list built here (never a shell string), with a minimal
 environment and a timeout bounded by the job's deadline. Standard library only, except
@@ -20,6 +23,7 @@ Usage: python provision.py [--manifest PATH] [--staging DIR] [--cache DIR] [--wo
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -35,7 +39,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 
-SCHEMA = "p2p.provision/v1"
+SCHEMA = "p2p.provision/v2"
+PACKAGES, FETCH = "packages", "fetch"
+_COMMON_FIELDS = frozenset({"schema", "phase", "run_id", "deadline_unix"})
+PHASE_FIELDS = {  # a field of the other phase is an error, never ignored
+    PACKAGES: _COMMON_FIELDS | {"packages", "cache_salt", "policy", "trusted_overlays"},
+    FETCH: _COMMON_FIELDS | {"repo", "datasets", "smoke_subset", "hf_token_secret"},
+}
 RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")
 _OP = r"(?:===|==|~=|!=|<=|>=|<|>)"
 _VER = r"[A-Za-z0-9.*+!_-]{1,40}"
@@ -70,6 +80,11 @@ DEFAULT_DEADLINE_S = 1080  # 18 of the 20 watchdog minutes: leave time to write 
 PYTHON_VERSION = "3.12"
 PYTHON_PLATFORM = "x86_64-manylinux_2_28"
 PYPI_INDEX = "https://pypi.org/simple"
+# The runner's torch is PyTorch's CUDA 12.6 build (images/runner/pyproject.toml): a package that
+# depends on torch must resolve it from that index, or the runner's constraints (cuda-toolkit,
+# nvidia-*) have no solution on PyPI. Explicit index: nothing else is taken from it.
+TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
+TORCH_FAMILY = ("torch", "torchvision")
 REQUIREMENT_FILES = re.compile(
     r"^(requirements[\w.-]*\.txt|pyproject\.toml|setup\.cfg|environment\.ya?ml)$"
 )
@@ -94,6 +109,7 @@ class Dataset:
 @dataclass(frozen=True)
 class Manifest:
     run_id: str
+    phase: str
     packages: list[str]
     repo_url: str | None
     repo_ref: str | None
@@ -130,15 +146,27 @@ def normalize(name: str) -> str:
 
 
 def levenshtein(a: str, b: str, cap: int = 3) -> int:
+    """Optimal string alignment distance: Levenshtein where swapping two adjacent letters is one
+    edit (tqmd is one edit from tqdm, not two)."""
     if abs(len(a) - len(b)) > cap:
         return cap + 1
+    before: list[int] = []
     previous = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         current = [i]
         for j, cb in enumerate(b, 1):
-            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
-        previous = current
+            cost = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cost = min(cost, before[j - 2] + 1)
+            current.append(cost)
+        before, previous = previous, current
     return previous[-1]
+
+
+def typosquat_threshold(name: str, popular: str) -> int:
+    """As the control plane's policy (execution-contracts 4): 1 edit when the shorter name has
+    fewer than 5 characters, 2 otherwise."""
+    return 1 if min(len(name), len(popular)) < 5 else 2
 
 
 def _fail(message: str) -> ProvisionError:
@@ -158,6 +186,11 @@ def validate_manifest(data: Any) -> Manifest:
 def _validate(data: Any) -> Manifest:
     if not isinstance(data, dict) or data.get("schema") != SCHEMA:
         raise _fail("unsupported manifest schema")
+    phase = data.get("phase")
+    if phase not in PHASE_FIELDS:
+        raise _fail("unknown provisioning phase")
+    if unexpected := sorted(set(data) - PHASE_FIELDS[phase]):
+        raise _fail(f"unexpected manifest field for the {phase} phase: {unexpected[0][:40]}")
     run_id = str(data.get("run_id", ""))
     if not RUN_ID.fullmatch(run_id):
         raise _fail("invalid run_id")
@@ -202,8 +235,8 @@ def _validate(data: Any) -> Manifest:
             raise _fail("invalid smoke subset")
     if data.get("hf_token_secret") is not None:
         raise _fail("gated datasets are not supported: jobs never receive tokens")
-    salt = data.get("cache_salt")
-    if not isinstance(salt, str) or not SALT.fullmatch(salt):
+    salt = data.get("cache_salt", "")
+    if phase == PACKAGES and (not isinstance(salt, str) or not SALT.fullmatch(salt)):
         raise _fail("invalid cache salt")
     trusted = data.get("trusted_overlays") or {}
     if not isinstance(trusted, dict) or len(trusted) > MAX_TRUSTED_OVERLAYS:
@@ -223,6 +256,7 @@ def _validate(data: Any) -> Manifest:
     policy = data.get("policy") or {}
     return Manifest(
         run_id=run_id,
+        phase=phase,
         packages=packages,
         repo_url=repo_url,
         repo_ref=repo_ref,
@@ -311,6 +345,17 @@ def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: C
     """Pack on local disk first, then copy once to the destination (FUSE mounts are slow).
     Returns the sha256 of the local archive: never read back from the shared mount."""
     local = source.parent / f".{out.name}.local"
+    digest = _pack_local(source, local, runner, env, clock)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(local, out)
+    local.unlink(missing_ok=True)
+    return digest
+
+
+def _pack_local(
+    source: Path, local: Path, runner: Runner, env: dict[str, str], clock: Clock
+) -> str:
+    """A deterministic archive of `source` on local disk; returns its sha256."""
     runner(
         [
             "tar",
@@ -331,11 +376,7 @@ def _pack(source: Path, out: Path, runner: Runner, env: dict[str, str], clock: C
         env=env,
         timeout=clock.timeout(),
     )
-    digest = _sha256(local)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(local, out)
-    local.unlink(missing_ok=True)
-    return digest
+    return _sha256(local)
 
 
 def _lock_names(lock: str) -> list[str]:
@@ -350,7 +391,9 @@ def _check_transitive(manifest: Manifest, lock: str) -> None:
             raise _fail(f"dependency {name} is not allowed")
         if name in requested or name in manifest.popular:
             continue
-        close = [p for p in manifest.popular if levenshtein(name, p) <= 2]
+        close = [
+            p for p in manifest.popular if levenshtein(name, p) <= typosquat_threshold(name, p)
+        ]
         if close:
             raise _fail(f"dependency {name} looks like a typosquat of {sorted(close)[0]}")
 
@@ -378,6 +421,20 @@ def _publish_to_cache(overlay: Path, cached: Path, digest: str, run_id: str) -> 
     tmp_sidecar.replace(cached.with_name(f"{key}.sha256"))
 
 
+def _lock_input(packages: Sequence[str]) -> str:
+    """The run's packages as a lock input that takes only torch and torchvision from PyTorch's
+    CUDA 12.6 index. uv applies sources to direct dependencies only, so both are always listed
+    (pinned by the runner constraints; the runner provides them, so they never reach the
+    overlay). Names were validated (PACKAGE): JSON strings are valid TOML strings."""
+    deps = ", ".join(json.dumps(p) for p in [*packages, *TORCH_FAMILY])
+    sources = "".join(f'{name} = {{ index = "pytorch-cu126" }}\n' for name in TORCH_FAMILY)
+    return (
+        '[project]\nname = "p2p-run-packages"\nversion = "0"\nrequires-python = "==3.12.*"\n'
+        f"dependencies = [{deps}]\n\n[tool.uv.sources]\n{sources}\n"
+        f'[[tool.uv.index]]\nname = "pytorch-cu126"\nurl = "{TORCH_INDEX}"\nexplicit = true\n'
+    )
+
+
 def lock_and_overlay(
     manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
 ) -> tuple[str, bool, str]:
@@ -386,8 +443,9 @@ def lock_and_overlay(
     constraints_text = paths.constraints.read_text(encoding="utf-8")
     work = paths.work / "overlay"
     work.mkdir(parents=True, exist_ok=True)
-    requirements_in = paths.work / "requirements.in"
-    requirements_in.write_text("".join(f"{p}\n" for p in manifest.packages), encoding="utf-8")
+    requirements_in = paths.work / "requirements" / "pyproject.toml"
+    requirements_in.parent.mkdir(parents=True, exist_ok=True)
+    requirements_in.write_text(_lock_input(manifest.packages), encoding="utf-8")
     lock = paths.staging / "lock.txt"
     if manifest.packages:
         try:
@@ -433,8 +491,13 @@ def lock_and_overlay(
             )  # fmt: skip
         except subprocess.SubprocessError as err:
             raise _explain(err, "installing packages") from None
-    digest = _pack(work, overlay, runner, env, clock)
-    _publish_to_cache(overlay, cached, digest, manifest.run_id)
+    # The cache gets the local archive, never the copy on the run bucket (other jobs of the
+    # run can write that one): then a forged report can only cause misses, never poisoning.
+    local = paths.work / ".overlay.tar.zst.local"
+    digest = _pack_local(work, local, runner, env, clock)
+    _publish_to_cache(local, cached, digest, manifest.run_id)
+    shutil.copyfile(local, overlay)
+    local.unlink(missing_ok=True)
     return key, False, digest
 
 
@@ -641,23 +704,63 @@ def fetch_datasets(
     return archives
 
 
-def _clean_staging(staging: Path) -> None:
-    """Outputs of an earlier attempt must never be mistaken for this one's. Smoke jobs share
-    the bucket: a planted symlink is removed itself, never followed."""
-    for name in (
-        "provision_error.json",
-        "provision_report.json",
-        "overlay.tar.zst",
-        "repo.tar.zst",
-        "lock.txt",
-        "repo_files.json",
-    ):
+PHASE_OUTPUTS = {  # each phase replaces its own files only: a later attempt reuses the fetch's
+    PACKAGES: ("provision_error.json", "packages_report.json", "overlay.tar.zst", "lock.txt"),
+    FETCH: ("provision_error.json", "fetch_report.json", "repo.tar.zst", "repo_files.json"),
+}
+
+
+def _clean_staging(staging: Path, phase: str) -> None:
+    """Outputs of an earlier attempt must never be mistaken for this one's. Smoke and fetch
+    jobs share the bucket: a planted symlink is removed itself, never followed."""
+    for name in PHASE_OUTPUTS[phase]:
         (staging / name).unlink(missing_ok=True)
+    if phase != FETCH:
+        return
     data = staging / "data"
     if data.is_symlink():
         data.unlink()
     else:
         shutil.rmtree(data, ignore_errors=True)
+
+
+def _packages(
+    manifest: Manifest, paths: Paths, runner: Runner, env: dict[str, str], clock: Clock
+) -> dict[str, Any]:
+    cache_key, cache_hit, overlay_sha = lock_and_overlay(manifest, paths, runner, env, clock)
+    return {
+        "schema": "p2p.packages-report/v1",
+        "run_id": manifest.run_id,
+        "lock_sha256": _sha256(paths.staging / "lock.txt"),
+        "overlay_cache_key": cache_key,
+        "overlay_cache_hit": cache_hit,
+        "overlay_sha256": overlay_sha,
+    }
+
+
+def _fetch(
+    manifest: Manifest,
+    paths: Paths,
+    runner: Runner,
+    env: dict[str, str],
+    clock: Clock,
+    fetch: Fetcher,
+    smoke: SmokeBuilder,
+) -> dict[str, Any]:
+    repo = clone_repo(manifest, paths, runner, env, clock)
+    archives = fetch_datasets(manifest, paths, runner, env, clock, fetch, smoke)
+    return {
+        "schema": "p2p.fetch-report/v1",
+        "run_id": manifest.run_id,
+        "repo": manifest.repo_url is not None,
+        "repo_commit": repo.commit,
+        "requirement_files": repo.requirement_files,
+        "repo_files_sha256": repo.snapshot_sha256,  # of the bytes written, not read back
+        "datasets": [a["name"] for a in archives if a["name"] != "smoke"],
+        "repo_sha256": repo.archive_sha256,
+        "data_archives": archives,
+        "smoke": manifest.smoke_dataset is not None,
+    }
 
 
 def provision(
@@ -674,48 +777,49 @@ def provision(
         manifest.deadline_unix if manifest.deadline_unix is not None else time.time() + deadline_s
     )
     clock.timeout()
-    if paths.staging.is_symlink():  # planted by a smoke job sharing the bucket
+    if manifest.phase == FETCH and os.path.lexists(paths.cache):
+        # Untrusted bytes are handled next: the shared cache must not even be reachable.
+        raise _fail("the fetch phase never runs with the shared cache mounted")
+    if paths.staging.is_symlink():  # planted by a smoke or fetch job sharing the bucket
         paths.staging.unlink()
-    for directory in (paths.staging, paths.cache, paths.work, paths.work / "home"):
+    directories = [paths.staging, paths.work, paths.work / "home"]
+    if manifest.phase == PACKAGES:
+        directories.append(paths.cache)
+    for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
-    _clean_staging(paths.staging)
+    _clean_staging(paths.staging, manifest.phase)
     env = build_env(paths)
-    cache_key, cache_hit, overlay_sha = lock_and_overlay(manifest, paths, runner, env, clock)
-    repo = clone_repo(manifest, paths, runner, env, clock)
-    archives = fetch_datasets(manifest, paths, runner, env, clock, fetch, smoke)
-    report = {
-        "schema": "p2p.provision-report/v1",
-        "run_id": manifest.run_id,
-        "lock_sha256": _sha256(paths.staging / "lock.txt"),
-        "overlay_cache_key": cache_key,
-        "overlay_cache_hit": cache_hit,
-        "overlay_sha256": overlay_sha,
-        "repo": manifest.repo_url is not None,
-        "repo_commit": repo.commit,
-        "requirement_files": repo.requirement_files,
-        "repo_files_sha256": repo.snapshot_sha256,  # of the bytes written, not read back
-        "datasets": [a["name"] for a in archives if a["name"] != "smoke"],
-        "repo_sha256": repo.archive_sha256,
-        "data_archives": archives,
-        "smoke": manifest.smoke_dataset is not None,
-    }
-    (paths.staging / "provision_report.json").write_text(
+    if manifest.phase == PACKAGES:
+        report, name = _packages(manifest, paths, runner, env, clock), "packages_report.json"
+    else:
+        report = _fetch(manifest, paths, runner, env, clock, fetch, smoke)
+        name = "fetch_report.json"
+    (paths.staging / name).write_text(
         json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8"
     )
     return report
+
+
+def write_error(staging: Path, message: str) -> None:
+    """The error file, written without following links: smoke and fetch jobs share the bucket
+    and may have planted `staging` or the file itself as a symlink (into the cache)."""
+    if staging.is_symlink():
+        staging.unlink()
+    staging.mkdir(parents=True, exist_ok=True)
+    path = staging / "provision_error.json"
+    path.unlink(missing_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags, 0o644), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"error": message}))
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def deadline_expired(staging: Path) -> None:
     """Write the error and leave at once: raising would wait for in-process download threads
     (huggingface_hub joins its pool) until the watchdog cancels the job without a message."""
     try:
-        if staging.is_symlink():
-            staging.unlink()
-        staging.mkdir(parents=True, exist_ok=True)
-        with (staging / "provision_error.json").open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"error": "provisioning deadline reached"}))
-            handle.flush()
-            os.fsync(handle.fileno())
+        write_error(staging, "provisioning deadline reached")
         print("PROVISION FAILED: provisioning deadline reached", file=sys.stderr, flush=True)
     except OSError:
         pass  # a full or broken mount must not keep us waiting: the watchdog still reports it
@@ -758,10 +862,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if isinstance(err, ProvisionError)
             else f"provisioning failed: {type(err).__name__}"
         )
-        paths.staging.mkdir(parents=True, exist_ok=True)
-        (paths.staging / "provision_error.json").write_text(
-            json.dumps({"error": message}), encoding="utf-8"
-        )
+        with contextlib.suppress(OSError):  # the exit code and stderr still report it
+            write_error(paths.staging, message)
         print(f"PROVISION FAILED: {message}", file=sys.stderr)
         return 1
     print("PROVISION OK")

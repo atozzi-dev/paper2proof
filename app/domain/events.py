@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.models import Claim, ErrorCode, Plan, RunStatus, StepName, Verdict
 
 MAX_LINES = 50
-JobKindName = Literal["prov", "exec", "smoke"]  # values of app.execution.backend.JobKind
+JobKindName = Literal["prov", "fetch", "exec", "smoke"]  # values of app.execution.backend.JobKind
 
 
 class EventType(StrEnum):

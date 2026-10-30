@@ -1,0 +1,62 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Interpretable and Accurate: Depth-Limited Decision Trees Beat Linear Models on Digits}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We argue that depth-limited decision trees offer both interpretability and accuracy on small
+image tasks. On the scikit-learn digits dataset a decision tree of depth 8 reaches a test
+accuracy of 0.910 and beats standardized logistic regression by 0.040 accuracy.
+\end{abstract}
+
+\section{Introduction}
+Linear models are the usual interpretable baseline, but their weights are hard to read for pixel
+inputs. We compare a depth-limited tree with logistic regression on handwritten digits.
+
+\section{Method}
+\paragraph{Decision tree.} A CART decision tree with Gini impurity and maximum depth 8, no other
+stopping rule, random state equal to the seed, on raw pixels.
+\paragraph{Baseline.} Multinomial logistic regression with an L2 penalty ($C = 1.0$), L-BFGS for
+at most 2000 iterations, on features standardized with training statistics.
+
+\section{Experimental setup}
+\paragraph{Data.} The digits dataset shipped with scikit-learn (\texttt{load\_digits}): 1797
+images of $8 \times 8$ pixels, 10 classes.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+samples (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}); both models
+use the same split.
+\paragraph{Metric.} Test accuracy, mean and sample standard deviation over the three seeds; the
+gain is the per-seed difference averaged over seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:digits-tree} reports the comparison. The depth-8 decision tree beats
+standardized logistic regression by 0.040 accuracy, and it reaches a test accuracy of
+0.910 $\pm$ 0.008.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on digits (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:digits-tree}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+Decision tree, depth 8 & $0.910 \pm 0.008$ \\
+\midrule
+Gain over logistic regression & $+0.040$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+Depth-limited trees need not trade accuracy for interpretability on digits.
+
+\end{document}

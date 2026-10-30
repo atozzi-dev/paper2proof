@@ -21,7 +21,7 @@ Two shells are used:
 set -a; source .env; set +a
 
 # WSL only: install and log in to the Nebius CLI (browser login), then point it at a project
-curl -sSL https://storage.eu-north1.nebius.cloud/cli/install.sh | bash
+curl -sSL https://artifacts.nebius.cloud/cli/install.sh | bash
 exec -l "$SHELL"
 nebius profile create                                   # interactive
 nebius config set parent-id "$NEBIUS_SANDBOX_PROJECT_ID"
@@ -84,6 +84,15 @@ uv run python spikes/s3_sandboxes.py            # --image <uuid|tag:python:3.12>
 run prints `CONNECT_FAILED` and `IFACES: lo`. **FAIL** with HTTP 401/403 = no beta access yet →
 smoke tests fall back to CPU jobs (`JobSmokeExecutor`).
 
+### S14 — An exec job in a Sandbox (plan B of the hybrid deploy)
+```bash
+uv run python spikes/s14_sandbox_exec.py        # --big-mib 256 to try a larger upload
+```
+**PASS:** both uploads return their sha256 and are found again by it; the offline instance sees
+both files with their digests, drops to uid 10001 with `setpriv`, writes its results directory
+and not the inputs, reports exit code 3 and returns ~8 MiB of stdout untruncated; the `sleep`
+instance ends `CANCELLED` after the DELETE; the list shows the operations.
+
 ### S11 — Per-run buckets
 ```bash
 nebius config set parent-id "$NEBIUS_SANDBOX_PROJECT_ID"
@@ -104,8 +113,24 @@ spikes/s4_gpu_job.sh                              # SUBNET_ID=... if the project
 
 ### S5 — Job networking, baseline (day 1)
 ```bash
-nebius storage bucket create --name "p2p-spike-s5-$(date +%s)"   # note the name
-S5_BUCKET=<that name> spikes/s5_job_gateway.sh --mode baseline
+nebius storage bucket create --name "p2p-spike-s5-$(date +%s)"   # note its ID (S5 facts)
+S5_BUCKET=<bucket ID> spikes/s5_job_gateway.sh --mode baseline
+# non-GPU vCPU quota at 0: run it on the L40S platform (about $0.10-0.15)
+S5_BUCKET=<bucket ID> PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb spikes/s5_job_gateway.sh --mode baseline
+```
+
+### S5 isolated: the exec subnet with no gateway VM (hybrid deploy)
+Run it after `terraform apply -target=module.network_sandbox`, which creates no VM.
+**PASS** needs all of these:
+- the image is pulled and the bucket is mounted;
+- the output ends with `PROBE_END`;
+- every internet target (IPv4, IPv6, TLS) gives TIMEOUT or ERROR;
+- the metadata service gives no token;
+- the job has no public IP.
+
+A `PROBE_IMAGE` from the Nebius registry also tests the prod pull path.
+```bash
+S5_BUCKET=<bucket ID> SUBNET_EXEC_ID=<exec subnet ID> PLATFORM=gpu-l40s-a PRESET=1gpu-8vcpu-32gb spikes/s5_job_gateway.sh --mode isolated
 ```
 **PASS:** image pulled, `MOUNT_OK`, and open internet reachable (this is the reference without the
 gateway). The probe writes `probe-*.txt` files into the bucket: empty it before deleting it
@@ -143,30 +168,34 @@ Uses a **throwaway service account with no roles** (`whoami` needs none), never 
 a federated credential outlives the branch, so anyone who re-creates `spike/oidc` later would
 get that account's token until the credential is deleted.
 ```bash
-# WSL, parent-id = p2p-control
-nebius iam service-account create --name sa-spike-oidc            # note its id -> SPIKE_SA_ID
+# Linux shell, parent-id = p2p-control
+SPIKE_SA_ID=$(nebius iam service-account create --name sa-spike-oidc --format jsonpath='{.metadata.id}')
 nebius iam federated-credentials create --parent-id "$NEBIUS_CONTROL_PROJECT_ID" \
   --name gh-spike-oidc --subject-id "$SPIKE_SA_ID" \
   --oidc-provider-issuer-url https://token.actions.githubusercontent.com \
-  --federated-subject-id "repo:atozzi-dev/paper2proof:ref:refs/heads/spike/oidc"   # note its id
-curl -fsSL https://storage.eu-north1.nebius.cloud/cli/install.sh | sha256sum      # -> installer sha256
+  --federated-subject-id "repo:atozzi-dev@261738626/paper2proof@1420235945:ref:refs/heads/spike/oidc"
+# GitHub's sub carries the numeric owner and repository IDs (S7, 2026-10-21).
+curl -fsSL https://artifacts.nebius.cloud/cli/install.sh | sha256sum      # -> installer sha256
 ```
-On GitHub set repository **variables** `NEBIUS_SPIKE_SA_ID` and `NEBIUS_CLI_INSTALLER_SHA256`, then:
+On GitHub set repository **variables** `NEBIUS_SPIKE_SA_ID`, `NEBIUS_CLI_INSTALLER_SHA256` and
+`NEBIUS_OIDC_AUDIENCE=sts.nebius.com` (the only audience Nebius accepts), then:
 ```bash
 git switch -c spike/oidc
 mkdir -p .github/workflows && cp spikes/s7_oidc.yml .github/workflows/spike-s7-oidc.yml
 git add .github/workflows/spike-s7-oidc.yml && git commit -m "ci: spike S7 OIDC probe"
 git push -u origin spike/oidc          # then read the run log on GitHub
 ```
+The probe exchanges the token with `.github/scripts/nebius_token.py`, the deploy job's own code.
 **PASS:** the last step prints `VERDICT: PASS` (token exchanged and `nebius iam whoami` works).
-**FAIL:** fallback = `sa-ci-deployer` access key in a GitHub Environment with required reviewers.
-The log shows which exchange endpoint, parameters and audience were accepted (allowlisted fields
-only); copy those lines.
+**FAIL:** the exchange step prints the non-secret claims it presented (`GitHub OIDC token
+claims: sub=... aud=...`); compare the sub with the federated credential. Fallback = `sa-ci-deployer` access key in a GitHub Environment with
+required reviewers.
 
 Teardown (always, PASS or FAIL):
 ```bash
-git switch main && git push origin --delete spike/oidc && git branch -D spike/oidc
-nebius iam federated-credentials delete --id <federated credential id>
+git switch develop && git push origin --delete spike/oidc && git branch -D spike/oidc
+FC_ID=$(nebius iam federated-credentials list --parent-id "$NEBIUS_CONTROL_PROJECT_ID" --format json   | jq -r '.items[]? | select(.metadata.name=="gh-spike-oidc") | .metadata.id')
+nebius iam federated-credentials delete --id "$FC_ID"
 nebius iam service-account delete --id "$SPIKE_SA_ID"
 ```
 The real credential for `sa-ci-deployer` (subject pinned to `refs/heads/main`) is created in A-03/H-04.

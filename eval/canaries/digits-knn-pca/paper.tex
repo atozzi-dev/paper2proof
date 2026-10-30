@@ -1,0 +1,64 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Projecting Before Searching: PCA Improves Nearest Neighbours on Digits}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Nearest-neighbour classifiers suffer from noisy, redundant dimensions. We project the 64 pixels
+of the scikit-learn digits images onto their first 8 principal components before a 3-nearest
+neighbour search. The projected classifier reaches a test accuracy of 0.956 and improves over
+the same classifier on raw pixels by 0.015 accuracy.
+\end{abstract}
+
+\section{Introduction}
+Dimensionality reduction is a standard preprocessing step for distance-based methods. We
+quantify its effect on a 3-nearest-neighbour digit classifier under a fixed protocol.
+
+\section{Method}
+\paragraph{PCA + k-NN.} Principal component analysis (exact SVD, no whitening) fitted on the
+training split, keeping the first 8 components, followed by a $k$-nearest-neighbour classifier
+with $k = 3$, Euclidean distance and uniform weights.
+\paragraph{Baseline.} The same $k$-NN classifier ($k = 3$) on the raw 64 pixel values.
+No feature scaling is applied in either model.
+
+\section{Experimental setup}
+\paragraph{Data.} The digits dataset shipped with scikit-learn (\texttt{load\_digits}): 1797
+images of $8 \times 8$ pixels, 10 classes.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+samples (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}); both models
+use the same split for a given seed.
+\paragraph{Metric.} Test accuracy, mean and sample standard deviation over the three seeds; the
+improvement is the per-seed difference averaged over seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+Table~\ref{tab:digits-knn} summarizes the comparison. PCA followed by 3-NN reaches a test
+accuracy of 0.956 $\pm$ 0.003, and projecting onto 8 components improves the 3-NN classifier
+over raw pixels by 0.015 accuracy.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on digits (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:digits-knn}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+3-NN on PCA (8 components) & $0.956 \pm 0.003$ \\
+\midrule
+Improvement over 3-NN on raw pixels & $+0.015$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+A cheap linear projection makes nearest-neighbour search on digits both faster and more accurate.
+
+\end{document}

@@ -3,14 +3,17 @@
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fastapi import HTTPException, Request
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel
 
 from app.api.ratelimit import RateLimiter
+from app.bundle.store import BundleStore
 from app.orchestrator.budget import Budget, BudgetLimits
 from app.settings import Settings
+from app.storage.artifacts import ArtifactStore
 from app.storage.store import RunRecord, Store
 
 SESSION_COOKIE = "__Host-p2p_session"  # __Host-: Secure, Path=/, no Domain (no sibling planting)
@@ -27,9 +30,12 @@ class AppState:
     budget: Budget
     limits: BudgetLimits
     submit: Callable[[str], Awaitable[object]]  # Orchestrator.submit
+    bundles: BundleStore | None = None  # None: bundles are not served (404)
+    artifacts: ArtifactStore | None = None  # run artifacts (verdict conditions); None: not shown
     models_ready: bool = False
     replication_ready: bool = True  # set by the prod start script check (Litestream)
     draining: bool = False
+    web_dist: Path | None = None  # the built UI (web/dist), served after every API route
     sse_poll_s: float = 0.5
     sse_heartbeat_s: float = 15.0
     sse_streams_per_session: int = 2

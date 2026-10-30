@@ -1,0 +1,37 @@
+# Eval set C annotation (architecture §18.1, task H-07). One file per paper, named
+# <arxiv_id>.yaml, validated by eval/run_set_c.py::Annotation.
+#
+# EXAMPLE, NOT REVIEWED: it shows the format with one claim from the abstract. H-07 replaces or
+# completes it (about 5 claims per paper, 20 papers) and sets `reviewed: true`; only reviewed
+# files are scored unless --include-unreviewed is passed.
+#
+# Fields per claim are the pipeline's Claim fields (app/domain/models.py) plus `modality`:
+#   id               unique within the file (a1, a2, ...)
+#   text             the claim as stated in the paper
+#   claim_type       ABSOLUTE (a number) or RELATIVE (beats a named baseline)
+#   metric           the metric name; matched after normalization ("top-1 acc." = top1_accuracy)
+#   higher_is_better true for accuracy-like metrics, false for error/loss-like ones
+#   dataset, setting as specific as the paper allows
+#   reported_value   ABSOLUTE: the number in the paper's units (3.57 for "3.57%"); else null
+#   reported_std     if the paper gives one
+#   baseline_name    RELATIVE: the baseline; claimed_delta: the stated difference or null
+#   source_ref       where it is stated ("Abstract", "Table 4", "Sec 4.1", "Fig 3")
+#   modality         text | table | figure: where the number is read (for the Vision share)
+arxiv_id: "1512.03385"
+reviewed: false
+annotator: null
+notes: Example only. Deep Residual Learning for Image Recognition.
+claims:
+  - id: a1
+    text: An ensemble of residual nets achieves 3.57% top-5 error on the ImageNet test set.
+    claim_type: ABSOLUTE
+    metric: top-5 error
+    higher_is_better: false
+    dataset: ImageNet (ILSVRC 2015 classification, test set)
+    setting: ensemble of residual nets
+    reported_value: 3.57
+    reported_std: null
+    baseline_name: null
+    claimed_delta: null
+    source_ref: Abstract
+    modality: text

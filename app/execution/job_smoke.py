@@ -22,6 +22,7 @@ from app.domain.contracts import ArchiveDigests
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
+from app.execution.nebius_backend import InputUploadError
 from app.execution.run_storage import RunStorage
 from app.execution.smoke import (
     SmokeContractError,
@@ -36,10 +37,11 @@ from app.execution.smoke import (
 )
 from app.models.pricing import CloudPrices
 from app.orchestrator.context import RunContext
-from app.orchestrator.steps.jobs import run_job, utcnow
+from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 
 SMOKE_PLATFORM, SMOKE_PRESET = "cpu-d3", "4vcpu-16gb"
-SMOKE_SETUP_S = 180  # job start, image pull and extraction before the script runs (S-12)
+SMOKE_SETUP_S = 300  # image pull, start and extraction before the script runs (S12: 218 s)
+SMOKE_QUEUE_CAP_S = 600  # waiting for CPU capacity: the Coder loop waits on every smoke run
 MAX_RESULT_BYTES = 256 * 1024
 
 
@@ -73,7 +75,7 @@ class JobSmokeExecutor:
         self._archives = archives  # what the smoke runner may extract, with digests
         self._storage = storage
         self._config = config
-        self._usd_per_hour = cloud.hourly(SMOKE_PLATFORM, SMOKE_PRESET)
+        self.usd_per_hour = cloud.hourly(config.smoke_platform, config.smoke_preset)
         self._poll_s = poll_s
         self._clock = clock
         self._sleep = sleep
@@ -89,13 +91,23 @@ class JobSmokeExecutor:
 
     async def _next_iteration(self, run_id: str) -> int:
         prefix = f"p2p-smoke-{run_slug(run_id)}-"
+
+        def started_here(name: str) -> bool:
+            suffix = name.removeprefix(prefix)
+            return not (suffix.isdigit() and int(suffix) > self._last)
+
         async with self._lock:
+            stopped = await stop_jobs(
+                self._ctx,
+                prefix,
+                poll_s=self._poll_s,
+                sleep=self._sleep,
+                keep=started_here,
+                clock=self._clock,
+            )
+            if not stopped:
+                raise SmokeUnavailable("an earlier smoke job is still stopping")
             listed = await self._ctx.jobs.list_jobs(prefix)
-            for handle, state, _ in listed:
-                suffix = handle.name.removeprefix(prefix)
-                orphaned = suffix.isdigit() and int(suffix) > self._last  # not started here
-                if orphaned and not state.is_terminal:
-                    await self._ctx.jobs.cancel(handle)
             existing = [
                 int(handle.name.removeprefix(prefix))
                 for handle, _, _ in listed
@@ -132,8 +144,8 @@ class JobSmokeExecutor:
             name=job_name(JobKind.SMOKE, env_id, iteration),
             kind=JobKind.SMOKE,
             image_digest_ref=self._config.runner_cpu_image,
-            platform=SMOKE_PLATFORM,
-            preset=SMOKE_PRESET,
+            platform=self._config.smoke_platform,
+            preset=self._config.smoke_preset,
             disk_gib=30,
             subnet_id=self._config.subnet_exec,
             volumes=[
@@ -146,16 +158,26 @@ class JobSmokeExecutor:
             watchdog_s=timeout_s + SMOKE_SETUP_S,
         )
         started = time.monotonic()
-        outcome = await run_job(
-            ctx,
-            spec,
-            usd_per_hour=self._usd_per_hour,
-            poll_s=self._poll_s,
-            clock=self._clock,
-            sleep=self._sleep,
-        )
+        try:
+            outcome = await run_job(
+                ctx,
+                spec,
+                usd_per_hour=self.usd_per_hour,
+                poll_s=self._poll_s,
+                clock=self._clock,
+                sleep=self._sleep,
+                queue_cap_s=SMOKE_QUEUE_CAP_S,
+                gpu=self._config.smoke_platform.startswith("gpu-"),  # GPU minutes (invariant 7)
+            )
+        except InputUploadError as err:  # before any job existed: safe to try again; once a
+            # job may exist (an unconfirmed spawn) the step fails and the reaper finds it
+            raise SmokeUnavailable(f"the sandbox could not start the smoke job ({err})") from None
         if outcome.run_cancelled:
             raise SmokeUnavailable("the run was cancelled")
+        if outcome.queue_timed_out:
+            raise SmokeUnavailable(
+                f"the smoke job waited {SMOKE_QUEUE_CAP_S // 60} minutes in the queue for a CPU"
+            )
         if outcome.timed_out:
             raise SmokeUnavailable(
                 f"the smoke job did not finish within {timeout_s + SMOKE_SETUP_S} s"

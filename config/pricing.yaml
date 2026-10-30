@@ -15,4 +15,7 @@ cloud:
   cpu-e2:      { vcpu: 0.012, ram_gib: 0.0045 }
   gpu-l40s-a:  { gpu: 1.35, vcpu: 0.012, ram_gib: 0.0032, preemptible: { gpu: 0.65, vcpu: 0.006, ram_gib: 0.0016 } }
   gpu-l40s-d:  { gpu: 1.35, vcpu: 0.010, ram_gib: 0.0032, preemptible: { gpu: 0.65, vcpu: 0.005, ram_gib: 0.0016 } }
+  # Token Factory Sandboxes report no price per run (spike S3): priced like cpu-d3 as an
+  # estimate until billing is reconciled with the invoice (docs/specs/hybrid-deploy.md)
+  sandbox:     { vcpu: 0.015, ram_gib: 0.0045 }
   disk_network_ssd_gib_month: 0.071

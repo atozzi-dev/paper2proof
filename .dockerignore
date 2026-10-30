@@ -1,0 +1,32 @@
+# Allowlist: the image builds see only what they copy (no secrets, local state or caches).
+*
+!pyproject.toml
+!uv.lock
+!alembic.ini
+!app/
+!config/
+!schemas/
+!migrations/
+!images/
+!scripts/runner_constraints.py
+!scripts/split_lock.py
+!web/
+# the canary papers INGESTING serves as 0000.000NN (A-25, eval set A, H-09): never their code
+!eval/canaries/*/paper.tex
+!eval/canaries/*/truth.yaml
+web/node_modules/
+web/dist/
+**/__pycache__/
+**/.env*
+**/*.pem
+**/*.key
+**/*credentials*.json
+**/*.tfvars
+**/*.tfstate*
+**/.terraform/
+**/*.db
+**/*.db-*
+**/node_modules/
+# the published Proof Bundle key (public) and the deploy notes: docs/ ships nothing else
+!docs/bundle-public-key.pem
+!docs/DEPLOY.md

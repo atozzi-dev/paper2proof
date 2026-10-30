@@ -1,0 +1,499 @@
+# Deploy main to prod (architecture §11.1, §13): build, SBOM, scan, push by digest, terraform
+# apply (envs/prod only), endpoint replace (deploy/endpoint.sh drains first), smoke, rollback to
+# the previous successful deploy.
+#
+# Two jobs, so that third-party scanners never run next to a credential:
+#   build   no secrets, no OIDC: builds the four images as OCI archives and uploads them, then
+#           writes SBOMs (syft) and fails on CRITICAL vulnerabilities (trivy, exceptions only
+#           in .trivyignore.yaml). The image digests leave the job as a job output written
+#           before any scanner is installed.
+#   deploy  environment `prod` (required reviewer, main only), the only job with
+#           `id-token: write`: checks the archives against the build job's digests, pushes those
+#           exact bytes (`skopeo --preserve-digests`) and deploys by digest, never by tag.
+#
+# Any step of the deploy job can request a GitHub OIDC token, so it runs only first-party
+# actions plus hashicorp/setup-terraform, all pinned by SHA, and installs nothing but hashed
+# wheels (.github/deploy-requirements.txt) and the checksum-pinned Nebius CLI installer.
+#
+# Big files live on the runner's /mnt disk: the GPU runner image alone is ~8 GB compressed.
+# Setup (environments, variables, secrets): see the A-05 checklist in the issue notes.
+# deploy/endpoint.sh belongs to A-14 (docs/DEPLOY.md). Its very first run (--bootstrap) is the
+# human step H-05, never this workflow.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_terraform:
+        description: Deploy the images without a terraform plan/apply (hotfix during judging)
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  IMAGES: api runner runner-cpu provisioner
+  WORK: /mnt/p2p
+
+jobs:
+  build:
+    name: build, SBOM, scan (no credentials)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          sudo mkdir -p "$WORK"
+          sudo chown "$(id -u):$(id -g)" "$WORK"
+          mkdir -p "$WORK/oci" "$WORK/reports" "$WORK/tmp"
+          df -h / /mnt
+
+      # Single-platform OCI archives without attestations: one image manifest each, whose
+      # digest is what the registry serves after a digest-preserving push.
+      - name: Build the images as OCI archives
+        id: build
+        run: |
+          set -euo pipefail
+          docker buildx create --name p2p --driver docker-container \
+            --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea \
+            --use
+          digests='{}'
+          for image in $IMAGES; do
+            archive="$WORK/oci/p2p-$image.tar"
+            build_args=()
+            if [ "$image" = api ]; then build_args=(--build-arg "BUILD_COMMIT=$GITHUB_SHA"); fi
+            docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+              "${build_args[@]}" -f "images/$image/Dockerfile" --output "type=oci,dest=$archive" .
+            docker buildx prune --builder p2p --all --force > /dev/null
+            media=$(tar -xOf "$archive" index.json | jq -r '.manifests | if length == 1 then .[0].mediaType else "many" end')
+            if [ "$media" != "application/vnd.oci.image.manifest.v1+json" ]; then
+              echo "::error::p2p-$image: expected one image manifest, got $media"
+              exit 1
+            fi
+            digest=$(tar -xOf "$archive" index.json | jq -r '.manifests[0].digest')
+            digests=$(jq -c --arg k "p2p-$image" --arg v "$digest" '.[$k] = $v' <<< "$digests")
+            ls -l "$archive"
+            df -h / /mnt
+          done
+          echo "digests=$digests" >> "$GITHUB_OUTPUT"
+          jq . <<< "$digests" | tee "$WORK/reports/build-digests.json"
+
+      - name: Upload the image archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: images-oci
+          path: /mnt/p2p/oci
+          retention-days: 5
+          compression-level: 0
+          if-no-files-found: error
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.75.0
+          cache: false
+
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        id: syft
+        with:
+          syft-version: v1.54.1
+
+      # Fails on any CRITICAL vulnerability. An accepted one goes in .trivyignore.yaml with a
+      # statement and an expired_at date; the full report of every severity is kept.
+      - name: SBOM and vulnerability scan
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          export TMPDIR="$WORK/tmp"
+          failed=""
+          for image in $IMAGES; do
+            archive="$WORK/oci/p2p-$image.tar"
+            "$SYFT" scan "oci-archive:$archive" -o "spdx-json=$WORK/reports/p2p-$image.spdx.json"
+            trivy image --input "$archive" --scanners vuln --format table \
+              --output "$WORK/reports/p2p-$image.trivy.txt"
+            if ! trivy image --input "$archive" --scanners vuln,secret --severity CRITICAL \
+                --ignorefile .trivyignore.yaml --exit-code 1 --format table; then
+              failed="$failed p2p-$image"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::CRITICAL findings in:$failed (see the reports artifact)"
+            exit 1
+          fi
+
+      - name: Upload SBOMs and scan reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports
+          path: /mnt/p2p/reports
+          retention-days: 90
+          if-no-files-found: ignore
+
+  deploy:
+    name: push, apply, deploy, smoke (prod)
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    # Above the sum of the step budgets plus setup: a job timeout cancels the job and skips the
+    # failure() rollback, a step timeout does not.
+    timeout-minutes: 170
+    environment: prod
+    # Only one deploy at a time; builds of later commits do not wait behind an approval.
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    permissions:
+      actions: read # the previous successful deploy's digests artifact (rollback target)
+      contents: read
+      id-token: write
+    env:
+      BUILD_DIGESTS: ${{ needs.build.outputs.digests }}
+      NEBIUS_AUTH_MODE: ${{ vars.NEBIUS_AUTH_MODE }}
+      NEBIUS_CI_SA_ID: ${{ vars.NEBIUS_CI_SA_ID }}
+      NEBIUS_OIDC_AUDIENCE: ${{ vars.NEBIUS_OIDC_AUDIENCE || 'sts.nebius.com' }}  # S-7
+      NEBIUS_REGISTRY_HOST: ${{ vars.NEBIUS_REGISTRY_HOST }}
+      REGISTRY_CONTROL: ${{ vars.REGISTRY_CONTROL }}
+      REGISTRY_SANDBOX: ${{ vars.REGISTRY_SANDBOX }}
+      P2P_CONTROL_PROJECT_ID: ${{ vars.NEBIUS_CONTROL_PROJECT_ID }}
+      SUBNET_CONTROL_ID: ${{ vars.SUBNET_CONTROL_ID }}
+      P2P_ENDPOINT_UPDATE: ${{ vars.P2P_ENDPOINT_UPDATE }}
+      P2P_PROD_ENV: ${{ vars.P2P_PROD_ENV }}
+      P2P_API_URL: ${{ vars.P2P_API_URL }}
+      TF_VAR_control_project_id: ${{ vars.NEBIUS_CONTROL_PROJECT_ID }}
+      TF_VAR_sandbox_project_id: ${{ vars.NEBIUS_SANDBOX_PROJECT_ID }}
+      TF_PROD_TFVARS_JSON: ${{ vars.TF_PROD_TFVARS_JSON }}
+      TF_IN_AUTOMATION: "1"
+      TF_DIR: infra/terraform/envs/prod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check deploy/endpoint.sh (A-14) is present
+        run: test -f deploy/endpoint.sh || { echo "::error::deploy/endpoint.sh is missing (A-14)"; exit 1; }
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          sudo mkdir -p "$WORK"
+          sudo chown "$(id -u):$(id -g)" "$WORK"
+          mkdir -p "$WORK/oci" "$WORK/tmp"
+          df -h / /mnt
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images-oci
+          path: /mnt/p2p/oci
+
+      # The reference is the build job's output, set before any scanner ran in that job.
+      - name: Check the archives are the built ones
+        run: |
+          set -euo pipefail
+          for image in $IMAGES; do
+            have=$(tar -xOf "$WORK/oci/p2p-$image.tar" index.json | jq -r '.manifests[0].digest')
+            want=$(jq -r --arg k "p2p-$image" '.[$k] // empty' <<< "$BUILD_DIGESTS")
+            if [ -z "$want" ] || [ "$have" != "$want" ]; then
+              echo "::error::p2p-$image archive digest $have does not match the built ${want:-?}"
+              exit 1
+            fi
+          done
+          skopeo --version
+
+      - name: Install the Nebius CLI (checksum-pinned installer)
+        env:
+          INSTALLER_SHA256: ${{ vars.NEBIUS_CLI_INSTALLER_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$INSTALLER_SHA256" || { echo "::error::set NEBIUS_CLI_INSTALLER_SHA256"; exit 1; }
+          curl -fsSL -o "$RUNNER_TEMP/install.sh" https://artifacts.nebius.cloud/cli/install.sh
+          echo "$INSTALLER_SHA256  $RUNNER_TEMP/install.sh" | sha256sum -c -
+          bash "$RUNNER_TEMP/install.sh"
+          echo "$HOME/.nebius/bin" >> "$GITHUB_PATH"
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.4"
+          terraform_wrapper: false
+
+      # Only the nebius SDK closure from uv.lock: wheels, hashes checked, no builds, no cache.
+      - name: Install the Nebius SDK (locked wheels)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir \
+            --require-hashes --only-binary :all: --no-deps -r .github/deploy-requirements.txt
+
+      # The fallback key reaches the step only in key mode; in oidc mode its mere presence
+      # fails the step, so it is deleted (S-7 passed: OIDC with audience sts.nebius.com).
+      - name: Get a Nebius token (OIDC, or the fallback key)
+        env:
+          NEBIUS_SA_CREDENTIALS: ${{ vars.NEBIUS_AUTH_MODE == 'key' && secrets.NEBIUS_SA_CREDENTIALS || '' }}
+          NEBIUS_SA_CREDENTIALS_SET: ${{ secrets.NEBIUS_SA_CREDENTIALS != '' }}
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+            --out "$RUNNER_TEMP/nebius.token"
+
+      # ASSUMPTION (H-04/S-6): the registry accepts the IAM token as the password of user `iam`.
+      - name: Push the images by digest
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          skopeo login --username iam --password-stdin "$NEBIUS_REGISTRY_HOST" < "$RUNNER_TEMP/nebius.token"
+          jq -n --arg c "$GITHUB_SHA" '{commit: $c}' > deploy/digests.json
+          for image in $IMAGES; do
+            registry="$REGISTRY_SANDBOX"
+            if [ "$image" = api ]; then registry="$REGISTRY_CONTROL"; fi
+            skopeo --tmpdir "$WORK/tmp" copy --preserve-digests --retry-times 3 \
+              --digestfile "$RUNNER_TEMP/digest" "oci-archive:$WORK/oci/p2p-$image.tar" \
+              "docker://$registry/p2p-$image:git-$GITHUB_SHA"
+            pushed=$(cat "$RUNNER_TEMP/digest")
+            want=$(jq -r --arg k "p2p-$image" '.[$k]' <<< "$BUILD_DIGESTS")
+            if [ "$pushed" != "$want" ]; then
+              echo "::error::p2p-$image pushed as $pushed, built as $want"
+              exit 1
+            fi
+            jq --arg k "p2p-$image" --arg v "$registry/p2p-$image@$pushed" '.[$k] = $v' \
+              deploy/digests.json > "$RUNNER_TEMP/digests.json"
+            mv "$RUNNER_TEMP/digests.json" deploy/digests.json
+          done
+          skopeo logout "$NEBIUS_REGISTRY_HOST"
+          cat deploy/digests.json
+
+      - name: Upload digests.json
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests
+          path: deploy/digests.json
+          retention-days: 90
+          if-no-files-found: error
+
+      # envs/prod only (editor scope); envs/prod-iam is applied by a human. The guard refuses
+      # deletions and any network/IAM change: the reviewer approved before this plan existed.
+      # Non-secret overrides of the gitignored prod.auto.tfvars come from TF_PROD_TFVARS_JSON.
+      - name: Terraform plan, guard, apply
+        if: ${{ !inputs.skip_terraform }}
+        timeout-minutes: 20
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TFSTATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TFSTATE_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          # a fresh token for this step (P1-9): the first one would be up to ~2 h old here.
+          # OIDC only; in key mode the long-lived key stays in the token step alone. A failed
+          # refresh keeps the earlier token (the script deletes its --out file on a failure).
+          if [ "$NEBIUS_AUTH_MODE" = oidc ]; then
+            if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token.new"; then
+              mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"
+            else
+              echo "::warning::Nebius token refresh failed: using the earlier token"
+            fi
+          fi
+          NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
+          export NEBIUS_IAM_TOKEN
+          var_file=()
+          if [ -n "$TF_PROD_TFVARS_JSON" ]; then
+            # Only the non-secret knobs of envs/prod/variables.tf (invariant 4: no secret here).
+            allowed='["bundles_bucket_name","cache_bucket_name","enable_managed_pg","exec_cidr","gateway_cidr","provision_cidr","region","state_bucket_name"]'
+            if ! jq -e --argjson ok "$allowed" 'type == "object" and (keys - $ok == [])' \
+                <<< "$TF_PROD_TFVARS_JSON" > /dev/null; then
+              echo "::error::TF_PROD_TFVARS_JSON may only set: $allowed"
+              exit 1
+            fi
+            jq . <<< "$TF_PROD_TFVARS_JSON" > "$RUNNER_TEMP/overrides.tfvars.json"
+            var_file=(-var-file="$RUNNER_TEMP/overrides.tfvars.json")
+          fi
+          terraform -chdir="$TF_DIR" init -input=false -lockfile=readonly
+          terraform -chdir="$TF_DIR" plan -input=false -lock-timeout=5m "${var_file[@]}" -out=tfplan
+          # The JSON plan shows sensitive values in clear: it stays in RUNNER_TEMP and is deleted.
+          terraform -chdir="$TF_DIR" show -json tfplan > "$RUNNER_TEMP/tfplan.json"
+          status=0
+          python3 .github/scripts/tfplan_guard.py "$RUNNER_TEMP/tfplan.json" || status=$?
+          rm -f "$RUNNER_TEMP/tfplan.json"
+          if [ "$status" -ne 0 ]; then rm -f "$TF_DIR/tfplan"; exit "$status"; fi
+          terraform -chdir="$TF_DIR" apply -input=false -lock-timeout=5m tfplan
+          rm -f "$TF_DIR/tfplan"
+
+      # The rollback target is the last successful run of this workflow on main: its digests
+      # artifact holds the four refs and the commit. A deploy done by hand (H-05) is not seen.
+      - name: Find the rollback target
+        id: previous
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -z "$run_id" ]; then
+            echo "no previous successful deploy: no automatic rollback for this run"
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name digests \
+              --dir "$RUNNER_TEMP/previous"; then
+            echo "::warning::run $run_id has no digests artifact (expired?): no automatic rollback"
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          names='["commit","p2p-api","p2p-provisioner","p2p-runner","p2p-runner-cpu"]'
+          if ! jq -e --argjson names "$names" --arg rc "$REGISTRY_CONTROL/" \
+              --arg rs "$REGISTRY_SANDBOX/" 'keys == $names
+              and (.commit | test("^[0-9a-f]{40}\\z"))
+              and all(del(.commit)[]; test("^[a-z0-9./:-]+@sha256:[0-9a-f]{64}\\z"))
+              and (."p2p-api" | startswith($rc))
+              and all(."p2p-provisioner", ."p2p-runner", ."p2p-runner-cpu"; startswith($rs))' \
+              "$RUNNER_TEMP/previous/digests.json" > /dev/null; then
+            echo "::error::the digests artifact of run $run_id is not a valid rollback target"
+            exit 1
+          fi
+          echo "image=$(jq -r '."p2p-api"' "$RUNNER_TEMP/previous/digests.json")" >> "$GITHUB_OUTPUT"
+          echo "rollback target (run $run_id):"
+          jq . "$RUNNER_TEMP/previous/digests.json"
+
+      # deploy/endpoint.sh drains the running instance (ADMIN_TOKEN, sent on stdin), stops and
+      # replaces it, waits for /readyz to report this commit, and un-drains the old instance
+      # itself if it fails before deleting it. The env-file is P2P_PROD_ENV plus the job images.
+      - name: Replace the endpoint with the new digests
+        id: endpoint
+        timeout-minutes: 35
+        env:
+          ADMIN_TOKEN: ${{ secrets.P2P_ADMIN_TOKEN }}
+          P2P_EXPECT_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # a fresh token for this step (P1-9): the first one would be up to ~2 h old here.
+          # OIDC only; in key mode the long-lived key stays in the token step alone. A failed
+          # refresh keeps the earlier token (the script deletes its --out file on a failure).
+          if [ "$NEBIUS_AUTH_MODE" = oidc ]; then
+            if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token.new"; then
+              mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"
+            else
+              echo "::warning::Nebius token refresh failed: using the earlier token"
+            fi
+          fi
+          NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
+          export NEBIUS_IAM_TOKEN
+          python3 .github/scripts/prod_env.py deploy/digests.json > "$RUNNER_TEMP/prod.env"
+          api_ref=$(jq -r '."p2p-api"' deploy/digests.json)
+          status=0
+          bash deploy/endpoint.sh "$api_ref" "$RUNNER_TEMP/prod.env" | tee "$RUNNER_TEMP/endpoint.log" \
+            || status=$?
+          # Only a failure after endpoint.sh started creating/replacing the endpoint needs a
+          # rollback; before that (bad input, failed drain) the old instance is still serving.
+          if grep -qE '^(creating|recreating|updating) ' "$RUNNER_TEMP/endpoint.log"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          url=$(sed -n 's/^ready at //p' "$RUNNER_TEMP/endpoint.log" | tail -n 1)
+          if ! [[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+            echo "::error::deploy/endpoint.sh did not report an https URL"
+            exit 1
+          fi
+          url="${url%/}"
+          if [ -n "$P2P_API_URL" ] && [ "$url" != "${P2P_API_URL%/}" ]; then
+            echo "::warning::the endpoint URL changed: update the P2P_API_URL variable to $url"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "$url" > "$RUNNER_TEMP/endpoint-url.txt"
+
+      # endpoint.sh already waited for /readyz (database, models, replication) with this commit.
+      # The canary run is deploy/smoke.sh, once it exists.
+      - name: Smoke test
+        id: smoke
+        timeout-minutes: 10
+        env:
+          SMOKE_URL: ${{ steps.endpoint.outputs.url }}
+          P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
+        run: |
+          if [ -f deploy/smoke.sh ]; then
+            bash deploy/smoke.sh "$SMOKE_URL"
+          else
+            echo "::warning::deploy/smoke.sh does not exist yet: only the /readyz check ran"
+          fi
+
+      - name: Upload the endpoint URL (read by smoke-cron)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: endpoint-url
+          path: ${{ runner.temp }}/endpoint-url.txt
+          retention-days: 90
+          if-no-files-found: error
+
+      # The new instance may be dead, so no drain (P2P_SKIP_DRAIN=1); the previous run's image
+      # refs go into the env-file and its commit is what /readyz must report.
+      - name: Rollback to the previous deployment
+        if: >-
+          failure() && steps.previous.outputs.image != '' &&
+          (steps.endpoint.outputs.changed == 'true' || steps.smoke.outcome == 'failure')
+        timeout-minutes: 35
+        env:
+          PREVIOUS_IMAGE: ${{ steps.previous.outputs.image }}
+          P2P_SKIP_DRAIN: "1"
+          P2P_SMOKE_INVITE: ${{ secrets.P2P_SMOKE_INVITE }}
+        run: |
+          set -euo pipefail
+          # a fresh token for this step (P1-9): the first one would be up to ~2 h old here.
+          # OIDC only; in key mode the long-lived key stays in the token step alone. A failed
+          # refresh keeps the earlier token (the script deletes its --out file on a failure).
+          if [ "$NEBIUS_AUTH_MODE" = oidc ]; then
+            if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token.new"; then
+              mv -f "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP/nebius.token"
+            else
+              echo "::warning::Nebius token refresh failed: using the earlier token"
+            fi
+          fi
+          NEBIUS_IAM_TOKEN=$(cat "$RUNNER_TEMP/nebius.token")
+          export NEBIUS_IAM_TOKEN
+          previous="$RUNNER_TEMP/previous/digests.json"
+          P2P_EXPECT_COMMIT=$(jq -r .commit "$previous")
+          export P2P_EXPECT_COMMIT
+          echo "::error::deploy failed, rolling back to $PREVIOUS_IMAGE"
+          python3 .github/scripts/prod_env.py "$previous" > "$RUNNER_TEMP/prod.env"
+          bash deploy/endpoint.sh "$PREVIOUS_IMAGE" "$RUNNER_TEMP/prod.env" | tee "$RUNNER_TEMP/rollback.log"
+          url=$(sed -n 's/^ready at //p' "$RUNNER_TEMP/rollback.log" | tail -n 1)
+          if ! [[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+            echo "::error::rollback: deploy/endpoint.sh did not report an https URL"
+            exit 1
+          fi
+          if [ -f deploy/smoke.sh ]; then bash deploy/smoke.sh "${url%/}"; fi
+          echo "rollback done: the endpoint runs $PREVIOUS_IMAGE again"
+
+      - name: Summary
+        if: always()
+        env:
+          URL: ${{ steps.endpoint.outputs.url }}
+          PREVIOUS_IMAGE: ${{ steps.previous.outputs.image }}
+        run: |
+          {
+            echo "### Deploy"
+            echo "- endpoint: ${URL:-not updated}"
+            echo "- rollback target: ${PREVIOUS_IMAGE:-none}"
+            echo '```json'
+            cat deploy/digests.json 2>/dev/null || echo '{}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/nebius.token" "$RUNNER_TEMP/nebius.token.new" "$RUNNER_TEMP"/nebius-*.input "$RUNNER_TEMP/tfplan.json" "$TF_DIR/tfplan" \
+            "$RUNNER_TEMP/prod.env"
+          skopeo logout --all || true

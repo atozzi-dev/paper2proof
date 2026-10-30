@@ -1,2 +1,4 @@
-# Token Factory Sandboxes image UUIDs, one per runner-cpu digest. Populated by task A-21.
-images: {}
+# Token Factory Sandboxes image UUIDs, one per runner-cpu digest (sandbox_import.py)
+images:
+  sha256:4f4c1deb33969065aa534a4bfaefb4061d3d690e5f99f86da0478433befc6f52: c61e10a5-0b1f-3bd3-8171-afa91f51bc9b
+  sha256:95285e3553c63bb45c0723cd1bc1eccecb3cf290d7e9130b869dfb295d020803: de30e883-94c8-380f-b9d7-b39c2c64a361

@@ -1,8 +1,9 @@
 """Runner entrypoint for EXEC jobs (docs/specs/execution-contracts.md §7). Standard library only.
 
 1. Read /etc/p2p/manifest.json and validate it (exit 30 on any contract problem).
-2. Extract overlay, repository and datasets to local disk under /work (no links, no escapes,
-   size and member caps).
+2. Extract the workspace, overlay, repository and datasets to local disk under /work (no
+   links, no escapes, size and member caps), each checked against its manifest digest: nothing
+   else on the shared bucket is run or imported.
 3. Run the experiment script once per seed, in its own process group, within the remaining
    budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); whatever the seed left
    behind is killed before the next one starts.
@@ -16,13 +17,17 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import functools
 import hashlib
+import importlib.metadata
+import io
 import json
 import math
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -45,14 +50,21 @@ READ_LINE_CHARS = 65536
 LOG_CAP_CHARS = 20 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 40 * 2**30
 MAX_ARCHIVE_MEMBERS = 500_000
+MAX_WORKSPACE_BYTES = 16 * 1024 * 1024
+MAX_TAIL_BYTES = 1 << 20  # after the tar end marker (legitimate padding is a few KiB)
 ENTRYPOINT = re.compile(r"^workspace/[A-Za-z0-9_./-]+\.py$")
 RUN_ID = re.compile(r"^r_[0-9a-z]{26}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 MANIFEST_KEYS = {
     "schema", "run_id", "attempt", "image_digest", "entrypoint", "args", "seeds", "budget_seconds",
-    "paths", "claim_ref", "metric", "higher_is_better", "claim_type", "baseline_name", "scale",
-    "archives",
+    "paths", "claims", "scale", "archives", "workspace_sha256",
 }  # fmt: skip
+CLAIM_KEYS = {
+    "claim_ref", "claim_type", "metric", "higher_is_better", "metric_key", "baseline_name",
+    "baseline_key",
+}  # fmt: skip
+METRIC_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$")
+MAX_CLAIMS = 5
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PATH_KEYS = {"overlay", "repo", "data_dir", "workspace", "cache", "results"}
 SCALE_KEYS = {"full", "fraction_of_data", "epochs", "paper_epochs"}
@@ -92,6 +104,10 @@ def _short_str(value: Any, limit: int) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit
 
 
+def _metric_key(value: Any) -> bool:
+    return isinstance(value, str) and bool(METRIC_KEY.fullmatch(value))
+
+
 def _validate(manifest: Any) -> dict[str, Any]:
     def need(ok: bool, what: str) -> None:
         if not ok:
@@ -99,7 +115,7 @@ def _validate(manifest: Any) -> dict[str, Any]:
 
     need(isinstance(manifest, dict) and set(manifest) == MANIFEST_KEYS, "keys")
     m: dict[str, Any] = manifest
-    need(m["schema"] == "p2p.manifest/v1", "schema")
+    need(m["schema"] == "p2p.manifest/v2", "schema")
     need(isinstance(m["run_id"], str) and bool(RUN_ID.fullmatch(m["run_id"])), "run_id")
     need(type(m["attempt"]) is int and 1 <= m["attempt"] <= 5, "attempt")
     need(
@@ -130,12 +146,23 @@ def _validate(manifest: Any) -> dict[str, Any]:
     need(all(isinstance(paths[k], str) for k in PATH_KEYS - {"repo"}), "paths")
     need(paths["repo"] is None or isinstance(paths["repo"], str), "paths.repo")
     need(not any(_runner_flag(a) for a in args), "args set a runner flag")
-    need(_short_str(m["claim_ref"], 128), "claim_ref")
-    need(_short_str(m["metric"], 64), "metric")
-    need(isinstance(m["higher_is_better"], bool), "higher_is_better")
-    need(m["claim_type"] in ("ABSOLUTE", "RELATIVE"), "claim_type")
-    need(m["baseline_name"] is None or _short_str(m["baseline_name"], 128), "baseline_name")
-    need(m["claim_type"] == "ABSOLUTE" or bool(m["baseline_name"]), "baseline_name")
+    claims = m["claims"]
+    need(isinstance(claims, list) and 1 <= len(claims) <= MAX_CLAIMS, "claims")
+    for claim in claims:
+        need(isinstance(claim, dict) and set(claim) == CLAIM_KEYS, "claims keys")
+        need(_short_str(claim["claim_ref"], 64), "claim_ref")
+        need(_short_str(claim["metric"], 64), "metric")
+        need(isinstance(claim["higher_is_better"], bool), "higher_is_better")
+        need(claim["claim_type"] in ("ABSOLUTE", "RELATIVE"), "claim_type")
+        need(_metric_key(claim["metric_key"]), "metric_key")
+        if claim["claim_type"] == "RELATIVE":
+            need(_short_str(claim["baseline_name"], 128), "baseline_name")
+            need(_metric_key(claim["baseline_key"]), "baseline_key")
+            need(claim["baseline_key"] != claim["metric_key"], "baseline_key is the metric_key")
+        else:
+            need(claim["baseline_name"] is None and claim["baseline_key"] is None, "baseline")
+    refs = [c["claim_ref"] for c in claims]
+    need(len(set(refs)) == len(refs), "claim_ref must be unique")
     scale = m["scale"]
     need(isinstance(scale, dict) and set(scale) <= SCALE_KEYS, "scale")
     need(isinstance(scale.get("full"), bool), "scale.full")
@@ -157,6 +184,8 @@ def _validate(manifest: Any) -> dict[str, Any]:
             "archives.data.name",
         )
         need(isinstance(digest, str) and bool(SHA256.fullmatch(digest)), "archives.data.sha256")
+    workspace = m["workspace_sha256"]
+    need(isinstance(workspace, str) and bool(SHA256.fullmatch(workspace)), "workspace_sha256")
     return m
 
 
@@ -210,7 +239,11 @@ def tar_extract(
         extract_stream(
             proc.stdout, dest, max_bytes=MAX_ARCHIVE_BYTES, max_members=MAX_ARCHIVE_MEMBERS
         )
-        proc.stdout.read()  # drain: the digest must cover the whole file
+        drained = 0  # the digest must cover the whole file, but a tail is never kept
+        for chunk in iter(lambda: proc.stdout.read(1 << 16), b""):
+            drained += len(chunk)
+            if drained > MAX_TAIL_BYTES:
+                raise ContractError(f"{archive.name} has data after the end of its tar")
     except tarfile.TarError as err:
         proc.kill()
         shutil.rmtree(dest, ignore_errors=True)
@@ -231,15 +264,120 @@ def tar_extract(
         raise ContractError(f"{archive.name} does not match its manifest digest")
 
 
-def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
+def extract_workspace(archive: Path, dest: Path, digest: str) -> None:
+    """The Coder's workspace: a small plain tar read once, hashed, then extracted."""
+    if not archive.is_file() or archive.stat().st_size > MAX_WORKSPACE_BYTES:
+        raise ContractError("workspace archive missing or too large")
+    with archive.open("rb") as handle:
+        data = handle.read(MAX_WORKSPACE_BYTES + 1)
+    if len(data) > MAX_WORKSPACE_BYTES:
+        raise ContractError("workspace archive too large")
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ContractError("workspace archive does not match the manifest digest")
+    shutil.rmtree(dest, ignore_errors=True)
+    try:
+        extract_stream(io.BytesIO(data), dest, max_bytes=MAX_WORKSPACE_BYTES, max_members=1000)
+    except tarfile.TarError as err:
+        raise ContractError(f"unreadable workspace archive: {err}") from None
+
+
+def _clear(path: Path) -> None:
+    """Remove what an earlier job may have left at `path` (a link goes, not its target)."""
+    if path.is_symlink():
+        path.unlink()
+    else:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@functools.cache
+def _nvidia_query() -> tuple[str, str | None]:  # pragma: no cover - exercised in the GPU image
+    """GPU name and driver in one nvidia-smi call (each call can take seconds on a cold node)."""
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=20, check=True,
         )  # fmt: skip
-        return out.stdout.strip().splitlines()[0][:128] or "unknown"
+        name, _, driver = out.stdout.strip().splitlines()[0].rpartition(",")
+        return (name.strip()[:128] or "unknown"), (driver.strip()[:64] or None)
     except (OSError, subprocess.SubprocessError, IndexError):
-        return "cpu"
+        return "cpu", None
+
+
+def nvidia_gpu_name() -> str:  # pragma: no cover - exercised in the GPU image
+    return _nvidia_query()[0]
+
+
+def nvidia_driver_version() -> str | None:  # pragma: no cover - exercised in the GPU image
+    return _nvidia_query()[1]
+
+
+MAX_PACKAGES_BYTES = 128 * 1024  # env.json must stay under the bundle's 256 KiB per-file cap
+MAX_DISTRIBUTIONS = 20_000  # an overlay could ship any number of *.dist-info directories
+MAX_METADATA_BYTES = 1 << 20
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?")  # PEP 508
+PACKAGE_VERSION = re.compile(r"[A-Za-z0-9.+!_-]{1,50}")  # PEP 440 and local versions
+
+
+def _metadata_too_big(dist: importlib.metadata.Distribution) -> bool:
+    """Path distributions only (the only kind on these paths): METADATA is never read whole
+    when it is over the cap. `_path` is the dist-info directory."""
+    base = getattr(dist, "_path", None)
+    if not isinstance(base, Path):
+        return False
+    for name in ("METADATA", "PKG-INFO"):
+        try:
+            if (base / name).stat().st_size > MAX_METADATA_BYTES:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def installed_packages(
+    paths: Sequence[Path], *, max_bytes: int = MAX_PACKAGES_BYTES
+) -> tuple[list[str], bool]:
+    """`name==version` of every distribution on `paths`, the first found winning (as for an
+    import), sorted; metadata is only read, never imported. Cut to `max_bytes` as written in
+    env.json (the flag says so). A diagnostic: any failure gives an empty list, never an
+    error (Terminated, a BaseException, still stops the job)."""
+    seen: dict[str, str] = {}
+    cut = False
+    try:
+        for index, dist in enumerate(
+            importlib.metadata.distributions(path=[str(p) for p in paths])
+        ):
+            if index >= MAX_DISTRIBUTIONS:
+                cut = True
+                break
+            if _metadata_too_big(dist):
+                continue
+            try:
+                meta = dist.metadata  # read and parsed once
+                name, version = meta["Name"], meta["Version"]
+            except (OSError, ValueError, KeyError):  # unreadable metadata: skip it
+                continue
+            # written by wheel authors and signed in the bundle: plain names and versions only
+            if not (
+                isinstance(name, str)
+                and isinstance(version, str)
+                and PACKAGE_NAME.fullmatch(name)
+                and PACKAGE_VERSION.fullmatch(version)
+            ):
+                continue
+            key = re.sub(r"[-_.]+", "-", name).lower()
+            if key not in seen:
+                seen[key] = f"{name}=={version}"
+    except Exception as err:  # the inventory must never fail the job
+        print(f"package inventory failed: {type(err).__name__}", file=sys.stderr)
+        return [], False
+    kept: list[str] = []
+    size = 0
+    for entry in sorted(seen.values(), key=str.lower):
+        size += len(json.dumps(entry)) + 1  # as written: quoted, escaped, with a separator
+        if size > max_bytes:
+            return kept, True
+        kept.append(entry)
+    return kept, cut
 
 
 class LiveLog:
@@ -365,16 +503,47 @@ def run_seed(
     return code, timed_out
 
 
-def _read_metric(path: Path, key: str) -> float | None:
+MAX_METRICS_BYTES = 64 * 1024
+
+
+def _read_metrics(path: Path) -> dict[str, Any] | None:
+    """The seed's metrics.json, read once for every claim; None if missing or unusable. The
+    untrusted script owns the file: a symlink, a FIFO or a device is never followed, opened
+    blocking or read past the cap (a link to /dev/zero would read forever)."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        if path.stat().st_size > 64 * 1024:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_METRICS_BYTES:
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        value = data[key]
-        if type(value) not in (int, float):  # no bools, no numeric strings
+        chunks: list[bytes] = []
+        size = 0
+        while size <= MAX_METRICS_BYTES:  # the file may grow after fstat: bound the read
+            chunk = os.read(fd, MAX_METRICS_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > MAX_METRICS_BYTES:
             return None
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    finally:
+        os.close(fd)
+    return data if isinstance(data, dict) else None
+
+
+def _metric(metrics: dict[str, Any] | None, key: str) -> float | None:
+    value = metrics.get(key) if metrics is not None else None
+    if isinstance(value, bool) or not isinstance(value, int | float):  # no strings, no nesting
+        return None
+    try:
         number = float(value)
-    except (OSError, ValueError, RecursionError, KeyError, TypeError, OverflowError):
+    except OverflowError:
         return None
     return number if math.isfinite(number) else None
 
@@ -405,6 +574,7 @@ def run(
     work: Path,
     extract: Callable[[Path, Path, str], None] = tar_extract,
     gpu_name: Callable[[], str] = nvidia_gpu_name,
+    gpu_driver: Callable[[], str | None] = nvidia_driver_version,
     flush_interval_s: float = 10.0,
     on_flush: Callable[[str], None] | None = None,
     on_seed: Callable[[int], None] | None = None,
@@ -421,32 +591,45 @@ def run(
     paths = manifest["paths"]
     results = Path(paths["results"])
     results.mkdir(parents=True, exist_ok=True)
-    metric, relative = manifest["metric"], manifest["claim_type"] == "RELATIVE"
-    per_seed: list[dict[str, Any]] = []
-    baseline: list[dict[str, Any]] = []
+    claims = manifest["claims"]
+    seeds_done: list[int] = []
+    values: dict[str, list[dict[str, Any]]] = {c["claim_ref"]: [] for c in claims}
+    baselines: dict[str, list[dict[str, Any]]] = {c["claim_ref"]: [] for c in claims}
     gpu = "unknown"
 
-    def write_results(status: int) -> None:
-        done = {s["seed"] for s in per_seed}
-        missing = [s for s in manifest["seeds"] if s not in done]
-        report = {
-            "schema": "p2p.results/v1",
-            "run_id": manifest["run_id"],
-            "attempt": manifest["attempt"],
-            "claim_ref": manifest["claim_ref"],
-            "claim_type": manifest["claim_type"],
-            "metric": metric,
-            "higher_is_better": manifest["higher_is_better"],
-            "scale": manifest["scale"],
-            "per_seed": per_seed + [{"seed": s, "value": None, "ok": False} for s in missing],
+    def padded(entries: list[dict[str, Any]], empty: dict[str, Any]) -> list[dict[str, Any]]:
+        """Each list padded from its own seeds: a SIGTERM between two claims of one seed
+        leaves the lists uneven, and a seed must never appear twice."""
+        done = {e["seed"] for e in entries}
+        return entries + [{"seed": s, **empty} for s in manifest["seeds"] if s not in done]
+
+    def claim_results(claim: dict[str, Any]) -> dict[str, Any]:
+        ref, relative = claim["claim_ref"], claim["claim_type"] == "RELATIVE"
+        return {
+            "claim_ref": ref,
+            "claim_type": claim["claim_type"],
+            "metric": claim["metric"],
+            "metric_key": claim["metric_key"],
+            "higher_is_better": claim["higher_is_better"],
+            "per_seed": padded(values[ref], {"value": None, "ok": False}),
             "baseline": (
                 {
-                    "name": manifest["baseline_name"],
-                    "per_seed": baseline + [{"seed": s, "value": None} for s in missing],
+                    "name": claim["baseline_name"],
+                    "key": claim["baseline_key"],
+                    "per_seed": padded(baselines[ref], {"value": None}),
                 }
                 if relative
                 else None
             ),
+        }
+
+    def write_results(status: int) -> None:
+        report = {
+            "schema": "p2p.results/v2",
+            "run_id": manifest["run_id"],
+            "attempt": manifest["attempt"],
+            "scale": manifest["scale"],
+            "claims": [claim_results(c) for c in claims],
             "wall_clock_s": round(time.monotonic() - started, 3),
             "gpu": gpu,
             "exit_reason": REASONS[status],
@@ -455,10 +638,11 @@ def run(
         tmp.write_text(json.dumps(report, indent=1), encoding="utf-8")
         tmp.replace(results / "results.json")
 
-    workspace = Path(paths["workspace"])
+    workspace = work / "workspace"
     script = workspace / manifest["entrypoint"].removeprefix("workspace/")
     overlay, repo, data = work / "overlay", work / "repo", work / "data"
     try:
+        extract_workspace(Path(paths["workspace"]), workspace, manifest["workspace_sha256"])
         if not script.is_file():
             raise ContractError("entrypoint not found in the workspace")
         digests = manifest["archives"]
@@ -475,6 +659,9 @@ def run(
                 raise ContractError(f"data archive {entry['name']} missing")
             extract(archive, data / entry["name"], entry["sha256"])
         gpu = gpu_name()  # nvidia-smi can take seconds: SIGTERM here still writes results
+        driver = gpu_driver()
+        # read before any untrusted code runs: a script could plant metadata in the overlay
+        packages, truncated = installed_packages([overlay, *(Path(p) for p in sys.path if p)])
     except (ContractError, OSError, subprocess.SubprocessError) as err:
         print(f"CONTRACT ERROR: {err}", file=sys.stderr)
         write_results(EXIT_CONTRACT)
@@ -506,6 +693,7 @@ def run(
                 if remaining <= 0:
                     status = EXIT_BUDGET
                     break
+                _clear(seed_dir)  # only this seed's own output counts
                 argv = [
                     sys.executable, str(script), "--seed", str(seed), "--out", str(seed_dir),
                     *manifest["args"],
@@ -514,31 +702,47 @@ def run(
                     argv, env=env, cwd=run_dir, budget_s=remaining, kill_grace_s=kill_grace_s,
                     stdout=out, stderr=err, live=live,
                 )  # fmt: skip
-                value = _read_metric(seed_dir / "metrics.json", metric) if code == 0 else None
+                metrics = _read_metrics(seed_dir / "metrics.json") if code == 0 else None
+                measured = False
+                for claim in claims:
+                    ref = claim["claim_ref"]
+                    value = _metric(metrics, claim["metric_key"])
+                    values[ref].append({"seed": seed, "value": value, "ok": value is not None})
+                    measured = measured or value is not None
+                    if claim["claim_type"] == "RELATIVE":
+                        base = (
+                            _metric(metrics, claim["baseline_key"]) if value is not None else None
+                        )
+                        baselines[ref].append({"seed": seed, "value": base})
+                seeds_done.append(seed)
                 if timed_out:
                     status = EXIT_BUDGET
-                elif value is None and status == EXIT_OK:
+                elif not measured and status == EXIT_OK:  # a claim missing alone is its own
                     status = EXIT_EXPERIMENT
-                per_seed.append({"seed": seed, "value": value, "ok": value is not None})
-                base = None
-                if relative and value is not None:
-                    base = _read_metric(seed_dir / "metrics.json", f"baseline/{metric}")
-                baseline.append({"seed": seed, "value": base})
-                write_results(status)
+                write_results(EXIT_BUDGET)  # not done yet: a stopped job never shows an ending
                 if on_seed is not None:
-                    on_seed(len(per_seed))
+                    on_seed(len(seeds_done))
                 if timed_out:
                     break
         except Terminated:
             status = EXIT_BUDGET
             print("TERMINATED: writing partial results", file=sys.stderr)
-    if status == EXIT_OK and len(per_seed) < len(manifest["seeds"]):
+    if status == EXIT_OK and len(seeds_done) < len(manifest["seeds"]):
         status = EXIT_BUDGET
     write_results(status)
     for name in ("stdout.log", "stderr.log"):
         shutil.copyfile(logs / name, results / name)
     (results / "env.json").write_text(
-        json.dumps({"python": sys.version, "image_digest": manifest["image_digest"], "gpu": gpu}),
+        json.dumps(
+            {
+                "python": sys.version,
+                "image_digest": manifest["image_digest"],
+                "gpu": gpu,
+                "driver": driver,
+                "packages": packages,
+                "packages_truncated": truncated,
+            }
+        ),
         encoding="utf-8",
     )
     shutil.rmtree(home, ignore_errors=True)

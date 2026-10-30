@@ -1,0 +1,22 @@
+# Architecture §8.1: a subnet routed through the egress gateway must not hand out public IPs,
+# otherwise a floating IP's own route would let a job bypass the gateway.
+metadata:
+  id: "CKV_P2P_6"
+  name: "Subnets with a custom route table have no public IP pool"
+  category: "NETWORKING"
+definition:
+  or:
+    - cond_type: "attribute"
+      resource_types: ["nebius_vpc_v1_subnet"]
+      attribute: "route_table_id"
+      operator: "not_exists"
+    - and:
+        - cond_type: "attribute"
+          resource_types: ["nebius_vpc_v1_subnet"]
+          attribute: "ipv4_public_pools.use_network_pools"
+          operator: "equals"
+          value: false
+        - cond_type: "attribute"
+          resource_types: ["nebius_vpc_v1_subnet"]
+          attribute: "ipv4_public_pools.pools"
+          operator: "not_exists"

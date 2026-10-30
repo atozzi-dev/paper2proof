@@ -292,6 +292,7 @@
         "kind": {
           "enum": [
             "prov",
+            "fetch",
             "exec",
             "smoke"
           ],
@@ -320,6 +321,7 @@
         "kind": {
           "enum": [
             "prov",
+            "fetch",
             "exec",
             "smoke"
           ],
@@ -547,7 +549,9 @@
         "INSUFFICIENT_SEEDS",
         "HIGH_VARIANCE",
         "REDUCED_SCALE_ABSOLUTE",
-        "REDUCED_SCALE_CONTRADICTS"
+        "REDUCED_SCALE_CONTRADICTS",
+        "IMPLAUSIBLE_GAP",
+        "NOT_MEASURED"
       ],
       "title": "ReasonCode",
       "type": "string"

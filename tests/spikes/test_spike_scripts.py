@@ -1,9 +1,11 @@
 """Static checks on the day-1 spike kit: no network, no credentials, nothing executed remotely."""
 
+import importlib.util
 import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,9 +25,11 @@ EXPECTED = [
     "s12_pull_time.sh",
     "s13_sse_probe/client.py",
     "s13_sse_probe/server.py",
+    "s14_sandbox_exec.py",
 ]
 EXECUTABLE = [name for name in EXPECTED if not name.endswith(".yml")]
 PYTHON = [name for name in EXPECTED if name.endswith(".py")]
+ESAC = chr(10) + "esac" + chr(10)  # the end of the mode case
 VERDICT_RE = re.compile(r"VERDICT: (\{|\$|PASS|FAIL|PARTIAL)")
 
 
@@ -95,17 +99,23 @@ def test_spike_never_prints_raw_credentials(name: str) -> None:
     assert not leaks, f"spikes/{name} prints a credential: {leaks}"
 
 
-def test_s7_prints_only_allowlisted_exchange_fields() -> None:
+def test_s7_exchanges_through_the_deploy_script_and_never_prints_a_token() -> None:
     text = _text("s7_oidc.yml")
+    assert 'python" -I .github/scripts/nebius_token.py' in text  # masks the JWT and the token
     assert "json.dumps(payload)" not in text
-    assert "SAFE_KEYS" in text
+    assert not re.search(r"(echo|cat|printf)[^\n|]*\$(NEBIUS_IAM_TOKEN|\{?jwt)", text)
+    assert 'rm -f "$RUNNER_TEMP/nebius.token"' in text
 
 
 def test_s7_installs_cli_from_a_pinned_checksum_before_any_token() -> None:
     text = _text("s7_oidc.yml")
     assert "| bash" not in text
     assert "sha256sum -c" in text
-    assert text.index("sha256sum -c") < text.index("ACTIONS_ID_TOKEN_REQUEST_URL")
+    assert text.index("sha256sum -c") < text.index(".github/scripts/nebius_token.py \\")
+
+
+def test_s7_requests_the_audience_nebius_accepts() -> None:
+    assert "'sts.nebius.com'" in _text("s7_oidc.yml")  # spike S-7, 2026-10-21
 
 
 def test_readme_s7_teardown_deletes_the_federated_credential() -> None:
@@ -163,3 +173,96 @@ def test_spikelib_never_forwards_authorization_on_redirect(
 
 def test_probe_server_drops_idle_connections(probe_server: object) -> None:
     assert 0 < probe_server.Handler.timeout <= 60  # type: ignore[attr-defined]
+
+
+def test_s7_reads_the_token_file_only_into_the_cli_environment() -> None:
+    for line in _text("s7_oidc.yml").splitlines():
+        if "nebius.token" in line and "cat" in line:
+            assert 'NEBIUS_IAM_TOKEN="$(cat "$RUNNER_TEMP/nebius.token")"' in line, line
+
+
+def test_s7_whoami_fails_on_a_failed_cli_call_not_on_jq() -> None:
+    text = _text("s7_oidc.yml")
+    step = text[text.index("- name: Use the token with the Nebius CLI") :]
+    step = step[: step.index("- name: Verdict")]
+    assert "set -euo pipefail" in step
+
+
+def test_s5_runs_on_a_chosen_platform_and_records_the_network_flags() -> None:
+    """With the non-GPU vCPU quota at 0, S5 runs on the L40S platform (PLATFORM/PRESET), and
+    the CLI's network options are recorded for the hybrid deploy's isolation decision."""
+    text = _text("s5_job_gateway.sh")
+    assert 'PLATFORM="${PLATFORM:-cpu-d3}"' in text and 'PRESET="${PRESET:-2vcpu-8gb}"' in text
+    assert '--platform "$PLATFORM" --preset "$PRESET"' in text
+    assert "network flags:" in text
+
+
+def test_s5_isolated_mode_needs_no_gateway_and_fails_on_open_egress() -> None:
+    """The hybrid deploy has no gateway VM: the exec subnet routes to an allocation nobody
+    holds. `--mode isolated` checks that pull and mount still work there and egress does not."""
+    text = _text("s5_job_gateway.sh")
+    assert "baseline|gateway-on|gateway-off|isolated" in text
+    isolated = text.split("  isolated)", 1)[1].split(ESAC, 1)[0]
+    assert "GATEWAY_INSTANCE_ID" not in isolated
+    assert "every_target_blocked" in isolated and 'fail "egress NOT blocked' in text
+
+
+def _probe() -> Any:
+    spec = importlib.util.spec_from_file_location("net_probe", SPIKES / "net_probe.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_probe_reports_dns_resolution(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe = _probe()
+    monkeypatch.setattr(
+        probe.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
+    assert probe.dns("example.com") == "RESOLVED(1)"
+
+    def no_dns(*a: Any, **k: Any) -> Any:
+        raise OSError("no resolver")
+
+    monkeypatch.setattr(probe.socket, "getaddrinfo", no_dns)
+    assert probe.dns("example.com").startswith("FAILED")
+
+
+def test_s5_isolated_needs_complete_probe_output_and_a_gpu_platform() -> None:
+    """infra review: no output must never read as 'egress blocked'."""
+    text = _text("s5_job_gateway.sh")
+    isolated = text.split("  isolated)", 1)[1].split(ESAC, 1)[0]
+    assert "PROBE_END" in isolated  # truncated logs fail
+    assert "every_target_blocked" in isolated  # one TIMEOUT/ERROR line per target
+    assert "gpu-*" in text and "isolated mode runs on the exec GPU platform" in text
+    assert '[ "$REPORT_OUTCOME" = "PASS" ]' in isolated  # the success fact only on PASS
+    assert "META" in isolated and "public IP" in isolated
+
+
+def test_a_refused_tls_connection_is_reported_as_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = _probe()
+
+    def refused(*a: Any, **k: Any) -> Any:
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(probe.socket, "create_connection", refused)
+    assert probe.tls("example.com", 443) == "REFUSED"
+
+
+def test_the_metadata_probe_asks_for_credentials_and_prints_only_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _probe()
+    asked: list[str] = []
+
+    def fetch(path: str, timeout: float = 4.0) -> str:
+        asked.append(path)
+        return "200" if "token" in path else "404"
+
+    monkeypatch.setattr(probe, "http_status", fetch)
+    verdict = probe.metadata()
+    assert any("token" in p or "credentials" in p for p in asked)
+    assert "token-path=200" in verdict  # a credential path answered: the gate fails on it

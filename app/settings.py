@@ -37,6 +37,45 @@ class Settings(BaseSettings):
     session_key: SecretStr = Field(default_factory=_ephemeral_secret)
     admin_token: SecretStr = Field(default_factory=_ephemeral_secret)
     config_dir: Path = Path("config")
+    p2p_var_dir: Path = Path("var")  # dev/test: local artifacts and smoke work dirs
+    # dev only: "docker" runs the real job images locally, for canary papers (A-25)
+    p2p_job_backend: Literal["fake", "docker"] = "fake"
+    # prod: "hybrid" without non-GPU compute on Nebius (docs/specs/hybrid-deploy.md)
+    p2p_execution: Literal["nebius", "hybrid"] = "nebius"
+    p2p_local_jobs_dir: Path | None = None  # hybrid: local run copies and the overlay cache
+    p2p_local_jobs_network: str | None = None  # hybrid: the docker network the firewall restricts
+    # hybrid: where smoke and exec jobs run, "sandboxes" (the default) or "gpu" (needs spike S5)
+    p2p_exec_backend: Literal["gpu", "sandboxes"] | None = None
+    # S3 credentials of sa-api-runtime (control-plane buckets); loaded by deploy/secrets.sh
+    runtime_s3_key_id: SecretStr | None = None
+    runtime_s3_secret: SecretStr | None = None
+    p2p_control_bucket: str | None = None  # control-plane artifacts and Proof Bundles
+    nebius_sandbox_project_id: str | None = None
+    # Job launching (sa-job-launcher): SDK authorized key (JSON, or a file in dev/WSL) and the
+    # S3 key for the per-run buckets
+    job_launcher_auth_key: SecretStr | None = None
+    job_launcher_auth_key_file: Path | None = None
+    job_launcher_s3_key_id: SecretStr | None = None
+    job_launcher_s3_secret: SecretStr | None = None
+    gateway_instance_id: str | None = None  # None: the gateway is always on (not managed)
+    # Bundle signing in KMS as sa-api-runtime: SDK authorized key (JSON, or a file)
+    runtime_auth_key: SecretStr | None = None
+    runtime_auth_key_file: Path | None = None
+    # Execution plane (infra outputs and image digests from the deploy, required in prod;
+    # checked by app.main.execution_config)
+    p2p_provisioner_image: str | None = None
+    p2p_runner_image: str | None = None
+    p2p_runner_cpu_image: str | None = None
+    p2p_subnet_provision: str | None = None
+    p2p_subnet_exec: str | None = None
+    p2p_gpu_preemptible: bool | None = None  # explicit in prod: never preemptible for demos
+    p2p_bundle_key_id: str | None = None  # KMS key that signs Proof Bundles
+    p2p_build_commit: str | None = None  # recorded in Proof Bundles
+    # Observability (A-28): OTLP/gRPC endpoints (https://; a plain http:// collector in dev only)
+    p2p_traces_endpoint: str | None = None  # https://write.tracing.<region>.nebius.cloud:443
+    p2p_metrics_endpoint: str | None = None  # an OpenTelemetry Collector (no direct Nebius OTLP)
+    observability_static_key: SecretStr | None = None  # static key, service `observability`
+    observability_project_id: str | None = None  # sent as `iam-container` to Nebius hosts
 
     def model_post_init(self, context: object, /) -> None:
         # Checked after validation and raised with a redacted input: an `after` validator

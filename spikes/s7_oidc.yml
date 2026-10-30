@@ -1,14 +1,15 @@
-# Spike S7: GitHub Actions OIDC -> Nebius federated credentials -> access token.
+# Spike S7: GitHub Actions OIDC -> Nebius federated credentials -> access token, through the deploy
+# job's own code (.github/scripts/nebius_token.py: the SDK's FederatedCredentialsBearer, subject =
+# service account id, actor = the GitHub JWT). PASS on 2026-10-21 (docs/spikes/RESULTS.md).
 # Inactive template. To run it (see spikes/README.md, S7): copy it to
 # .github/workflows/spike-s7-oidc.yml on a branch named spike/oidc, push, read the job log,
 # then tear everything down (branch AND federated credential). Repository variables (not secrets):
 #   NEBIUS_SPIKE_SA_ID            id of a THROWAWAY service account with no roles (required)
-#   NEBIUS_CLI_INSTALLER_SHA256   sha256 of https://storage.eu-north1.nebius.cloud/cli/install.sh,
+#   NEBIUS_CLI_INSTALLER_SHA256   sha256 of https://artifacts.nebius.cloud/cli/install.sh,
 #                                 computed by you beforehand (required)
-#   NEBIUS_OIDC_AUDIENCE          audience to request from GitHub (optional, default below)
-#   NEBIUS_TOKEN_EXCHANGE_URLS    space-separated RFC 8693 endpoints to try (optional)
-# Tokens are masked and never printed; only allowlisted response fields are shown.
-# The last step prints `VERDICT: PASS|FAIL|PARTIAL`.
+#   NEBIUS_OIDC_AUDIENCE          audience to request from GitHub (default sts.nebius.com, the only
+#                                 value the token service accepted)
+# Tokens are masked and never printed. The last step prints `VERDICT: PASS|FAIL|PARTIAL`.
 name: spike-s7-oidc
 
 on:
@@ -26,120 +27,63 @@ jobs:
       id-token: write
     timeout-minutes: 10
     env:
-      SA_ID: ${{ vars.NEBIUS_SPIKE_SA_ID }}
-      AUDIENCE: ${{ vars.NEBIUS_OIDC_AUDIENCE || 'https://github.com/atozzi-dev' }}
-      EXCHANGE_URLS: ${{ vars.NEBIUS_TOKEN_EXCHANGE_URLS || 'https://auth.eu.nebius.com:443/oauth2/token/exchange https://sts.nebius.com/oauth2/token/exchange' }}
+      NEBIUS_AUTH_MODE: oidc
+      NEBIUS_CI_SA_ID: ${{ vars.NEBIUS_SPIKE_SA_ID }}
+      NEBIUS_OIDC_AUDIENCE: ${{ vars.NEBIUS_OIDC_AUDIENCE || 'sts.nebius.com' }}
     steps:
-      # First, before any token exists on the runner: install the CLI from a checksum-pinned installer.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Install the Nebius CLI (checksum-pinned installer)
         env:
           INSTALLER_SHA256: ${{ vars.NEBIUS_CLI_INSTALLER_SHA256 }}
         run: |
+          set -euo pipefail
           test -n "$INSTALLER_SHA256" || { echo "set NEBIUS_CLI_INSTALLER_SHA256"; exit 1; }
-          curl -fsSL -o "$RUNNER_TEMP/install.sh" https://storage.eu-north1.nebius.cloud/cli/install.sh
+          curl -fsSL -o "$RUNNER_TEMP/install.sh" https://artifacts.nebius.cloud/cli/install.sh
           echo "$INSTALLER_SHA256  $RUNNER_TEMP/install.sh" | sha256sum -c -
           bash "$RUNNER_TEMP/install.sh"
           echo "$HOME/.nebius/bin" >> "$GITHUB_PATH"
 
-      - name: Request the GitHub OIDC token and print its non-secret claims
+      # Only the nebius SDK closure from uv.lock, as in deploy.yml.
+      - name: Install the Nebius SDK (locked wheels)
         run: |
-          python3 - <<'EOF'
-          import base64, json, os, urllib.parse, urllib.request
-          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=" + urllib.parse.quote(os.environ["AUDIENCE"])
-          req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
-          jwt = json.load(urllib.request.urlopen(req))["value"]
-          print(f"::add-mask::{jwt}")
-          path = os.path.join(os.environ["RUNNER_TEMP"], "gh.jwt")
-          with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
-              f.write(jwt)
-          claims = json.loads(base64.urlsafe_b64decode(jwt.split(".")[1] + "=="))
-          for k in ("iss", "sub", "aud", "ref", "repository", "exp"):
-              print(f"claim {k} = {claims.get(k)}")
-          EOF
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir \
+            --require-hashes --only-binary :all: --no-deps -r .github/deploy-requirements.txt
 
-      - name: Exchange the GitHub token for a Nebius access token (RFC 8693)
+      # The script prints the non-secret claims it presents (sub, aud, ref, environment).
+      - name: Exchange the GitHub token (deploy path)
         id: exchange
         run: |
-          python3 - <<'EOF'
-          import json, os, urllib.error, urllib.parse, urllib.request
-          SAFE_KEYS = ("token_type", "issued_token_type", "expires_in", "scope", "error", "error_description", "message", "code")
-          jwt = open(os.path.join(os.environ["RUNNER_TEMP"], "gh.jwt")).read()
-          base = {
-              "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-              "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
-              "subject_token": jwt,
-              "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-          }
-          variants = {"plain": {}, "audience=sa": {"audience": os.environ["SA_ID"]},
-                      "actor=sa": {"actor_token": os.environ["SA_ID"],
-                                   "actor_token_type": "urn:nebius:params:oauth:token-type:subject_identifier"}}
-
-          def mask_tokens(obj):
-              # Mask every string under a key that mentions "token" before anything is printed.
-              if isinstance(obj, dict):
-                  for k, v in obj.items():
-                      if "token" in k.lower() and isinstance(v, str) and v:
-                          print(f"::add-mask::{v}")
-                      mask_tokens(v)
-              elif isinstance(obj, list):
-                  for v in obj:
-                      mask_tokens(v)
-
-          method = ""
-          for url in os.environ["EXCHANGE_URLS"].split():
-              for label, extra in variants.items():
-                  data = urllib.parse.urlencode({**base, **extra}).encode()
-                  try:
-                      resp = urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=30)
-                      payload, status = json.load(resp), resp.status
-                  except urllib.error.HTTPError as err:
-                      raw = err.read().decode(errors="replace")
-                      try:
-                          payload = json.loads(raw)
-                      except ValueError:
-                          payload = {"message": raw[:300]}
-                      status = err.code
-                  except OSError as err:
-                      payload, status = {"message": str(err)}, 0
-                  if not isinstance(payload, dict):
-                      payload = {"message": str(type(payload))}
-                  mask_tokens(payload)
-                  safe = {k: payload[k] for k in SAFE_KEYS if k in payload}
-                  print(f"{url} [{label}] -> HTTP {status} keys={sorted(payload)} {json.dumps(safe)[:400]}")
-                  if status == 200 and payload.get("access_token"):
-                      path = os.path.join(os.environ["RUNNER_TEMP"], "nebius.token")
-                      with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
-                          f.write(payload["access_token"])
-                      method = f"{url} [{label}]"
-                      break
-              if method:
-                  break
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"method={method}\n")
-          EOF
+          if "$RUNNER_TEMP/venv/bin/python" -I .github/scripts/nebius_token.py \
+              --out "$RUNNER_TEMP/nebius.token"; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Use the token with the Nebius CLI
         id: whoami
-        if: steps.exchange.outputs.method != ''
+        if: steps.exchange.outputs.ok == '1'
         run: |
-          nebius version || true
-          nebius profile create --help | head -40 || true
-          if NEBIUS_IAM_TOKEN="$(cat "$RUNNER_TEMP/nebius.token")" nebius iam whoami; then
+          set -euo pipefail  # the if tests the CLI, not only jq
+          if NEBIUS_IAM_TOKEN="$(cat "$RUNNER_TEMP/nebius.token")" nebius iam whoami --format json \
+              | jq '{user: (.user_profile.id // null), service_account: (.service_account_profile.info.metadata.id // null)}'; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verdict
         if: always()
         env:
-          METHOD: ${{ steps.exchange.outputs.method }}
+          EXCHANGE: ${{ steps.exchange.outputs.ok }}
           WHOAMI: ${{ steps.whoami.outputs.ok }}
         run: |
-          rm -f "$RUNNER_TEMP/gh.jwt" "$RUNNER_TEMP/nebius.token"
-          echo "exchange method: ${METHOD:-none}"
-          if [ -n "$METHOD" ] && [ "$WHOAMI" = "1" ]; then
+          rm -f "$RUNNER_TEMP/nebius.token"
+          if [ "$EXCHANGE" = 1 ] && [ "$WHOAMI" = 1 ]; then
             echo "VERDICT: PASS"
-          elif [ -n "$METHOD" ]; then
-            echo "VERDICT: PARTIAL (token obtained, CLI whoami failed: check how the CLI takes a token)"
+          elif [ "$EXCHANGE" = 1 ]; then
+            echo "VERDICT: PARTIAL (token obtained, CLI whoami failed)"
           else
-            echo "VERDICT: FAIL (fallback: sa-ci-deployer access key in a GitHub Environment with approval)"
+            echo "VERDICT: FAIL (see the exchange step)"
           fi

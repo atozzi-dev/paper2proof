@@ -1,0 +1,10 @@
+metadata:
+  id: "CKV_P2P_5"
+  name: "Managed PostgreSQL is reachable only from its private network"
+  category: "NETWORKING"
+definition:
+  cond_type: "attribute"
+  resource_types: ["nebius_msp_postgresql_v1alpha1_cluster"]
+  attribute: "config.public_access"
+  operator: "not_equals"
+  value: true

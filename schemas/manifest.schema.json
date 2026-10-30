@@ -1,24 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://paper2proof.dev/schemas/manifest.schema.json",
-  "title": "p2p.manifest/v1 \u2014 exec job manifest (injected, <= 64 KiB)",
+  "title": "p2p.manifest/v2 \u2014 exec job manifest (injected, <= 64 KiB)",
   "type": "object",
   "additionalProperties": false,
-  "if": {
-    "properties": {
-      "claim_type": {
-        "const": "RELATIVE"
-      }
-    }
-  },
-  "then": {
-    "properties": {
-      "baseline_name": {
-        "type": "string",
-        "minLength": 1
-      }
-    }
-  },
   "required": [
     "schema",
     "run_id",
@@ -29,17 +14,14 @@
     "seeds",
     "budget_seconds",
     "paths",
-    "claim_ref",
-    "metric",
-    "higher_is_better",
-    "claim_type",
-    "baseline_name",
+    "claims",
     "scale",
-    "archives"
+    "archives",
+    "workspace_sha256"
   ],
   "properties": {
     "schema": {
-      "const": "p2p.manifest/v1"
+      "const": "p2p.manifest/v2"
     },
     "run_id": {
       "type": "string",
@@ -109,7 +91,8 @@
           "type": "string"
         },
         "workspace": {
-          "type": "string"
+          "type": "string",
+          "description": "the workspace archive (tar), extracted by the runner to local disk"
         },
         "cache": {
           "type": "string"
@@ -119,29 +102,94 @@
         }
       }
     },
-    "claim_ref": {
-      "type": "string"
-    },
-    "metric": {
-      "type": "string",
-      "maxLength": 64
-    },
-    "higher_is_better": {
-      "type": "boolean"
-    },
-    "claim_type": {
-      "enum": [
-        "ABSOLUTE",
-        "RELATIVE"
-      ]
-    },
-    "baseline_name": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "maxLength": 128,
-      "description": "Required (non-null) for RELATIVE claims"
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "description": "every claim the job measures; claim_ref is unique (checked by the model)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim_ref",
+          "claim_type",
+          "metric",
+          "higher_is_better",
+          "metric_key",
+          "baseline_name",
+          "baseline_key"
+        ],
+        "properties": {
+          "claim_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "claim_type": {
+            "enum": [
+              "ABSOLUTE",
+              "RELATIVE"
+            ]
+          },
+          "metric": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "the claim's metric name (tolerances in config/verdict.yaml)"
+          },
+          "higher_is_better": {
+            "type": "boolean"
+          },
+          "metric_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$",
+            "description": "the metrics.json key the experiment writes the claim's value under"
+          },
+          "baseline_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "baseline_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$",
+            "description": "the metrics.json key of the baseline's value (RELATIVE only)"
+          }
+        },
+        "if": {
+          "properties": {
+            "claim_type": {
+              "const": "RELATIVE"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "baseline_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "baseline_key": {
+              "type": "string"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "baseline_name": {
+              "type": "null"
+            },
+            "baseline_key": {
+              "type": "null"
+            }
+          }
+        }
+      }
     },
     "scale": {
       "type": "object",
@@ -218,6 +266,11 @@
           }
         }
       }
+    },
+    "workspace_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of paths.workspace (a plain tar of the Coder's workspace, the bytes of the last passing smoke run)"
     }
   }
 }

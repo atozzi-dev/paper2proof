@@ -1,54 +1,206 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://paper2proof.dev/schemas/results.schema.json",
-  "title": "p2p.results/v1 — written by the runner, validated by the control plane (max 256 KB)",
+  "title": "p2p.results/v2 \u2014 written by the runner, validated by the control plane (max 256 KB)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "run_id", "attempt", "claim_ref", "claim_type", "metric", "higher_is_better", "scale", "per_seed", "wall_clock_s", "gpu", "exit_reason"],
+  "required": [
+    "schema",
+    "run_id",
+    "attempt",
+    "scale",
+    "claims",
+    "wall_clock_s",
+    "gpu",
+    "exit_reason"
+  ],
   "properties": {
-    "schema": { "const": "p2p.results/v1" },
-    "run_id": { "type": "string", "pattern": "^r_[0-9a-z]{26}$" },
-    "attempt": { "type": "integer", "minimum": 1 },
-    "claim_ref": { "type": "string" },
-    "claim_type": { "enum": ["ABSOLUTE", "RELATIVE"] },
-    "metric": { "type": "string", "maxLength": 64 },
-    "higher_is_better": { "type": "boolean" },
+    "schema": {
+      "const": "p2p.results/v2"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^r_[0-9a-z]{26}$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
     "scale": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["full"],
+      "required": [
+        "full"
+      ],
       "properties": {
-        "full": { "type": "boolean" },
-        "fraction_of_data": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
-        "epochs": { "type": "integer", "minimum": 1 },
-        "paper_epochs": { "type": ["integer", "null"], "minimum": 1 }
+        "full": {
+          "type": "boolean"
+        },
+        "fraction_of_data": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "epochs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "paper_epochs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
       }
     },
-    "per_seed": {
-      "type": "array", "maxItems": 20,
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
       "items": {
-        "type": "object", "additionalProperties": false, "required": ["seed", "value"],
-        "properties": { "seed": { "type": "integer" }, "value": { "type": ["number", "null"], "description": "null only when ok is false" }, "ok": { "type": "boolean" } },
-        "if": { "properties": { "value": { "type": "null" } } },
-        "then": { "required": ["ok"], "properties": { "ok": { "const": false } } }
-      }
-    },
-    "baseline": {
-      "type": ["object", "null"], "additionalProperties": false,
-      "required": ["name", "per_seed"],
-      "properties": {
-        "name": { "type": "string", "maxLength": 128 },
-        "per_seed": {
-          "type": "array", "maxItems": 20,
-          "items": {
-            "type": "object", "additionalProperties": false, "required": ["seed", "value"],
-            "properties": { "seed": { "type": "integer" }, "value": { "type": ["number", "null"] } }
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim_ref",
+          "claim_type",
+          "metric",
+          "metric_key",
+          "higher_is_better",
+          "per_seed",
+          "baseline"
+        ],
+        "properties": {
+          "claim_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "claim_type": {
+            "enum": [
+              "ABSOLUTE",
+              "RELATIVE"
+            ]
+          },
+          "metric": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "metric_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$"
+          },
+          "higher_is_better": {
+            "type": "boolean"
+          },
+          "per_seed": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "seed",
+                "value"
+              ],
+              "properties": {
+                "seed": {
+                  "type": "integer"
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "null only when ok is false"
+                },
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "if": {
+                "properties": {
+                  "value": {
+                    "type": "null"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "ok"
+                ],
+                "properties": {
+                  "ok": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          "baseline": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "key",
+              "per_seed"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "key": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$"
+              },
+              "per_seed": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "seed",
+                    "value"
+                  ],
+                  "properties": {
+                    "seed": {
+                      "type": "integer"
+                    },
+                    "value": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
     },
-    "wall_clock_s": { "type": "number", "minimum": 0 },
-    "gpu": { "type": "string", "maxLength": 128 },
-    "exit_reason": { "enum": ["completed", "experiment_error", "budget_timeout", "contract_error"] }
+    "wall_clock_s": {
+      "type": "number",
+      "minimum": 0
+    },
+    "gpu": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "exit_reason": {
+      "enum": [
+        "completed",
+        "experiment_error",
+        "budget_timeout",
+        "contract_error"
+      ]
+    }
   }
 }

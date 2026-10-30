@@ -55,6 +55,23 @@ async def test_run_bucket_is_idempotent() -> None:
     assert backend.buckets == set()
 
 
+async def test_gateway_idle_check_reports_a_stop() -> None:
+    backend = FakeJobBackend()
+    await backend.ensure_gateway_up()
+    assert await backend.gateway_idle_check() is True
+    assert await backend.gateway_idle_check() is False
+
+
+async def test_list_run_buckets_reports_creation_time() -> None:
+    backend = FakeJobBackend()
+    name = await backend.ensure_run_bucket(RUN)
+    [(listed, created)] = await backend.list_run_buckets()
+    assert listed == name
+    assert created.tzinfo is not None
+    await backend.ensure_run_bucket(RUN)  # get-by-name: the creation time is kept
+    assert await backend.list_run_buckets() == [(name, created)]
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -115,3 +132,32 @@ def test_provisioner_may_write_the_cache() -> None:
         ],
     )
     assert provision.volumes[1].mode == "rw"
+
+
+@pytest.mark.parametrize("mode", ["ro", "rw"])
+def test_the_fetch_job_never_mounts_the_cache(mode: str) -> None:
+    # it handles the untrusted repository and datasets: no path to the shared overlay cache
+    with pytest.raises(ValidationError):
+        spec(
+            name=job_name(JobKind.FETCH, RUN, 1),
+            kind=JobKind.FETCH,
+            volumes=[
+                VolumeMount(source=bucket_name(RUN), mount_path="/mnt/run", mode="rw"),
+                VolumeMount(source="p2p-cache", mount_path="/mnt/cache", mode=mode),
+            ],
+        )
+
+
+def test_the_fetch_job_writes_its_own_bucket() -> None:
+    fetch = spec(
+        name=job_name(JobKind.FETCH, RUN, 1),
+        kind=JobKind.FETCH,
+        volumes=[VolumeMount(source=bucket_name(RUN), mount_path="/mnt/run", mode="rw")],
+    )
+    assert fetch.name == f"p2p-fetch-{RUN[2:]}-1"
+
+
+def test_the_cache_mounts_only_at_its_path() -> None:
+    # the provisioner tells the phases apart by /mnt/cache: it can't be moved elsewhere
+    with pytest.raises(ValidationError):
+        spec(volumes=[VolumeMount(source="p2p-cache", mount_path="/mnt/elsewhere", mode="ro")])

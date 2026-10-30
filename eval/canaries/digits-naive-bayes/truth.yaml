@@ -1,0 +1,21 @@
+# Ground truth for this canary (eval set A, A-29). `verdicts` is {claim_id: expected_verdict}
+# under config/verdict.yaml at full scale; `claims` are the paper's claims as Claim fields plus
+# `planted` (a false claim planted on purpose). Checked by tests/eval/test_canaries.py.
+# Planted: c1 is inflated by about 7 points (the protocol measures 0.846).
+arxiv_id: "0000.00003"
+title: "Naive Bayes Revisited: Competitive Digit Recognition Without Training Loops"
+seeds: [0, 1, 2]
+verdicts:
+  c1: NOT_REPRODUCED
+claims:
+  - id: c1
+    planted: true
+    text: Gaussian naive Bayes reaches a test accuracy of 0.920 ± 0.010 on digits.
+    claim_type: ABSOLUTE
+    metric: accuracy
+    higher_is_better: true
+    dataset: scikit-learn digits
+    setting: stratified 70/30 split per seed, raw pixels, default variance smoothing
+    reported_value: 0.920
+    reported_std: 0.010
+    source_ref: Table 1

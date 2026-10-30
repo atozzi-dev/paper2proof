@@ -15,6 +15,7 @@ from app.execution.package_policy import (
     levenshtein,
     load_policy_config,
     parse_repo_requirements,
+    typosquat_threshold,
 )
 from app.storage.store import Store
 
@@ -22,12 +23,19 @@ ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 20, tzinfo=UTC)
 
 
-def _pypi(name: str, *, releases: int = 20, first_days_ago: int = 2000) -> httpx.Response:
+def _pypi(
+    name: str, *, releases: int = 20, first_days_ago: int = 2000, kind: str = "bdist_wheel"
+) -> httpx.Response:
     first = NOW - timedelta(days=first_days_ago)
     data: dict[str, Any] = {
         "info": {"name": name},
         "releases": {
-            f"1.{i}": [{"upload_time_iso_8601": (first + timedelta(days=i)).isoformat()}]
+            f"1.{i}": [
+                {
+                    "upload_time_iso_8601": (first + timedelta(days=i)).isoformat(),
+                    "packagetype": kind,
+                }
+            ]
             for i in range(releases)
         },
     }
@@ -50,7 +58,9 @@ async def _decide(policy: PackagePolicy, *names: str, **ctx: Any) -> list[Reason
 
 
 def test_levenshtein() -> None:
-    assert levenshtein("requests", "reqeusts") == 2
+    assert levenshtein("requests", "reqeusts") == 1  # an adjacent swap is one edit (OSA)
+    assert levenshtein("tqdm", "tqmd") == 1
+    assert levenshtein("ab", "ba") == 1
     assert levenshtein("numpy", "numpy") == 0
     assert levenshtein("torch", "torchvision") == 6
 
@@ -89,6 +99,30 @@ async def test_typosquat_is_rejected(policy: PackagePolicy) -> None:
     assert await _decide(policy, "reqeusts") == [Reason.REJECT_TYPOSQUAT]
 
 
+def test_typosquat_threshold_scales_with_length() -> None:
+    assert typosquat_threshold("mlx", "jax") == 1  # 2-4 letters: one edit only
+    assert typosquat_threshold("torh", "torch") == 1  # the shorter name decides
+    assert typosquat_threshold("reqeusts", "requests") == 2
+    assert typosquat_threshold("numpyy", "numpy") == 2
+
+
+@respx.mock
+@pytest.mark.parametrize("name", ["mlx", "pot", "ogb", "tfds"])
+async def test_short_real_names_are_not_typosquats(policy: PackagePolicy, name: str) -> None:
+    """Two edits from jax/six/py/dgl/tqdm, but real packages: a fixed distance of 2 is noise."""
+    respx.get(f"https://pypi.org/pypi/{name}/json").mock(return_value=_pypi(name))
+    assert await _decide(policy, name) == [Reason.ACCEPT]
+
+
+@respx.mock
+@pytest.mark.parametrize("name", ["jaxx", "torh", "nmpy", "tqmd", "pfet", "ntlk"])
+async def test_one_edit_from_a_short_popular_name_is_a_typosquat(
+    policy: PackagePolicy, name: str
+) -> None:
+    respx.get(f"https://pypi.org/pypi/{name}/json").mock(return_value=_pypi(name))
+    assert await _decide(policy, name) == [Reason.REJECT_TYPOSQUAT]
+
+
 @respx.mock
 async def test_popular_and_established_packages_pass(policy: PackagePolicy) -> None:
     respx.get("https://pypi.org/pypi/einops/json").mock(return_value=_pypi("einops"))
@@ -117,6 +151,49 @@ async def test_young_packages_need_the_repo_requirements(policy: PackagePolicy) 
     assert await _decide(policy, "brandnewlib", repo_requirements={"brandnewlib"}) == [
         Reason.ACCEPT
     ]
+
+
+@respx.mock
+async def test_a_package_with_no_wheel_is_rejected(policy: PackagePolicy) -> None:
+    """lime (InterpretML, production 2026-10-30): sdists only. The provisioner never builds an
+    sdist, and its lock failed as a version conflict; refused here, the plan goes on without it."""
+    respx.get("https://pypi.org/pypi/lime/json").mock(return_value=_pypi("lime", kind="sdist"))
+    decision = await policy.validate([PackageReq(name="lime")], PolicyContext())
+    assert [d.reason for d in decision.decisions] == [Reason.REJECT_NO_WHEEL]
+    assert "sdist" in decision.decisions[0].detail
+    assert await _decide(policy, "lime", repo_requirements={"lime"}) == [Reason.REJECT_NO_WHEEL]
+
+
+@respx.mock
+async def test_metadata_cached_before_the_wheel_check_is_fetched_again(
+    policy: PackagePolicy, store: Store
+) -> None:
+    """An entry written without the wheel fact must not pass as having wheels."""
+    import hashlib
+
+    key = hashlib.sha256(b"lime").hexdigest()
+    await store.cache_put("pypi", key, {"info": {"releases": 20, "first_release": None}})
+    route = respx.get("https://pypi.org/pypi/lime/json").mock(
+        return_value=_pypi("lime", kind="sdist")
+    )
+    assert await _decide(policy, "lime") == [Reason.REJECT_NO_WHEEL]
+    assert route.called
+
+
+@respx.mock
+async def test_cached_answers_need_no_request(policy: PackagePolicy, store: Store) -> None:
+    import hashlib
+
+    for name, info in (
+        ("gone", None),
+        ("lime", {"releases": 20, "first_release": None, "has_wheel": False}),
+    ):
+        await store.cache_put("pypi", hashlib.sha256(name.encode()).hexdigest(), {"info": info})
+    assert await _decide(policy, "gone", "lime") == [
+        Reason.REJECT_NOT_FOUND,
+        Reason.REJECT_NO_WHEEL,
+    ]
+    assert not respx.calls  # an unmocked request would have failed
 
 
 @respx.mock

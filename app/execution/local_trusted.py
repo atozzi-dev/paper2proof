@@ -1,7 +1,8 @@
 """LocalTrustedExecutor: smoke runs in local docker, for development only.
 
 The single exception to invariant 1: it refuses to exist unless `P2P_ENV=dev`, and refuses to
-prepare a run unless the paper's sha256 is in `config/canary_allowlist.yaml` (papers we wrote).
+prepare a run unless `config/canary_allowlist.yaml` binds the paper's sha256 to the arXiv ID
+the run was submitted as (papers we wrote).
 Even then the container has no network, a read-only root, no capabilities and a non-root user.
 """
 
@@ -11,8 +12,10 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import yaml
 
@@ -29,18 +32,74 @@ from app.execution.smoke import (
 )
 
 DockerRunner = Callable[[Sequence[str], float], Awaitable[tuple[int, str, str]]]
-PaperHash = Callable[[str], Awaitable[str | None]]
+
+
+@dataclass(frozen=True)
+class PaperRef:
+    """What a run's paper is: the arXiv ID it was submitted as and the sha256 INGESTING hashed."""
+
+    arxiv_id: str
+    sha256: str
+
+
+PaperLookup = Callable[[str], Awaitable[PaperRef | None]]
+
+
+class _RunRecord(Protocol):
+    @property
+    def arxiv_id(self) -> str: ...
+
+    @property
+    def paper_sha256(self) -> str | None: ...
+
+
+class _Runs(Protocol):
+    async def get_run(self, run_id: str) -> _RunRecord | None: ...
+
+
+def store_paper_lookup(runs: _Runs) -> PaperLookup:
+    """The run's paper as submitted (its arXiv ID) and as ingested (the sha256 INGESTING
+    computed); None until INGESTING has hashed it. The one lookup both local executors use."""
+
+    async def lookup(run_id: str) -> PaperRef | None:
+        run = await runs.get_run(run_id)
+        if run is None or run.paper_sha256 is None:
+            return None
+        return PaperRef(arxiv_id=run.arxiv_id, sha256=run.paper_sha256)
+
+    return lookup
+
+
+def is_canary(canaries: Mapping[str, str], paper: PaperRef | None) -> bool:
+    """A canary only under the arXiv ID its hash is bound to: the hash alone is not enough."""
+    return paper is not None and canaries.get(paper.sha256.lower()) == paper.arxiv_id
+
+
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CANARY_ID = re.compile(r"^0000\.\d{5}$", re.ASCII)  # month 00: never a real arXiv paper
 
 
 class LocalTrustedRefused(Exception):
     """Not dev, or not a canary paper: arbitrary paper code never runs on this machine."""
 
 
-def load_canaries(path: Path) -> frozenset[str]:
+def load_canaries(path: Path) -> dict[str, str]:
+    """{e-print sha256: canary arXiv ID}. A file of another shape is an error; an entry
+    without a canary ID (0000.NNNNN) and a sha256, both plain strings, binds nothing."""
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    papers = data.get("papers") or []
-    return frozenset(str(p).lower() for p in papers if _SHA256.fullmatch(str(p).lower()))
+    papers = data.get("papers") if isinstance(data, dict) else None
+    if not isinstance(papers, list):
+        raise ValueError(f"{path}: the canary allowlist must be a mapping with a `papers` list")
+    canaries: dict[str, str] = {}
+    for entry in papers:
+        if not isinstance(entry, dict):
+            continue
+        digest, arxiv_id = entry.get("sha256"), entry.get("arxiv_id")
+        if not (isinstance(digest, str) and isinstance(arxiv_id, str)):
+            continue
+        if _SHA256.fullmatch(digest.lower()) and _CANARY_ID.fullmatch(arxiv_id):
+            canaries[digest.lower()] = arxiv_id
+    return canaries
 
 
 async def _tail(stream: asyncio.StreamReader | None, cap: int = 64 * 1024) -> bytes:
@@ -62,12 +121,15 @@ async def docker_cli(argv: Sequence[str], timeout_s: float) -> tuple[int, str, s
         )
         await proc.wait()
     except TimeoutError:
-        name = next(a.removeprefix("--name=") for a in argv if a.startswith("--name="))
-        killer = await asyncio.create_subprocess_exec("docker", "kill", name)
-        await killer.wait()
-        proc.kill()
-        await proc.wait()
-        return -1, "", f"smoke run timed out after {timeout_s:g} s"
+        name = next((a.removeprefix("--name=") for a in argv if a.startswith("--name=")), None)
+        try:
+            if name is not None:  # a container run: stop the container, not only the CLI
+                killer = await asyncio.create_subprocess_exec("docker", "kill", name)
+                await killer.wait()
+        finally:
+            proc.kill()
+            await proc.wait()
+        return -1, "", f"docker timed out after {timeout_s:g} s"
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
 
@@ -95,8 +157,8 @@ class LocalTrustedExecutor:
         self,
         *,
         env: str,
-        canaries: frozenset[str],
-        paper_sha256: PaperHash,
+        canaries: Mapping[str, str],
+        paper: PaperLookup,
         image: str,
         work_root: Path,
         docker: DockerRunner = docker_cli,
@@ -106,7 +168,7 @@ class LocalTrustedExecutor:
         if not re.fullmatch(DIGEST_REF, image):
             raise ValueError("the smoke image must be referenced by digest")
         self._canaries = canaries
-        self._paper_sha256 = paper_sha256
+        self._paper = paper
         self._image = image
         self._root = work_root
         self._docker = docker
@@ -114,8 +176,7 @@ class LocalTrustedExecutor:
         self._approved: set[str] = set()  # run ids whose paper passed the canary check
 
     async def prepare(self, run_id: str, files: dict[str, bytes]) -> str:
-        digest = await self._paper_sha256(run_id)
-        if digest is None or digest.lower() not in self._canaries:
+        if not is_canary(self._canaries, await self._paper(run_id)):
             raise LocalTrustedRefused("not a canary paper: its code never runs locally")
         base = self._root / run_slug(run_id)
         shutil.rmtree(base / "base", ignore_errors=True)

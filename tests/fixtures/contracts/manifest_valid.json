@@ -1,5 +1,5 @@
 {
-  "schema": "p2p.manifest/v1",
+  "schema": "p2p.manifest/v2",
   "run_id": "r_01jb7z00000000000000000000",
   "attempt": 1,
   "image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -18,15 +18,30 @@
     "overlay": "/mnt/run/staging/overlay.tar.zst",
     "repo": null,
     "data_dir": "/mnt/run/staging/data",
-    "workspace": "/mnt/run/staging/workspace",
+    "workspace": "/mnt/run/staging/workspace.tar",
     "cache": "/mnt/cache",
     "results": "/mnt/run/results/1"
   },
-  "claim_ref": "c1",
-  "metric": "top1_accuracy",
-  "higher_is_better": true,
-  "claim_type": "RELATIVE",
-  "baseline_name": "resnet18",
+  "claims": [
+    {
+      "claim_ref": "c1",
+      "claim_type": "RELATIVE",
+      "metric": "top1_accuracy",
+      "higher_is_better": true,
+      "metric_key": "method/top1_accuracy",
+      "baseline_name": "resnet18",
+      "baseline_key": "resnet18/top1_accuracy"
+    },
+    {
+      "claim_ref": "c2",
+      "claim_type": "ABSOLUTE",
+      "metric": "top1_accuracy",
+      "higher_is_better": true,
+      "metric_key": "method/top1_accuracy",
+      "baseline_name": null,
+      "baseline_key": null
+    }
+  ],
   "scale": {
     "full": false,
     "fraction_of_data": 0.1,
@@ -42,5 +57,6 @@
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       }
     ]
-  }
+  },
+  "workspace_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 }

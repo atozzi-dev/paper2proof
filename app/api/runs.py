@@ -6,10 +6,11 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.types import Receive, Scope, Send
 
+from app.api.conditions import RunConditions, run_conditions
 from app.api.deps import (
     Session,
     api_rate_limit,
@@ -20,11 +21,13 @@ from app.api.deps import (
     visible_run,
 )
 from app.api.sse import event_stream, replay_stream
+from app.bundle.store import PRESIGN_TTL_S, download_name
+from app.domain.events import EventEnvelope
 from app.domain.ids import new_run_id
 from app.domain.models import Claim, ErrorCode, RunStatus, StepName, Verdict
 
 router = APIRouter(dependencies=[Depends(api_rate_limit)])
-ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")  # invariant 11: arXiv IDs only
+ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$", re.ASCII)  # invariant 11; \d is ASCII only
 DRAIN_RETRY_AFTER_S = 120
 LAST_EVENT_ID = re.compile(r"[0-9]{1,18}")
 
@@ -72,6 +75,13 @@ class RunView(BaseModel):
     steps: list[StepView]
     claims: list[ClaimView]
     verdicts: list[VerdictView]
+    conditions: RunConditions | None  # what the verdicts were reached under (invariant 10)
+
+
+class EventsPage(BaseModel):
+    """Polling fallback; typed so the event payloads reach the OpenAPI schema (web types)."""
+
+    events: list[EventEnvelope]
 
 
 @router.post("/api/runs", status_code=202)
@@ -104,7 +114,8 @@ async def create_run(
 @router.get("/api/runs/{run_id}")
 async def get_run(run_id: str, request: Request) -> RunView:
     run = await visible_run(request, run_id)
-    store = get_state(request).store
+    state = get_state(request)
+    store = state.store
     return RunView(
         id=run.id,
         arxiv_id=run.arxiv_id,
@@ -117,6 +128,7 @@ async def get_run(run_id: str, request: Request) -> RunView:
         steps=[StepView.model_validate(st.model_dump()) for st in await store.get_steps(run_id)],
         claims=[ClaimView(claim=c, selected=s) for c, s in await store.get_claims(run_id)],
         verdicts=[VerdictView(claim_id=c, verdict=v) for c, v in await store.list_verdicts(run_id)],
+        conditions=await run_conditions(store, state.artifacts, run_id),
     )
 
 
@@ -191,10 +203,9 @@ async def events(
 @router.get("/api/runs/{run_id}/events.json")
 async def events_json(
     run_id: str, request: Request, after: Annotated[int, Query(ge=0)] = 0
-) -> dict[str, list[dict[str, object]]]:
+) -> EventsPage:
     await visible_run(request, run_id)
-    stored = await get_state(request).store.events_after(run_id, after)
-    return {"events": [e.model_dump(mode="json") for e in stored]}
+    return EventsPage(events=await get_state(request).store.events_after(run_id, after))
 
 
 async def _decide(request: Request, run_id: str, decision: str) -> Response:
@@ -224,5 +235,25 @@ async def cancel(run_id: str, request: Request) -> Response:
 
 @router.get("/api/runs/{run_id}/bundle")
 async def bundle(run_id: str, request: Request) -> Response:
-    await visible_run(request, run_id)
-    raise HTTPException(404, "no bundle for this run yet")  # presigned redirect lands in A-26
+    """A short presigned URL when the store can make one; the archive itself from the local
+    dev store. 404 until the bundle is built (docs/specs/proof-bundle.md)."""
+    run = await visible_run(request, run_id)
+    bundles = get_state(request).bundles
+    if bundles is None:
+        raise HTTPException(404, "no bundle for this run yet")
+    url = await bundles.presigned_url(run.id, PRESIGN_TTL_S)
+    if url is not None:
+        if not await bundles.exists(run.id):  # a presigned URL never checks existence
+            raise HTTPException(404, "no bundle for this run yet")
+        return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
+    data = await bundles.get(run.id)
+    if data is None:
+        raise HTTPException(404, "no bundle for this run yet")
+    return Response(
+        data,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name(run.id)}"',
+            "Cache-Control": "no-store",
+        },
+    )

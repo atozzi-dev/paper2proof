@@ -3,7 +3,7 @@ pydantic validation, one Utility repair, one retry on the original role, else SC
 
 import json
 import re
-from typing import Literal, Protocol, TypeVar
+from typing import Literal, Protocol, TypedDict, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -81,6 +81,39 @@ def _describe(err: ValidationError) -> str:
     return "; ".join(parts)
 
 
+class StructuredArgs(TypedDict):
+    tools: list[ToolDef] | None
+    tool_choice: ToolChoice | None
+    response_format: dict[str, object] | None
+
+
+def request_args(schema: type[BaseModel], mode: Literal["json_schema", "tool"]) -> StructuredArgs:
+    """What a request carries to get `schema` back: a forced `emit_result` tool, or a
+    json_schema response format. Shared with the Batch API (app/models/batch.py)."""
+    json_schema = schema.model_json_schema()
+    if mode == "tool":
+        tool = ToolDef(name=EMIT, description="Return the result.", parameters=json_schema)
+        choice: ToolChoice = {"type": "function", "function": {"name": EMIT}}
+        return StructuredArgs(tools=[tool], tool_choice=choice, response_format=None)
+    response_format: dict[str, object] = {
+        "type": "json_schema",
+        "json_schema": {"name": schema.__name__, "schema": json_schema},
+    }
+    return StructuredArgs(tools=None, tool_choice=None, response_format=response_format)
+
+
+def parse_structured[M: BaseModel](
+    completion: Completion, schema: type[M], mode: Literal["json_schema", "tool"]
+) -> M:
+    """One parse of a completion, no repair (the Batch API has no second turn): SCHEMA_ERROR."""
+    try:
+        return _parse(completion, schema, mode)
+    except _Unparseable:
+        raise P2PError(
+            ErrorCode.SCHEMA_ERROR, f"model output did not match {schema.__name__}"
+        ) from None
+
+
 async def _ask(
     client: _Completer,
     role: Role,
@@ -91,25 +124,8 @@ async def _ask(
     step: str | None,
     prompt: str | None,
 ) -> Completion:
-    json_schema = schema.model_json_schema()
-    if mode == "tool":
-        tool = ToolDef(name=EMIT, description="Return the result.", parameters=json_schema)
-        choice: ToolChoice = {"type": "function", "function": {"name": EMIT}}
-        return await client.complete(
-            role,
-            messages,
-            tools=[tool],
-            tool_choice=choice,
-            run_id=run_id,
-            step=step,
-            prompt=prompt,
-        )
-    response_format: dict[str, object] = {
-        "type": "json_schema",
-        "json_schema": {"name": schema.__name__, "schema": json_schema},
-    }
     return await client.complete(
-        role, messages, response_format=response_format, run_id=run_id, step=step, prompt=prompt
+        role, messages, **request_args(schema, mode), run_id=run_id, step=step, prompt=prompt
     )
 
 

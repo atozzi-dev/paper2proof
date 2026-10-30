@@ -1,0 +1,56 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Naive Bayes Revisited: Competitive Digit Recognition Without Training Loops}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Gaussian naive Bayes fits in a single pass over the data and has no hyperparameters to tune. We
+show that on the scikit-learn digits dataset it reaches a test accuracy of 0.920, close to
+iteratively trained models, at a fraction of their cost.
+\end{abstract}
+
+\section{Introduction}
+Closed-form classifiers remain attractive when compute is scarce. We evaluate Gaussian naive
+Bayes on handwritten digits under a fixed, fully specified protocol.
+
+\section{Method}
+Gaussian naive Bayes with one diagonal Gaussian per class, fitted by maximum likelihood on the
+raw pixel values, with the default variance smoothing of $10^{-9}$ times the largest feature
+variance. No feature scaling, no feature selection.
+
+\section{Experimental setup}
+\paragraph{Data.} The digits dataset shipped with scikit-learn (\texttt{load\_digits}): 1797
+images of $8 \times 8$ pixels, 10 classes.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$, a stratified split with 30\,\% test
+samples (\texttt{train\_test\_split(test\_size=0.3, random\_state=s, stratify=y)}).
+\paragraph{Metric.} Test accuracy, mean and sample standard deviation over the three seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only.
+
+\section{Results}
+As shown in Table~\ref{tab:digits-nb}, Gaussian naive Bayes reaches a test accuracy of
+0.920 $\pm$ 0.010 on digits.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on digits (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:digits-nb}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+Gaussian naive Bayes & $0.920 \pm 0.010$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+Naive Bayes is a competitive, training-free classifier for small digit recognition tasks.
+
+\end{document}

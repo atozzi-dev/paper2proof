@@ -1,0 +1,115 @@
+{
+  "by_kind": {
+    "INCONCLUSIVE": 6
+  },
+  "by_reason": {
+    "HIGH_VARIANCE": 2,
+    "IMPLAUSIBLE_GAP": 2,
+    "RUNTIME_ERROR": 2
+  },
+  "cases": [
+    {
+      "arxiv_id": "1909.09223",
+      "run": {
+        "cost_usd": 0.194807,
+        "duration_s": 227.97048,
+        "error": null,
+        "error_code": "SMOKE_EXHAUSTED",
+        "run_id": "r_01m661j6m0fvqdcq1kpnw22p35",
+        "status": "FAILED"
+      },
+      "verdicts": []
+    },
+    {
+      "arxiv_id": "2001.05016",
+      "run": {
+        "cost_usd": 0.167419,
+        "duration_s": 280.633519,
+        "error": null,
+        "error_code": "SMOKE_EXHAUSTED",
+        "run_id": "r_01m661shj1aekng4neqss8cgnk",
+        "status": "FAILED"
+      },
+      "verdicts": []
+    },
+    {
+      "arxiv_id": "2404.19756",
+      "run": {
+        "cost_usd": 0.18061,
+        "duration_s": 296.616932,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m66228ep1rar28bwct4sms8h",
+        "status": "COMPLETED"
+      },
+      "verdicts": [
+        {
+          "claim_id": "c1",
+          "kind": "INCONCLUSIVE",
+          "reason": "IMPLAUSIBLE_GAP"
+        },
+        {
+          "claim_id": "c2",
+          "kind": "INCONCLUSIVE",
+          "reason": "IMPLAUSIBLE_GAP"
+        },
+        {
+          "claim_id": "c3",
+          "kind": "INCONCLUSIVE",
+          "reason": "HIGH_VARIANCE"
+        }
+      ]
+    },
+    {
+      "arxiv_id": "1706.09516",
+      "run": {
+        "cost_usd": 0.121106,
+        "duration_s": 311.905825,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m662be3hgcet41n8f3vm6bqh",
+        "status": "COMPLETED"
+      },
+      "verdicts": [
+        {
+          "claim_id": "c1",
+          "kind": "INCONCLUSIVE",
+          "reason": "HIGH_VARIANCE"
+        }
+      ]
+    },
+    {
+      "arxiv_id": "1503.02531",
+      "run": {
+        "cost_usd": 0.073564,
+        "duration_s": 161.446256,
+        "error": null,
+        "error_code": null,
+        "run_id": "r_01m662n2f8hm3hp3qqkw1gkp9a",
+        "status": "COMPLETED"
+      },
+      "verdicts": [
+        {
+          "claim_id": "c1",
+          "kind": "INCONCLUSIVE",
+          "reason": "RUNTIME_ERROR"
+        },
+        {
+          "claim_id": "c2",
+          "kind": "INCONCLUSIVE",
+          "reason": "RUNTIME_ERROR"
+        }
+      ]
+    }
+  ],
+  "cost": {
+    "median_duration_s": 280.633519,
+    "median_usd_per_claim": 0.06020333333333333,
+    "runs_without_cost": 0,
+    "total_usd": 0.737506
+  },
+  "failed_runs": 2,
+  "generated_at": "2026-10-30T09:38:45.975810Z",
+  "inconclusive_rate": 1.0,
+  "kind": "set_b"
+}

@@ -1,4 +1,4 @@
-"""Table-driven cases from docs/specs/verdict-engine.md (cases 1-13) plus edge cases."""
+"""Table-driven cases from docs/specs/verdict-engine.md (cases 1-18) plus edge cases."""
 
 import hashlib
 import math
@@ -16,7 +16,7 @@ from app.domain.models import (
     VerdictKind,
 )
 from app.verdict.config import config_sha256, load_verdict_config
-from app.verdict.engine import decide
+from app.verdict.engine import MAX_METRIC_ABS, decide
 
 ROOT = Path(__file__).resolve().parents[2]
 CFG = VerdictConfig()
@@ -142,11 +142,41 @@ CASES = [
         VerdictKind.INCONCLUSIVE,
         ReasonCode.RUNTIME_ERROR,
     ),
+    # 14 a percent claim measured as a fraction: 100 times off
+    (
+        absolute(94.1),
+        m(Scale.FULL, [0.940, 0.941, 0.939]),
+        CFG,
+        VerdictKind.INCONCLUSIVE,
+        ReasonCode.IMPLAUSIBLE_GAP,
+    ),
+    # 15 mean 0.277 with a wide CI: the gap, not the variance
+    (
+        absolute(0.9),
+        m(Scale.FULL, [0.01, 0.02, 0.8]),
+        CFG,
+        VerdictKind.INCONCLUSIVE,
+        ReasonCode.IMPLAUSIBLE_GAP,
+    ),
+    # 16 a falsified claim, 0.90 of the paper's value
+    (absolute(0.990), m(Scale.FULL, [0.894, 0.895, 0.896]), CFG, VerdictKind.NOT_REPRODUCED, None),
+    # 17 exactly k = 2 times off: inside the band
+    (
+        absolute(2.0, metric="score"),
+        m(Scale.FULL, [1.0, 1.0, 1.0]),
+        CFG,
+        VerdictKind.NOT_REPRODUCED,
+        None,
+    ),
+    # 18 opposite signs: no ratio
+    (absolute(0.5), m(Scale.FULL, [-2.0, -2.1, -1.9]), CFG, VerdictKind.NOT_REPRODUCED, None),
 ]
 
 
 @pytest.mark.parametrize(
-    ("claim", "meas", "cfg", "kind", "reason"), CASES, ids=[f"case{i}" for i in range(1, 14)]
+    ("claim", "meas", "cfg", "kind", "reason"),
+    CASES,
+    ids=[f"case{i}" for i in range(1, len(CASES) + 1)],
 )
 def test_spec_cases(
     claim: Claim,
@@ -178,6 +208,15 @@ def test_relative_positive_but_below_rho_delta_is_high_variance() -> None:
 def test_infinite_baseline_is_a_runtime_error() -> None:
     meas = m(Scale.FULL, METHOD, [0.9, math.inf, 0.9])
     assert decide(relative(0.017), meas, CFG).reason is ReasonCode.RUNTIME_ERROR
+
+
+def test_values_too_large_to_be_a_metric_are_a_runtime_error() -> None:
+    """Finite but absurd: 1e200 would overflow the variance; no real metric gets near it."""
+    meas = m(Scale.FULL, [1e200, -1e200, 1e200])
+    assert decide(absolute(0.941), meas, CFG).reason is ReasonCode.RUNTIME_ERROR
+    assert decide(absolute(0.941), m(Scale.FULL, [MAX_METRIC_ABS] * 3), CFG).reason is not (
+        ReasonCode.RUNTIME_ERROR
+    )
 
 
 def test_numbers_are_reported_in_the_original_direction() -> None:
@@ -216,9 +255,157 @@ def test_reported_std_widens_the_absolute_tolerance() -> None:
     assert verdict.tolerance["w"] == pytest.approx(0.1)
 
 
+NO_GAP_RULE = VerdictConfig(implausible_ratio=None)  # what the verdict was before the rule
+PLANTED = [  # the canary set's falsified claims (production eval, 2026-10-29): wrong, not broken
+    (absolute(0.990), [0.894, 0.895, 0.896]),
+    (absolute(0.920), [0.845, 0.846, 0.847]),
+    (absolute(1.300, metric="rmse", hib=False), [1.428, 1.429, 1.430]),
+    (absolute(0.900), [0.79, 0.80, 0.81]),
+    (absolute(0.910), [0.82, 0.83, 0.84]),
+]
+
+
+@pytest.mark.parametrize(("claim", "values"), PLANTED)
+def test_a_claim_off_by_tens_of_percent_is_still_not_reproduced(
+    claim: Claim, values: list[float]
+) -> None:
+    assert decide(claim, m(Scale.FULL, values), CFG).kind is VerdictKind.NOT_REPRODUCED
+
+
+@pytest.mark.parametrize(
+    ("claim", "values"),
+    [
+        (absolute(94.1), [0.940, 0.941, 0.939]),  # percent claim, fraction measured: ratio 0.01
+        (absolute(94.1), [10.0, 10.0, 10.0]),  # a diverged run (chance on 10 classes), scaled
+        (absolute(0.30, metric="loss", hib=False), [1.2, 1.25, 1.3]),  # 4 times the paper's loss
+        (absolute(-0.5, metric="log_lik"), [-3.0, -3.1, -2.9]),  # both negative, 6 times off
+    ],
+)
+def test_a_measured_value_more_than_k_times_off_is_an_implausible_gap(
+    claim: Claim, values: list[float]
+) -> None:
+    """Broken training or a unit mismatch, not evidence against the paper: never an accusation."""
+    assert decide(claim, m(Scale.FULL, values), NO_GAP_RULE).kind is VerdictKind.NOT_REPRODUCED
+    verdict = decide(claim, m(Scale.FULL, values), CFG)
+    assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
+    assert verdict.mean == pytest.approx(sum(values) / 3)  # the numbers are still reported
+    assert verdict.ci_low is not None and verdict.ci_high is not None
+    assert verdict.tolerance["v"] == claim.reported_value
+
+
+def test_a_wide_interval_far_off_the_paper_names_the_gap_not_the_variance() -> None:
+    claim, values = absolute(0.9), [0.01, 0.02, 0.8]  # mean 0.277: more than twice lower
+    assert decide(claim, m(Scale.FULL, values), NO_GAP_RULE).reason is ReasonCode.HIGH_VARIANCE
+    assert decide(claim, m(Scale.FULL, values), CFG).reason is ReasonCode.IMPLAUSIBLE_GAP
+
+
+@pytest.mark.parametrize(
+    ("claim", "values"),
+    [
+        (absolute(0.5), [-2.0, -2.1, -1.9]),  # opposite signs: no ratio to speak of
+        (absolute(0.9), [0.0, 0.0, 0.0]),  # a zero mean
+        (absolute(0.0), [-1.0, -1.1, -0.9]),  # a zero paper value
+        (absolute(2.0, metric="score"), [1.0, 1.0, 1.0]),  # exactly k times: inside the band
+    ],
+)
+def test_no_gap_rule_without_a_same_sign_ratio_beyond_k(claim: Claim, values: list[float]) -> None:
+    assert decide(claim, m(Scale.FULL, values), CFG).kind is VerdictKind.NOT_REPRODUCED
+
+
+def test_the_gap_rule_leaves_other_outcomes_alone() -> None:
+    """REPRODUCED (far better than the paper: P3) and reduced scale keep their verdict."""
+    assert decide(absolute(0.25), m(Scale.FULL, [0.9, 0.91, 0.89]), CFG).kind is (
+        VerdictKind.REPRODUCED
+    )
+    reduced = decide(absolute(94.1), m(Scale.REDUCED, [0.940, 0.941, 0.939]), CFG)
+    assert reduced.reason is ReasonCode.REDUCED_SCALE_ABSOLUTE
+    relative_reversal = decide(relative(0.017), m(Scale.FULL, [0.5, 0.51, 0.49], BASE), CFG)
+    assert relative_reversal.kind is VerdictKind.NOT_REPRODUCED  # RELATIVE: no ratio rule
+
+
+def relative_with_value(
+    v: float, delta: float, *, metric: str = "rmse", hib: bool = False
+) -> Claim:
+    return relative(delta).model_copy(
+        update={"reported_value": v, "metric": metric, "higher_is_better": hib}
+    )
+
+
+# production, 2026-10-30: KAN against an MLP on a stand-in function, not the Jacobian elliptic
+# functions the claim is about: the direction held, the method's own RMSE was 36 times the paper's
+KAN = relative_with_value(0.000133, -0.000515)
+KAN_RMSE = [0.005386560185047304, 0.004936504655575021, 0.004095082553245369]
+MLP_RMSE = [0.18271744410400606, 0.1246651639379085, 0.13689873141162687]
+
+
+def test_a_relative_claim_whose_method_value_is_k_times_off_is_an_implausible_gap() -> None:
+    """The direction alone cannot reproduce a claim on an experiment that is not the paper's."""
+    measured = m(Scale.FULL, KAN_RMSE, MLP_RMSE)
+    assert decide(KAN, measured, NO_GAP_RULE).kind is VerdictKind.REPRODUCED
+    verdict = decide(KAN, measured, CFG)
+    assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
+    diffs = [x - b for x, b in zip(KAN_RMSE, MLP_RMSE, strict=True)]
+    assert verdict.mean == pytest.approx(sum(diffs) / 3)  # still the difference
+    assert verdict.tolerance["method_mean"] == pytest.approx(sum(KAN_RMSE) / 3)
+    assert verdict.tolerance["rho"] == CFG.rho
+
+
+def test_a_relative_gap_also_replaces_an_accusation() -> None:
+    reversed_far_off = m(Scale.FULL, MLP_RMSE, KAN_RMSE)  # the method worse, 1000 times off
+    assert decide(KAN, reversed_far_off, NO_GAP_RULE).kind is VerdictKind.NOT_REPRODUCED
+    assert decide(KAN, reversed_far_off, CFG).reason is ReasonCode.IMPLAUSIBLE_GAP
+
+
+@pytest.mark.parametrize(
+    ("claim", "method", "base", "kind"),
+    [  # the method's value close to the paper's: the rule never fires
+        (relative_with_value(0.972, 0.126, metric="accuracy", hib=True), [0.97, 0.971, 0.969],
+         [0.845, 0.846, 0.844], VerdictKind.REPRODUCED),
+        (relative_with_value(0.966, 0.02, metric="accuracy", hib=True), [0.94, 0.941, 0.939],
+         [0.967, 0.968, 0.966], VerdictKind.NOT_REPRODUCED),
+        # 94.1% against a fraction: a unit mismatch (100 times), not another experiment
+        (relative_with_value(94.1, 1.7, metric="accuracy", hib=True), [0.90, 0.901, 0.899],
+         [0.93, 0.931, 0.929], VerdictKind.NOT_REPRODUCED),
+    ],
+)  # fmt: skip
+def test_no_relative_gap_near_the_papers_value_or_off_by_a_percent_factor(
+    claim: Claim, method: list[float], base: list[float], kind: VerdictKind
+) -> None:
+    assert decide(claim, m(Scale.FULL, method, base), CFG).kind is kind
+
+
+def test_no_relative_gap_without_a_method_value_or_at_reduced_scale() -> None:
+    """A reduced run is expected to land elsewhere; without the paper's value there is no ratio."""
+    reduced = decide(KAN, m(Scale.REDUCED, KAN_RMSE, MLP_RMSE), CFG)
+    assert reduced.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    no_value = KAN.model_copy(update={"reported_value": None})
+    assert decide(no_value, m(Scale.FULL, KAN_RMSE, MLP_RMSE), CFG).kind is VerdictKind.REPRODUCED
+    assert decide(KAN, m(Scale.FULL, KAN_RMSE, MLP_RMSE), NO_GAP_RULE).reason is None
+
+
+def test_the_implausible_ratio_is_configured() -> None:
+    assert VerdictConfig().implausible_ratio == 2.0  # configs written before the rule still load
+    assert decide(absolute(0.9), m(Scale.FULL, [0.5, 0.5, 0.5]), CFG).kind is (
+        VerdictKind.NOT_REPRODUCED
+    )
+    narrow = VerdictConfig(implausible_ratio=1.5)  # 0.9 / 0.5 = 1.8 is outside [1/1.5, 1.5]
+    assert decide(absolute(0.9), m(Scale.FULL, [0.5, 0.5, 0.5]), narrow).reason is (
+        ReasonCode.IMPLAUSIBLE_GAP
+    )
+    # production, 2026-10-29: NMU's 98% success measured at 34% by a reimplementation trained far
+    # less than the paper (ratio 2.9) was an accusation under k = 3
+    assert decide(
+        absolute(98.0, metric="success_rate"), m(Scale.FULL, [30.0, 34.0, 38.0]), CFG
+    ).reason is (ReasonCode.IMPLAUSIBLE_GAP)
+    for bad in (1.0, 0.5, -3.0):
+        with pytest.raises(ValueError, match="implausible_ratio"):
+            VerdictConfig(implausible_ratio=bad)
+
+
 def test_load_verdict_config_reads_the_repo_file() -> None:
     cfg = load_verdict_config()
     assert cfg.tol_abs["top1_accuracy"] == 0.005
+    assert cfg.implausible_ratio == 2.0
     assert cfg == load_verdict_config(ROOT / "config" / "verdict.yaml")
 
 
@@ -226,3 +413,37 @@ def test_config_sha256_hashes_the_file_bytes() -> None:
     expected = hashlib.sha256((ROOT / "config" / "verdict.yaml").read_bytes()).hexdigest()
     assert config_sha256() == expected
     assert config_sha256(ROOT / "config" / "verdict.yaml") == expected
+
+
+@pytest.mark.parametrize("ratio", [math.inf, -math.inf, math.nan, 1.0, 0.5])
+def test_the_gap_ratio_must_be_finite_and_above_one(ratio: float) -> None:
+    """None disables the rule; inf would write Infinity (not JSON) into verdict.json."""
+    with pytest.raises(ValueError):
+        VerdictConfig(implausible_ratio=ratio)
+
+
+def test_a_disabled_gap_rule_round_trips_as_json() -> None:
+    import json
+
+    dumped = json.dumps(
+        VerdictConfig(implausible_ratio=None).model_dump(mode="json"), allow_nan=False
+    )
+    assert json.loads(dumped)["implausible_ratio"] is None
+
+
+@pytest.mark.parametrize("field", ["reported_value", "reported_std", "claimed_delta"])
+@pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan, 1e300])
+def test_a_claim_with_a_non_finite_number_is_underspecified(field: str, bad: float) -> None:
+    """The Reader's JSON is untrusted: reported_std 1e999 made the tolerance infinite and
+    gave REPRODUCED for any measurement (security review, 2026-10-29)."""
+    claim = absolute(0.9).model_copy(update={"reported_std": 0.01})
+    if field == "claimed_delta":
+        claim = claim.model_copy(
+            update={"claim_type": ClaimType.RELATIVE, "baseline_name": "b", "claimed_delta": 0.1}
+        )
+    claim = claim.model_copy(update={field: bad})
+    base = [0.0, 0.0, 0.0] if claim.claim_type is ClaimType.RELATIVE else None
+    measured = Measurements(scale=Scale.FULL, per_seed=[0.0, 0.0, 0.0], baseline_per_seed=base)
+    verdict = decide(claim, measured, CFG)
+    assert verdict.kind is VerdictKind.INCONCLUSIVE
+    assert verdict.reason is ReasonCode.UNDERSPECIFIED_CLAIM

@@ -1,0 +1,111 @@
+#cloud-config
+# Egress gateway of net-sandbox (architecture §8.2). Rendered by Terraform (modules/egress_gateway)
+# from the files in infra/cloud-init/ and applied once, at the VM's first boot. Changing any of
+# them replaces the VM. Squid's configuration is rendered on the VM by p2p-render-squid from the
+# shipped copy of config/allowlist.yaml, so tests and the gateway use the same renderer.
+#
+# No user, no SSH key, no password, no service account: nobody logs in to the gateway.
+
+package_update: true
+# Security updates first: Squid parses traffic that untrusted code controls.
+package_upgrade: true
+packages:
+  - squid-openssl
+  - nftables
+  - python3-yaml
+  - openssl
+
+users: []
+disable_root: true
+ssh_pwauth: false
+
+write_files:
+  # Sorts after any sysctl file of the image, so nothing re-enables forwarding.
+  - path: /etc/sysctl.d/99-zz-p2p-egress-gateway.conf
+    permissions: "0644"
+    content: |
+      net.ipv4.ip_forward=0
+      net.ipv6.conf.all.forwarding=0
+      net.ipv4.conf.all.accept_redirects=0
+      net.ipv4.conf.all.send_redirects=0
+  - path: /etc/systemd/journald.conf.d/90-p2p.conf
+    permissions: "0644"
+    content: |
+      [Journal]
+      Storage=persistent
+      SystemMaxUse=1G
+      # Squid logs one line per connection: do not drop bursts of them.
+      RateLimitIntervalSec=30s
+      RateLimitBurst=100000
+  - path: /etc/p2p/gateway.env
+    permissions: "0644"
+    content: |
+      P2P_PROVISION_CIDR=${provision_cidr}
+      P2P_EXEC_CIDR=${exec_cidr}
+      NEBIUS_STORAGE_HOST=${storage_host}
+      NEBIUS_REGISTRY_HOST=${registry_host}
+  # Deferred until after the packages: the nftables package owns this conffile.
+  - path: /etc/nftables.conf
+    permissions: "0644"
+    defer: true
+    encoding: b64
+    content: ${nftables_conf}
+  - path: /etc/p2p/allowlist.yaml
+    permissions: "0644"
+    encoding: b64
+    content: ${allowlist}
+  - path: /usr/local/sbin/p2p-render-squid
+    permissions: "0755"
+    encoding: b64
+    content: ${render_squid}
+  - path: /usr/local/sbin/p2p-exec-pin
+    permissions: "0755"
+    encoding: b64
+    content: ${exec_pin}
+  - path: /usr/local/sbin/p2p-gateway-setup
+    permissions: "0755"
+    encoding: b64
+    content: ${setup}
+  - path: /etc/systemd/system/p2p-exec-pin.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Pin the exec subnet's destinations to its allowlisted hosts
+      After=nftables.service network-online.target
+      Requires=nftables.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/p2p-exec-pin
+  - path: /etc/systemd/system/p2p-exec-pin.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Refresh the exec subnet's destination set every minute
+
+      [Timer]
+      OnBootSec=0
+      OnUnitActiveSec=60s
+      AccuracySec=5s
+
+      [Install]
+      WantedBy=timers.target
+  - path: /etc/systemd/system/squid.service.d/10-p2p.conf
+    permissions: "0644"
+    content: |
+      [Unit]
+      After=nftables.service p2p-exec-pin.service
+      Requires=nftables.service
+      # exec's destination set is filled before Squid takes traffic.
+      Wants=p2p-exec-pin.service
+
+      # Squid parses client-controlled TLS and HTTP: contain it if a parser bug is hit.
+      [Service]
+      NoNewPrivileges=yes
+      ProtectSystem=full
+      ProtectHome=yes
+      PrivateTmp=yes
+
+runcmd:
+  - [/usr/local/sbin/p2p-gateway-setup]

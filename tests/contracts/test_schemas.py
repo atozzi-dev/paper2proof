@@ -48,19 +48,30 @@ def test_results_fixture_valid_for_schema_and_model() -> None:
     data = _fixture("results_valid.json")
     assert _schema_ok(_schema("results.schema.json"), data)
     results = Results.model_validate(data)
-    assert [s.seed for s in results.per_seed] == [0, 1, 2]
-    assert results.per_seed[2].value is None
+    assert [c.claim_ref for c in results.claims] == ["c1", "c2"]
+    first = results.claims[0]
+    assert [s.seed for s in first.per_seed] == [0, 1, 2] and first.per_seed[2].value is None
+    assert first.baseline is not None and first.baseline.key == "resnet18/top1_accuracy"
+    assert results.claims[1].baseline is None
 
 
 RESULTS_MUTATIONS: list[tuple[str, Any]] = [
     ("extra top-level key", lambda d: d.update(verdict="REPRODUCED")),
-    ("extra per-seed key", lambda d: d["per_seed"][0].update(note="x")),
-    ("null value with ok true", lambda d: d["per_seed"][0].update(value=None)),
-    ("null value without ok", lambda d: d["per_seed"][2].pop("ok")),
+    ("extra claim key", lambda d: d["claims"][0].update(note="x")),
+    ("extra per-seed key", lambda d: d["claims"][0]["per_seed"][0].update(note="x")),
+    ("null value with ok true", lambda d: d["claims"][0]["per_seed"][0].update(value=None)),
+    ("null value without ok", lambda d: d["claims"][0]["per_seed"][2].pop("ok")),
     ("bad run id", lambda d: d.update(run_id="r_UPPER")),
     ("unknown exit reason", lambda d: d.update(exit_reason="oom")),
-    ("baseline without seeds", lambda d: d["baseline"].update(per_seed=[0.9, 0.9])),
-    ("too many seeds", lambda d: d.update(per_seed=[{"seed": i, "value": 1.0} for i in range(21)])),
+    ("baseline without seeds", lambda d: d["claims"][0]["baseline"].update(per_seed=[0.9])),
+    ("baseline without key", lambda d: d["claims"][0]["baseline"].pop("key")),
+    ("no claims", lambda d: d.update(claims=[])),
+    ("too many claims", lambda d: d.update(claims=[d["claims"][1]] * 6)),
+    ("v1 claim fields", lambda d: d.update(claim_ref="c1", metric="top1_accuracy")),
+    (
+        "too many seeds",
+        lambda d: d["claims"][1].update(per_seed=[{"seed": i, "value": 1.0} for i in range(21)]),
+    ),
 ]
 
 
@@ -74,13 +85,23 @@ def test_results_mutation_fails_both(label: str, mutate: Any) -> None:
     assert not _model_ok(Results, data), f"model accepted: {label}"
 
 
+def test_results_claim_refs_are_unique() -> None:
+    """JSON Schema cannot say it; the model (and the control plane's checks) do."""
+    data = copy.deepcopy(_fixture("results_valid.json"))
+    data["claims"][1]["claim_ref"] = "c1"
+    assert not _model_ok(Results, data)
+
+
 # --- manifest.json -----------------------------------------------------------------------
 
 
 def test_manifest_fixture_valid_for_schema_and_model() -> None:
     data = _fixture("manifest_valid.json")
     assert _schema_ok(_schema("manifest.schema.json"), data)
-    assert ExecManifest.model_validate(data).baseline_name == "resnet18"
+    manifest = ExecManifest.model_validate(data)
+    assert [c.claim_ref for c in manifest.claims] == ["c1", "c2"]
+    assert manifest.claims[0].baseline_key == "resnet18/top1_accuracy"
+    assert manifest.claims[1].baseline_name is None
 
 
 MANIFEST_MUTATIONS: list[tuple[str, Any]] = [
@@ -88,11 +109,20 @@ MANIFEST_MUTATIONS: list[tuple[str, Any]] = [
     ("entrypoint traversal", lambda d: d.update(entrypoint="workspace/../x.py")),
     ("entrypoint dotdot segment", lambda d: d.update(entrypoint="workspace/a/../../b.py")),
     ("budget over 30 min", lambda d: d.update(budget_seconds=5000)),
-    ("relative without baseline", lambda d: d.update(baseline_name=None)),
+    ("relative without baseline", lambda d: d["claims"][0].update(baseline_name=None)),
+    ("relative without baseline key", lambda d: d["claims"][0].update(baseline_key=None)),
+    ("absolute with a baseline key", lambda d: d["claims"][1].update(baseline_key="b/x")),
+    ("absolute with a baseline name", lambda d: d["claims"][1].update(baseline_name="b")),
+    ("metric key not a plain name", lambda d: d["claims"][0].update(metric_key="../x")),
+    ("metric key empty", lambda d: d["claims"][1].update(metric_key="")),
+    ("no claims", lambda d: d.update(claims=[])),
+    ("too many claims", lambda d: d.update(claims=[d["claims"][1]] * 6)),
+    ("v1 claim fields", lambda d: d.update(claim_ref="c1")),
     ("image by tag", lambda d: d.update(image_digest="latest")),
     ("duplicate seeds", lambda d: d.update(seeds=[1, 1])),
     ("extra key", lambda d: d.update(api_key="x")),
-    ("missing higher_is_better", lambda d: d.pop("higher_is_better")),
+    ("extra claim key", lambda d: d["claims"][0].update(unit="percent")),
+    ("missing higher_is_better", lambda d: d["claims"][0].pop("higher_is_better")),
     ("archives missing", lambda d: d.pop("archives")),
     ("overlay digest not hex", lambda d: d["archives"].update(overlay="x")),
     ("repo digest not hex", lambda d: d["archives"].update(repo="sha256:abc")),
@@ -107,6 +137,8 @@ MANIFEST_MUTATIONS: list[tuple[str, Any]] = [
         ),
     ),
     ("args set the seed", lambda d: d.update(args=["--seed", "3"])),
+    ("workspace digest missing", lambda d: d.pop("workspace_sha256")),
+    ("workspace digest not hex", lambda d: d.update(workspace_sha256="sha256:" + "f" * 64)),
 ]
 
 
@@ -120,11 +152,51 @@ def test_manifest_mutation_fails_both(label: str, mutate: Any) -> None:
     assert not _model_ok(ExecManifest, data), f"model accepted: {label}"
 
 
-def test_absolute_manifest_may_omit_baseline() -> None:
+def test_manifest_claim_refs_are_unique() -> None:
     data = copy.deepcopy(_fixture("manifest_valid.json"))
-    data.update(claim_type="ABSOLUTE", baseline_name=None)
+    data["claims"][1]["claim_ref"] = "c1"
+    assert not _model_ok(ExecManifest, data)
+
+
+def test_a_single_absolute_claim_is_a_valid_manifest() -> None:
+    data = copy.deepcopy(_fixture("manifest_valid.json"))
+    data["claims"] = [data["claims"][1]]
     assert _schema_ok(_schema("manifest.schema.json"), data)
     assert _model_ok(ExecManifest, data)
+
+
+@pytest.mark.parametrize("scale", [{"full": False}, {"full": True, "paper_epochs": None}])
+def test_a_serialised_manifest_with_unset_scale_fields_matches_the_schema(
+    scale: dict[str, Any],
+) -> None:
+    """What the orchestrator injects and keeps: unset scale fields are left out (the schema
+    has no nulls there), while repo and the baseline fields stay explicit nulls."""
+    data = copy.deepcopy(_fixture("manifest_valid.json"))
+    data.update(claims=[data["claims"][1]], scale=scale)
+    data["paths"]["repo"] = None
+    data["archives"]["repo"] = None
+    manifest = ExecManifest.model_validate(data)
+    kept = manifest.model_dump(mode="json", by_alias=True)
+    injected = json.loads(manifest.model_dump_json(by_alias=True))
+    assert kept == injected
+    assert _schema_ok(_schema("manifest.schema.json"), injected)
+    assert injected["scale"] == {"full": scale["full"]}
+    assert injected["claims"][0]["baseline_name"] is None
+    assert injected["claims"][0]["baseline_key"] is None
+    assert injected["paths"]["repo"] is None and injected["archives"]["repo"] is None
+    assert ExecManifest.model_validate(injected) == manifest
+
+
+def test_a_serialised_results_with_unset_scale_fields_matches_the_schema() -> None:
+    data = copy.deepcopy(_fixture("results_valid.json"))
+    data["scale"] = {"full": False}
+    results = Results.model_validate(data)
+    assert _schema_ok(
+        _schema("results.schema.json"), json.loads(results.model_dump_json(by_alias=True))
+    )
+    assert _schema_ok(
+        _schema("results.schema.json"), results.model_dump(mode="json", by_alias=True)
+    )
 
 
 # --- events.schema.json ------------------------------------------------------------------

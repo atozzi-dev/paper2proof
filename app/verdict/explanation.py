@@ -4,9 +4,15 @@ Judge is unavailable, a template written here is used instead."""
 
 import re
 
-from app.domain.models import Claim, ClaimType, Verdict, VerdictKind
+from app.domain.models import Claim, ClaimType, ReasonCode, Verdict, VerdictKind
 
 NOT_REPRODUCED_LABEL = "Not reproduced under our conditions"  # invariant 10
+_REASON_NOTES: dict[ReasonCode | None, str] = {  # reasons their name alone doesn't explain
+    ReasonCode.IMPLAUSIBLE_GAP: (
+        "The measured value is several times off the paper's: more likely a broken experiment "
+        "or a unit mismatch than a wrong claim."
+    ),
+}
 _SEP = r"[\s_-]+"
 _MENTIONS = [  # longest first: each match is removed before the shorter patterns run
     (
@@ -17,6 +23,11 @@ _MENTIONS = [  # longest first: each match is removed before the shorter pattern
     (VerdictKind.INCONCLUSIVE, re.compile(r"inconclusive", re.I)),
     (VerdictKind.REPRODUCED, re.compile(r"reproduced", re.I)),
 ]
+
+
+def mentions_verdict(text: str) -> bool:
+    """True when the text names any verdict (display-only text must never look like one)."""
+    return any(pattern.search(text) for _, pattern in _MENTIONS)
 
 
 def contradicts(text: str, kind: VerdictKind) -> bool:
@@ -61,4 +72,5 @@ def template_explanation(verdict: Verdict, claim: Claim) -> str:
     if verdict.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE:
         return f"Reproduced at reduced scale. {numbers}"
     reason = verdict.reason.value.replace("_", " ").lower() if verdict.reason else "unknown"
-    return f"Inconclusive ({reason}). {numbers}"
+    note = _REASON_NOTES.get(verdict.reason)
+    return f"Inconclusive ({reason}). {note + ' ' if note else ''}{numbers}"

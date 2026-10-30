@@ -1,0 +1,33 @@
+# Ground truth for this canary (eval set A, A-29). `verdicts` is {claim_id: expected_verdict}
+# under config/verdict.yaml at full scale; `claims` are the paper's claims as Claim fields plus
+# `planted` (a false claim planted on purpose). Checked by tests/eval/test_canaries.py.
+arxiv_id: "0000.00002"
+title: "A Single Hidden Layer Is Enough: Small MLPs on Handwritten Digits"
+seeds: [0, 1, 2]
+verdicts:
+  c1: REPRODUCED
+  c2: REPRODUCED
+claims:
+  - id: c1
+    planted: false
+    text: The MLP reaches a test accuracy of 0.972 ± 0.006 on digits.
+    claim_type: ABSOLUTE
+    metric: accuracy
+    higher_is_better: true
+    dataset: scikit-learn digits
+    setting: stratified 70/30 split per seed, standardized features, MLP (64,) Adam 300 epochs
+    reported_value: 0.972
+    reported_std: 0.006
+    source_ref: Table 1
+  - id: c2
+    planted: false
+    text: The MLP outperforms Gaussian naive Bayes by 0.126 accuracy on digits.
+    claim_type: RELATIVE
+    metric: accuracy
+    higher_is_better: true
+    dataset: scikit-learn digits
+    setting: same split per seed for both models
+    reported_value: null
+    baseline_name: Gaussian naive Bayes
+    claimed_delta: 0.126
+    source_ref: Table 1

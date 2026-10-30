@@ -1,0 +1,645 @@
+"""DevDockerBackend and LocalRunStorage: the dev end-to-end (A-25) runs the real job images in
+local docker, with per-run "buckets" as directories under `root`.
+
+Like LocalTrustedExecutor, this is the one exception to invariant 1: it refuses to exist unless
+`P2P_ENV=dev`, and refuses every job of a run unless `config/canary_allowlist.yaml` binds its
+paper's sha256 to the run's arXiv ID. With `provisioner_only` (the hybrid deploy,
+docs/specs/hybrid-deploy.md) it serves the prod control-plane host instead: only provision and
+fetch jobs, only the configured provisioner image (our code, by its registry digest), for any
+paper, since no model or paper code ever runs in them. Containers keep the job's isolation:
+non-root (10001), no capabilities, no new privileges, a read-only root with private scratch
+space, capped memory and logs, a host-side kill at the watchdog, no network except for the
+provision and fetch jobs (the provisioner image, our code; locally their egress is not
+allowlisted as the gateway does in the cloud), and only the run's own directory and the cache
+mounted: the cache read-only except for the provision job, never for the fetch job.
+"""
+
+import asyncio
+import contextlib
+import errno
+import hashlib
+import json
+import logging
+import os
+import re
+import secrets
+import shutil
+import stat
+import sys
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+
+from app.execution.backend import CACHE_BUCKET, CACHE_MOUNT, JobHandle, JobKind, JobSpec, JobState
+from app.execution.config import DIGEST_REF
+from app.execution.local_trusted import (
+    DockerRunner,
+    LocalTrustedRefused,
+    PaperLookup,
+    docker_cli,
+    is_canary,
+)
+from app.execution.naming import bucket_name, run_slug
+from app.execution.run_storage import MAX_READ_BYTES
+
+_DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})$")
+_JOB_NAME = re.compile(r"^p2p-(prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4}$")
+_MOUNT_PATH = re.compile(r"^/mnt/[a-z]{1,32}$")
+_NETWORK = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}$")
+_BUILTIN_NETWORKS = frozenset({"host", "bridge", "none", "default"})
+_TRASH = re.compile(
+    r"^\.trash-(p2p-(?:prov|fetch|exec|smoke)-([0-9a-z]{26})-[0-9]{1,4})-[0-9a-f]{8}$"
+)
+_INJECT_PATH = re.compile(r"^/etc/p2p/(?!\.\.?$)[a-z0-9._-]{1,64}$")
+_STATES = {
+    "created": JobState.PENDING,
+    "restarting": JobState.STARTING,
+    "running": JobState.RUNNING,
+}
+log = logging.getLogger(__name__)
+DOCKER_TIMEOUT_S = 120.0
+LABEL = "p2p-dev"
+JOB_UID = 10001  # the images' non-root user
+
+
+def local_image(ref: str) -> str:
+    """A local build has no registry digest: dev settings carry `<name>@sha256:<image id>` and
+    the container runs from that image id, never from a tag."""
+    match = _DIGEST.search(ref)
+    if match is None:
+        raise ValueError("job images are referenced by digest")
+    return match.group(1)
+
+
+def _host_uid() -> int | None:
+    """Our uid when bind mounts keep uids as they are (a Linux docker host); None under Docker
+    Desktop, whose bind mounts are writable by any container user."""
+    if sys.platform == "linux":
+        return os.getuid()
+    return None
+
+
+def _plain_dir(path: Path) -> Path:
+    """`path` as a real directory: created when missing, refused when a link (or a Windows
+    junction) or anything else sits there, so nothing is created or mounted through a link."""
+    info = _lstat(path, str(path))
+    if info is None:
+        path.mkdir(parents=True, exist_ok=True)
+        info = _lstat(path, str(path))
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{path} is not a directory: refused")
+    return path
+
+
+def _when(value: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value)[:19]).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+class DevDockerBackend:
+    def __init__(
+        self,
+        *,
+        env: str,
+        canaries: Mapping[str, str],
+        paper: PaperLookup,
+        root: Path,
+        docker: DockerRunner = docker_cli,
+        host_uid: int | None = _host_uid(),
+        acl: DockerRunner = docker_cli,
+        provisioner_only: str | None = None,
+        network: str | None = None,
+    ) -> None:
+        if provisioner_only is not None and not re.fullmatch(DIGEST_REF, provisioner_only):
+            raise ValueError("the provisioner image is referenced by digest (invariant 8)")
+        if network is not None and (
+            not _NETWORK.fullmatch(network) or network in _BUILTIN_NETWORKS
+        ):  # host would hand the jobs this host's network; the firewall restricts ours only
+            raise ValueError(f"not a dedicated docker network: {network!r}")
+        self._network = network  # provision and fetch only: the host firewall restricts it
+        if provisioner_only is not None and env != "prod":
+            raise LocalTrustedRefused("provisioner-only local jobs are for the hybrid prod deploy")
+        if provisioner_only is None and env != "dev":
+            raise LocalTrustedRefused("the local docker job backend runs only with P2P_ENV=dev")
+        self._provisioner = provisioner_only
+        self._canaries = canaries
+        self._paper = paper
+        self._root = root.resolve()
+        if any(c in str(self._root) for c in ',"\n'):
+            raise ValueError(f"{self._root}: docker --mount cannot take this path")
+        self._root_label = hashlib.sha256(str(self._root).encode()).hexdigest()[:16]
+        self._docker = docker
+        self._host_uid = host_uid
+        self._acl = acl
+        self._shared = False
+
+    async def _share_job_dirs(self) -> None:
+        """Every directory a job gets bind-mounted lives under these three parents. On a Linux
+        host the job's uid 10001 is uid 10001 here, so they get access and default ACLs for both
+        users: what either side creates stays writable by the other (we delete job files)."""
+        if self._shared or self._host_uid is None:
+            return
+        parents = [self._root / d for d in ("buckets", "cache", "jobs")]
+        for parent in parents:
+            parent.mkdir(parents=True, exist_ok=True)
+        # uid 10001 may be a real account on this host: the root is ours alone, so nobody else
+        # reaches the shared parents (dockerd mounts as root; containers never walk the root).
+        # Never chmod the parents themselves: that would reset the ACL mask.
+        owner = self._root.stat().st_uid
+        if owner != self._host_uid:
+            raise RuntimeError(f"{self._root} is not owned by uid {self._host_uid} (uid {owner})")
+        self._root.chmod(0o700)
+        users = (JOB_UID, self._host_uid)
+        entries = ",".join(f"u:{uid}:rwX" for uid in users)
+        defaults = ",".join(f"d:u:{uid}:rwX" for uid in users)
+        argv = ["setfacl", "-m", entries, "-m", defaults, *map(str, parents)]
+        try:
+            code, _, err = await self._acl(argv, DOCKER_TIMEOUT_S)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "setfacl not found: install the acl package (apt install acl), or make "
+                f"{self._root}/{{buckets,cache,jobs}} writable by uid {JOB_UID}"
+            ) from None
+        if code != 0:
+            raise RuntimeError(f"setfacl failed on {self._root}: {err.strip()[-300:]}")
+        self._shared = True
+
+    def _bucket(self, name: str) -> Path:
+        return self._root / "buckets" / name
+
+    async def _cli(self, *argv: str) -> tuple[int, str, str]:
+        return await self._docker(["docker", *argv], DOCKER_TIMEOUT_S)
+
+    async def ensure_run_bucket(self, run_id: str) -> str:
+        name = bucket_name(run_id)
+        await self._share_job_dirs()
+        _plain_dir(self._bucket(name))
+        return name
+
+    async def delete_run_bucket(self, run_id: str) -> None:
+        """The run's directory, and its jobs' containers and directories: nothing of a run
+        stays on this host's disk (thread: up to tens of GiB of files)."""
+        await asyncio.to_thread(shutil.rmtree, self._bucket(bucket_name(run_id)), True)
+        jobs = self._root / "jobs"
+        if not jobs.is_dir():
+            return
+        slug = run_slug(run_id)
+        for job in sorted(jobs.iterdir()):
+            trash = _TRASH.fullmatch(job.name)  # moved aside by a resubmit: no container
+            if trash is not None and trash.group(2) == slug:
+                await asyncio.to_thread(shutil.rmtree, job, True)
+                continue
+            match = _JOB_NAME.fullmatch(job.name)
+            if match is None or match.group(2) != slug:
+                continue
+            info = await self._inspect(job.name)
+            if info is not None and self._ours(info):
+                await self._cli("rm", "-f", job.name)
+            await asyncio.to_thread(shutil.rmtree, job, True)
+
+    async def list_run_buckets(self) -> list[tuple[str, datetime]]:
+        folder = self._root / "buckets"
+        if not folder.is_dir():
+            return []
+        return [
+            (p.name, datetime.fromtimestamp(p.stat().st_mtime, UTC))
+            for p in sorted(folder.iterdir())
+            if p.is_dir()
+        ]
+
+    async def _inspect(self, name: str) -> dict[str, object] | None:
+        code, out, _ = await self._cli("inspect", "--type=container", name)
+        if code != 0:
+            return None
+        try:
+            data = json.loads(out)
+        except ValueError:
+            return None
+        return data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else None
+
+    def _labels(self, info: dict[str, object]) -> dict[str, str]:
+        config = info.get("Config")
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        return {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
+
+    def _ours(self, info: dict[str, object]) -> bool:
+        labels = self._labels(info)
+        return labels.get(LABEL) == "1" and labels.get("p2p-root") == self._root_label
+
+    def _checked(self, spec: JobSpec) -> str:
+        """Again here, not only in JobSpec's validators: a spec built with model_construct or
+        model_copy skips them, and this backend runs on the developer's machine."""
+        match = _JOB_NAME.fullmatch(spec.name)
+        if match is None or match.group(1) != spec.kind.value:
+            raise ValueError(f"invalid job name: {spec.name!r}")
+        run_id = "r_" + match.group(2)
+        for volume in spec.volumes:
+            cache = volume.source == CACHE_BUCKET
+            if not (cache or volume.source == bucket_name(run_id)):
+                raise ValueError(f"jobs may mount only their run's bucket and the cache: {volume}")
+            if cache and volume.mount_path != CACHE_MOUNT:  # the provisioner's phases rely on it
+                raise ValueError(f"the cache mounts only at {CACHE_MOUNT}")
+            if cache and spec.kind is JobKind.FETCH:
+                raise ValueError("the fetch job never mounts the cache")
+            if cache and volume.mode == "rw" and spec.kind is not JobKind.PROVISION:
+                raise ValueError("only the provisioner may mount the cache writable")
+            if not _MOUNT_PATH.fullmatch(volume.mount_path):
+                raise ValueError(f"invalid mount path: {volume.mount_path!r}")
+        for path in spec.inject_files:
+            if not _INJECT_PATH.fullmatch(path):
+                raise ValueError(f"invalid inject path: {path!r}")
+        return run_id
+
+    async def _image(self, spec: JobSpec, run_id: str) -> str:
+        """What the container runs, after the gate of this backend's mode."""
+        if self._provisioner is None:
+            if not is_canary(self._canaries, await self._paper(run_id)):
+                raise LocalTrustedRefused("not a canary paper: its jobs never run on this machine")
+            return local_image(spec.image_digest_ref)
+        if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):
+            raise LocalTrustedRefused("this host runs only provision and fetch jobs")
+        if spec.image_digest_ref != self._provisioner:
+            raise LocalTrustedRefused("this host runs only the configured provisioner image")
+        return self._provisioner  # pulled and run by its registry digest (invariant 8)
+
+    def _runs(self, info: dict[str, object], image: str) -> bool:
+        """Whether a container runs `image`: a local build by its image id, a registry image
+        by the digest reference it was started with."""
+        if self._provisioner is None:
+            return info.get("Image") == image
+        config = info.get("Config")
+        return isinstance(config, dict) and config.get("Image") == image
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        run_id = self._checked(spec)
+        image = await self._image(spec, run_id)
+        existing = await self._inspect(spec.name)
+        if existing is not None:  # get-by-name: a resumed step finds its container
+            if not self._ours(existing) or not self._runs(existing, image):
+                raise RuntimeError(f"{spec.name} exists but was not created by this backend")
+            return JobHandle(name=spec.name, nebius_id=str(existing.get("Id", "")))
+        await self._share_job_dirs()
+        job = self._root / "jobs" / spec.name
+        await asyncio.to_thread(shutil.rmtree, job, True)
+        if _lstat(job, str(job)) is not None:  # a job can lock its own files (a 0700 mkdir)
+            # Ours to move even when a subdirectory is not ours to empty: a resubmit (a smoke
+            # iteration after a prune) always starts from nothing, never from old code's files.
+            trash = job.with_name(f".trash-{spec.name}-{secrets.token_hex(4)}")
+            job.rename(trash)
+            log.warning(
+                "job directory moved aside: its files could not be removed",
+                extra={"run_id": run_id, "path": str(trash)},
+            )
+        _plain_dir(job)
+        _plain_dir(job / "work")
+        _plain_dir(job / "home")
+        argv = [
+            "run", "-d", f"--name={spec.name}", f"--label={LABEL}=1",
+            f"--label=p2p-root={self._root_label}", f"--label=p2p-watchdog={spec.watchdog_s}",
+            "--user=10001:10001", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+            "--read-only", "--tmpfs=/tmp:rw,size=1g", "--pids-limit=4096",
+            "--memory=8g", "--memory-swap=8g", "--cpus=2",
+            # the log caps need json-file: a daemon defaulting to journald refuses max-file
+            "--log-driver=json-file", "--log-opt=max-size=10m", "--log-opt=max-file=2",
+        ]  # fmt: skip
+        mounts = [(job / "work", "/work", "rw"), (job / "home", "/home/p2p", "rw")]
+        if spec.kind not in (JobKind.PROVISION, JobKind.FETCH):  # they download (PyPI, repo, HF)
+            argv.append("--network=none")
+        elif self._network is not None:
+            argv.append(f"--network={self._network}")
+        for volume in spec.volumes:
+            cache = volume.source == CACHE_BUCKET
+            source = _plain_dir(self._root / "cache" if cache else self._bucket(volume.source))
+            mounts.append((source, volume.mount_path, volume.mode))
+        for index, (path, content) in enumerate(sorted(spec.inject_files.items())):
+            local = job / f"inject-{index}"
+            local.write_bytes(content)
+            mounts.append((local, path, "ro"))
+        for source, target, mode in mounts:
+            readonly = ",readonly" if mode == "ro" else ""
+            # the checked path itself (under the resolved root), never re-resolved
+            argv += ["--mount", f"type=bind,source={source},target={target}{readonly}"]
+        for name, value in sorted(spec.env.items()):
+            argv += ["-e", f"{name}={value}"]
+        argv.append(image)
+        code, out, err = await self._cli(*argv)
+        if code != 0:
+            raise RuntimeError(f"docker run failed for {spec.name}: {err.strip()[-500:]}")
+        return JobHandle(name=spec.name, nebius_id=out.strip())
+
+    async def status(self, handle: JobHandle) -> JobState:
+        info = await self._inspect(handle.name)
+        state = info.get("State") if info is not None else None
+        if info is None or not isinstance(state, dict):
+            return JobState.UNKNOWN
+        status = str(state.get("Status", ""))
+        if status == "running" and self._past_watchdog(info, state):
+            # the host-side watchdog: nothing runs past its budget, and a job is over only
+            # once its container really is (a failed kill is retried at the next poll)
+            code, _, _ = await self._cli("kill", handle.name)
+            return JobState.FAILED if code == 0 else JobState.RUNNING
+        if status in _STATES:
+            return _STATES[status]
+        if status in ("exited", "dead"):
+            return JobState.SUCCEEDED if state.get("ExitCode") == 0 else JobState.FAILED
+        return JobState.UNKNOWN
+
+    def _past_watchdog(self, info: dict[str, object], state: dict[str, object]) -> bool:
+        started = _when(state.get("StartedAt"))
+        watchdog = self._labels(info).get("p2p-watchdog", "")
+        if started is None or not watchdog.isdigit():
+            return False
+        return (datetime.now(UTC) - started).total_seconds() > int(watchdog)
+
+    async def cancel(self, handle: JobHandle) -> None:
+        await self._cli("kill", handle.name)
+
+    async def ensure_gateway_up(self) -> None:
+        return None  # no gateway locally: the provisioner uses docker's default network
+
+    async def gateway_idle_check(self, idle_minutes: int = 30) -> bool:
+        return False
+
+    async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]:
+        code, out, _ = await self._cli(
+            "ps", "-a", "--filter", f"label={LABEL}=1", "--format", "{{.Names}}"
+        )
+        names = [n for n in out.split() if n.startswith(prefix)] if code == 0 else []
+        listed = []
+        for name in sorted(names):
+            info = await self._inspect(name)
+            if info is None or not self._ours(info):
+                continue
+            handle = JobHandle(name=name, nebius_id=str(info.get("Id", "")))
+            when = _when(info.get("Created")) or datetime.now(UTC)
+            listed.append((handle, await self.status(handle), when))
+        return listed
+
+
+# LocalRunStorage. Jobs (untrusted code) write these directories while the control plane reads
+# them, so every access refuses links (and Windows junctions), FIFOs and anything not a regular
+# file. On POSIX each component is opened relative to its parent with O_NOFOLLOW, so nothing a
+# job swaps in between a check and a use is ever followed. Windows has no dir_fd: there the
+# chain is checked, and a read must open the very file that was checked (same volume and index).
+
+_DIR_FD = all(f in os.supports_dir_fd for f in (os.open, os.mkdir, os.rename, os.unlink))
+_open: Callable[..., int] = os.open  # patched by the race test
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_BINARY = getattr(os, "O_BINARY", 0)
+_REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _key_parts(key: str) -> tuple[str, ...]:
+    parts = key.split("/")
+    if not key or "\\" in key or "\x00" in key or any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"invalid object key: {key!r}")
+    return tuple(parts)
+
+
+def _is_link(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & _REPARSE)
+
+
+def _lstat(path: Path, key: str) -> os.stat_result | None:
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise ValueError(f"{key} is unreadable") from exc
+    if _is_link(info):
+        raise ValueError(f"{key} goes through a link: refused")
+    return info
+
+
+def _stat_at(name: str, fd: int) -> os.stat_result:
+    return os.stat(name, dir_fd=fd, follow_symlinks=False)
+
+
+def _refused(name: str, fd: int, key: str) -> ValueError:
+    """Why opening `name` failed; the job may have removed it meanwhile."""
+    try:
+        link = _is_link(_stat_at(name, fd))
+    except OSError:
+        link = False
+    return ValueError(f"{key} {'goes through a link: refused' if link else 'is unreadable'}")
+
+
+def _read_fd(descriptor: int, key: str, max_bytes: int, expected: os.stat_result | None) -> bytes:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):  # before fdopen, which refuses a directory itself
+        os.close(descriptor)
+        raise ValueError(f"{key} is not a regular file")
+    with os.fdopen(descriptor, "rb") as handle:
+        if expected is not None and (info.st_dev, info.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            raise ValueError(f"{key} changed while it was read: refused")
+        if info.st_size > max_bytes:
+            raise ValueError(f"{key} is larger than {max_bytes} bytes")
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"{key} is larger than {max_bytes} bytes")
+    return data
+
+
+class LocalRunStorage:
+    """RunStorage over `<root>/buckets/p2p-run-<slug>/`."""
+
+    def __init__(self, root: Path) -> None:
+        self._root = root.resolve()
+
+    def _base(self, run_id: str) -> Path:
+        return self._root / "buckets" / bucket_name(run_id)
+
+    def path(self, run_id: str, key: str) -> Path:
+        return self._base(run_id).joinpath(*_key_parts(key))
+
+    async def get_bytes(
+        self, run_id: str, key: str, *, max_bytes: int = MAX_READ_BYTES
+    ) -> bytes | None:
+        return await asyncio.to_thread(self._read, run_id, key, max_bytes)
+
+    async def put_bytes(self, run_id: str, key: str, data: bytes) -> None:
+        await asyncio.to_thread(self._write, run_id, key, data)
+
+    async def delete(self, run_id: str, key: str) -> None:
+        await asyncio.to_thread(self._delete, run_id, key)
+
+    # POSIX: a directory descriptor per component, never following a link
+
+    def _parent_fd(self, run_id: str, parts: tuple[str, ...], key: str, create: bool) -> int | None:
+        base = self._base(run_id)
+        if create:
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:  # a dangling link at the bucket
+                raise ValueError(f"{key} goes through a link: refused") from exc
+        try:
+            fd = os.open(base, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):  # the bucket is a link
+                raise ValueError(f"{key} goes through a link: refused") from exc
+            raise ValueError(f"{key} is unreadable") from exc
+        for part in parts[:-1]:
+            try:
+                if create:
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, dir_fd=fd)
+                child = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise _refused(part, fd, key) from exc
+            finally:
+                os.close(fd)
+            fd = child
+        return fd
+
+    def _read(self, run_id: str, key: str, max_bytes: int) -> bytes | None:
+        parts = _key_parts(key)
+        if not _DIR_FD:
+            return self._read_portable(run_id, parts, key, max_bytes)
+        parent = self._parent_fd(run_id, parts, key, create=False)
+        if parent is None:
+            return None
+        try:
+            descriptor = _open(parts[-1], os.O_RDONLY | _NOFOLLOW | _NONBLOCK, dir_fd=parent)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _refused(parts[-1], parent, key) from exc
+        finally:
+            os.close(parent)
+        return _read_fd(descriptor, key, max_bytes, None)
+
+    def _write(self, run_id: str, key: str, data: bytes) -> None:
+        parts = _key_parts(key)
+        if not _DIR_FD:
+            return self._write_portable(run_id, parts, key, data)
+        parent = self._parent_fd(run_id, parts, key, create=True)
+        if parent is None:  # pragma: no cover - created just above
+            raise ValueError(f"{key} cannot be written")
+        temporary = f".p2p-{secrets.token_hex(8)}"  # random and O_EXCL: nothing planted to follow
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
+            with os.fdopen(os.open(temporary, flags, 0o644, dir_fd=parent), "wb") as handle:
+                handle.write(data)
+            try:
+                os.rename(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+            except OSError as exc:  # a directory at the key
+                os.unlink(temporary, dir_fd=parent)
+                raise ValueError(f"{key} cannot be written") from exc
+        finally:
+            os.close(parent)
+        return None
+
+    def _delete(self, run_id: str, key: str) -> None:
+        parts = _key_parts(key)
+        if not _DIR_FD:
+            return self._delete_portable(run_id, parts, key)
+        parent = self._parent_fd(run_id, parts, key, create=False)
+        if parent is None:
+            return None
+        try:
+            os.unlink(parts[-1], dir_fd=parent)  # removes a planted link itself, never its target
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ValueError(f"{key} cannot be deleted") from exc
+        finally:
+            os.close(parent)
+        return None
+
+    # Windows: the checked chain, then the very file that was checked
+
+    def _chain(self, run_id: str, parts: tuple[str, ...], key: str, create: bool) -> Path | None:
+        """The parent directory of the key, every component checked; None if it is missing."""
+        current = self._base(run_id)
+        if create:
+            try:
+                current.mkdir(parents=True, exist_ok=True)
+            except FileExistsError as exc:  # a dangling link or junction at the bucket
+                raise ValueError(f"{key} goes through a link: refused") from exc
+        if _lstat(current, key) is None:  # the bucket itself may be a junction: refused there
+            return None
+        for part in parts[:-1]:
+            current = current / part
+            info = _lstat(current, key)
+            if info is None and create:
+                current.mkdir(exist_ok=True)
+                info = _lstat(current, key)
+            if info is None:
+                return None
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError(f"{key} goes through a file")
+        return current
+
+    def _read_portable(
+        self, run_id: str, parts: tuple[str, ...], key: str, max_bytes: int
+    ) -> bytes | None:
+        parent = self._chain(run_id, parts, key, create=False)
+        if parent is None:
+            return None
+        path = parent / parts[-1]
+        checked = _lstat(path, key)
+        if checked is None:
+            return None
+        if not stat.S_ISREG(checked.st_mode):
+            raise ValueError(f"{key} is not a regular file")
+        try:
+            descriptor = _open(path, os.O_RDONLY | _BINARY | _NOFOLLOW | _NONBLOCK)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(f"{key} is unreadable") from exc
+        return _read_fd(descriptor, key, max_bytes, checked)
+
+    def _write_portable(self, run_id: str, parts: tuple[str, ...], key: str, data: bytes) -> None:
+        parent = self._chain(run_id, parts, key, create=True)
+        if parent is None:  # pragma: no cover - created just above
+            raise ValueError(f"{key} cannot be written")
+        temporary = parent / f".p2p-{secrets.token_hex(8)}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY | _NOFOLLOW
+        try:
+            with os.fdopen(os.open(temporary, flags, 0o644), "wb") as handle:
+                handle.write(data)
+                written = os.fstat(handle.fileno())
+            self._chain(run_id, parts, key, create=False)  # still no link on the way
+            placed = _lstat(temporary, key)  # and the file is where it was checked
+            if placed is None or (placed.st_dev, placed.st_ino) != (
+                written.st_dev,
+                written.st_ino,
+            ):
+                raise ValueError(f"{key} changed while it was written: refused")
+            existing = _lstat(parent / parts[-1], key)
+            if existing is not None and not stat.S_ISREG(existing.st_mode):
+                raise ValueError(f"{key} cannot be written")
+            temporary.replace(parent / parts[-1])
+        except OSError as exc:
+            raise ValueError(f"{key} cannot be written") from exc
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+    def _delete_portable(self, run_id: str, parts: tuple[str, ...], key: str) -> None:
+        # Known Windows-only gap: a junction swapped in after the check could make this delete
+        # a same-named file elsewhere (it needs a job able to create junctions through the
+        # Docker Desktop bind mount, which POSIX hosts and the cloud never allow).
+        parent = self._chain(run_id, parts, key, create=False)
+        if parent is None:
+            return
+        path = parent / parts[-1]
+        info = _lstat(path, key)
+        if info is None:
+            return
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{key} cannot be deleted")
+        path.unlink(missing_ok=True)

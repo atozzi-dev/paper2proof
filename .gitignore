@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 *.pem
+!docs/bundle-public-key.pem
 *.key
 *credentials*.json
 
@@ -35,6 +36,8 @@ node_modules/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
+*.tfplan
 !*.tfvars.example
 crash.log
 .terraform.lock.hcl.bak
@@ -48,3 +51,6 @@ deploy/digests.json
 Thumbs.db
 .idea/
 .vscode/
+
+# Deploy settings filled per environment (deploy/prod.env.example is the template)
+deploy/prod.env

@@ -1,0 +1,62 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Standardized Logistic Regression Is a Strong Baseline on Handwritten Digits}
+\author{Paper2Proof canary set\thanks{A small paper written for the Paper2Proof evaluation set (eval set A).}}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We revisit multinomial logistic regression on the scikit-learn handwritten digits dataset.
+With per-feature standardization and an L2 penalty, a plain linear model reaches a test accuracy
+of 0.965 averaged over three random train/test splits, which makes it a strong and cheap
+reference point for small image classification benchmarks.
+\end{abstract}
+
+\section{Introduction}
+Small benchmarks are often used to compare new classifiers, but the linear baseline is rarely
+tuned. We report the accuracy of a standardized logistic regression on the digits dataset under
+a fully specified protocol, so that the number can be reproduced exactly.
+
+\section{Method}
+The model is a multinomial logistic regression with an L2 penalty ($C = 1.0$) trained with the
+L-BFGS solver for at most 2000 iterations. Each of the 64 pixel features is standardized to zero
+mean and unit variance using statistics computed on the training split only.
+
+\section{Experimental setup}
+\paragraph{Data.} The digits dataset shipped with scikit-learn (\texttt{load\_digits}): 1797
+grayscale images of $8 \times 8$ pixels, 10 classes. No download is needed.
+\paragraph{Splits.} For each seed $s \in \{0, 1, 2\}$ we draw a stratified train/test split with
+30\,\% of the samples in the test set (\texttt{train\_test\_split(test\_size=0.3,
+random\_state=s, stratify=y)}).
+\paragraph{Metric.} Classification accuracy on the test split. We report the mean and the sample
+standard deviation over the three seeds.
+\paragraph{Software.} Python 3.12, scikit-learn 1.9.1, CPU only. One run takes well under a
+second.
+
+\section{Results}
+Table~\ref{tab:digits-logreg} reports the result. Standardized logistic regression reaches a
+test accuracy of 0.965 $\pm$ 0.009 on digits.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy on the digits dataset (mean $\pm$ standard deviation over seeds 0, 1, 2).}
+\label{tab:digits-logreg}
+\begin{tabular}{lc}
+\toprule
+Model & Accuracy \\
+\midrule
+Logistic regression (standardized, $C = 1.0$) & $0.965 \pm 0.009$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+A standardized linear model is a strong baseline on digits and should be reported alongside any
+new method evaluated on this dataset.
+
+\end{document}

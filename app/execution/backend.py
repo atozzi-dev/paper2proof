@@ -15,6 +15,7 @@ MAX_INJECT_FILES = 8
 MAX_INJECT_TOTAL = 256 * 1024
 INJECT_PREFIX = "/etc/p2p/"
 CACHE_BUCKET = "p2p-cache"
+CACHE_MOUNT = "/mnt/cache"
 # Jobs run untrusted code: they get an allowlisted environment and never credentials
 # (invariant 4). Names are allowlisted; names and values are also screened for secrets.
 _ENV_ALLOWED = frozenset(
@@ -43,7 +44,8 @@ _SECRET_VALUE = re.compile(
 
 
 class JobKind(StrEnum):
-    PROVISION = "prov"
+    PROVISION = "prov"  # packages only: the one job that writes the overlay cache
+    FETCH = "fetch"  # repository and datasets (untrusted bytes): never mounts the cache
     EXEC = "exec"
     SMOKE = "smoke"
 
@@ -73,7 +75,7 @@ class VolumeMount(BaseModel):
 class JobSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    name: str = Field(pattern=r"^p2p-(prov|exec|smoke)-[0-9a-z]{26}-[0-9]{1,4}$")
+    name: str = Field(pattern=r"^p2p-(prov|fetch|exec|smoke)-[0-9a-z]{26}-[0-9]{1,4}$")
     kind: JobKind
     image_digest_ref: str = Field(pattern=r"^[a-z0-9.\-/:]+@sha256:[0-9a-f]{64}$")  # invariant 8
     platform: str
@@ -128,6 +130,10 @@ class JobSpec(BaseModel):
         own_bucket = f"p2p-run-{slug}"
         for volume in self.volumes:
             if volume.source == CACHE_BUCKET:
+                if volume.mount_path != CACHE_MOUNT:  # the provisioner's phases rely on it
+                    raise ValueError(f"the cache mounts only at {CACHE_MOUNT}")
+                if self.kind is JobKind.FETCH:
+                    raise ValueError("the fetch job never mounts the cache")
                 if volume.mode == "rw" and self.kind is not JobKind.PROVISION:
                     raise ValueError("only the provisioner may write the cache")
             elif volume.source != own_bucket:
@@ -142,6 +148,26 @@ class JobHandle(BaseModel):
     nebius_id: str
 
 
+class CapacityError(Exception):
+    """submit(): the platform has no capacity for the job's platform and preset right now (GPU
+    quota used up, "not enough resources"). The job was not created (execution-contracts §8)."""
+
+
+class JobStatusUnavailable(Exception):
+    """status(): the platform could not be asked right now (unavailable, timeout, internal
+    error). Not a fact about the job: callers keep watching it and never cancel because of it."""
+
+
+class QuotaExceeded(Exception):
+    """submit(): a project quota other than GPUs (vCPU, disks, instances...) is used up. Not a
+    capacity verdict: waiting or another GPU platform never helps, an operator must raise it.
+    The job was not created. `quotas` are the platform's quota names."""
+
+    def __init__(self, job: str, quotas: list[str]) -> None:
+        self.quotas = quotas
+        super().__init__(f"{job}: quota exceeded: {', '.join(quotas)}")
+
+
 class JobBackend(Protocol):
     async def ensure_run_bucket(self, run_id: str) -> str: ...
     async def delete_run_bucket(self, run_id: str) -> None: ...
@@ -149,5 +175,6 @@ class JobBackend(Protocol):
     async def status(self, handle: JobHandle) -> JobState: ...
     async def cancel(self, handle: JobHandle) -> None: ...
     async def ensure_gateway_up(self) -> None: ...  # start the VM if stopped, wait until ready
-    async def gateway_idle_check(self, idle_minutes: int = 30) -> None: ...
+    async def gateway_idle_check(self, idle_minutes: int = 30) -> bool: ...  # True: stopped it
     async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]: ...
+    async def list_run_buckets(self) -> list[tuple[str, datetime]]: ...  # (name, created_at)

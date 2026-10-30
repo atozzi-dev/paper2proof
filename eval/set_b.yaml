@@ -1,0 +1,25 @@
+# Eval set B (architecture §18.1): real arXiv papers run through the full pipeline by
+# eval/run_set_b.py. Picked with the human on 2026-10-29 for the live service's limits: CPU only
+# (4 vCPU, ~4 GB, Token Factory Sandboxes), at most 30 minutes of experiment, data bundled with
+# scikit-learn, generated in code or small ungated Hugging Face parquet, packages from PyPI.
+# No ground truth is assumed: the set shows how the pipeline behaves on real material, and the
+# notes say what we expect and why.
+#
+# One entry per paper. arxiv_id only (invariant 11: no URLs). claim_hint is passed to
+# POST /api/runs as is.
+papers:
+  - arxiv_id: "1909.09223"
+    claim_hint: "The AUROC table (Figure 3): EBM, logistic regression and XGBoost on breast-cancer and adult-income, default parameters"
+    notes: "InterpretML. Official code (microsoft/interpret); default models, small data: likely to reproduce."
+  - arxiv_id: "2001.05016"
+    claim_hint: "Table 2: the NAU solves addition and subtraction; Table 1: the NMU on the multiplication task"
+    notes: "Neural Arithmetic Units. Official code (AndreasMadsen/stable-nalu); data generated in code, tiny models, iterations capped well below the paper's."
+  - arxiv_id: "2404.19756"
+    claim_hint: "Table 1 (Section 3.2): KAN against MLP test RMSE on special functions"
+    notes: "KAN. Official code (KindXiaoming/pykan); the ordering KAN < MLP should hold, the exact RMSE depends on the grid schedule and the pykan version."
+  - arxiv_id: "1706.09516"
+    claim_hint: "Table 2: CatBoost against LightGBM and XGBoost logloss on Adult"
+    notes: "CatBoost. The paper tuned every model with hyperopt; we cannot at this scale, so the ~2% margin may not reproduce."
+  - arxiv_id: "1503.02531"
+    claim_hint: "Section 3 (MNIST): the distilled 2x800 student against the same network trained alone"
+    notes: "Distillation (Hinton et al.). No official code; the gap should hold, the absolute error counts need a longer teacher run."

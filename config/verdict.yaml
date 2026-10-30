@@ -10,3 +10,8 @@ tol_abs:
 rho: 0.5
 min_seeds: 3
 confidence: 0.95
+# An ABSOLUTE measured mean more than this many times off the paper's value (same sign, both
+# non-zero) is INCONCLUSIVE/IMPLAUSIBLE_GAP, never NOT_REPRODUCED: broken training or a unit
+# mismatch (count vs rate, fraction vs percent), not a wrong claim; a wrong claim is off by a
+# few to tens of percent (our planted ones: at most 11%). null disables the rule.
+implausible_ratio: 2.0

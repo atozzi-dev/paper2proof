@@ -34,8 +34,13 @@ from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_aft
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import ErrorCode
-from app.models.pricing import Pricing, estimate_tokens
-from app.orchestrator.budget import Budget, Reservation, SpendKind
+from app.models.pricing import Pricing, estimate_message_tokens, estimate_tokens
+from app.observability import metrics, tracing
+from app.orchestrator.budget import (
+    Budget,
+    Reservation,
+    SpendKind,
+)
 from app.storage.store import Store
 
 T = TypeVar("T", bound=BaseModel)
@@ -241,6 +246,23 @@ class StoreCallRecorder:
                 "cost_usd": cost_usd,
             }
             await self._store.append_event(run_id, EventType.MODEL_CALL, payload)
+        tracing.model_call_span(
+            run_id=run_id,
+            step=step,
+            role=role.value,
+            model_id=model_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
+        )
+        metrics.model_call(
+            role.value,
+            model_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            remaining=ratelimit_remaining,
+        )
 
 
 # --- retry policy ------------------------------------------------------------------------
@@ -286,11 +308,45 @@ def _wait(state: RetryCallState) -> float:
     return backoff + random.uniform(0, 0.25)  # noqa: S311 (jitter, not crypto)
 
 
+# 408: the server gave up waiting; 504/524: a gateway did. The work may have been done.
+_GATEWAY_TIMEOUTS = frozenset({408, 504, 524})
+
+
+@dataclass
+class _Tally:
+    """Attempts counted so far, kept even when the call is cancelled mid-retry."""
+
+    attempts: int = 0  # processed by the model (5xx): input billed
+    timeouts: int = 0  # possibly generated in full
+    in_flight: bool = False  # a request is out with no answer yet (a cancel lands there)
+
+
+class _Failed(Exception):
+    """A non-retryable error ended the retries; `attempts`/`timeouts` as in _Exhausted."""
+
+    def __init__(self, attempts: int, timeouts: int) -> None:
+        super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
+        self.attempts = attempts
+        self.timeouts = timeouts
+
+
+class _Unfunded(Exception):
+    """The next retry could not be reserved (the budget refused it, or the ledger failed): it
+    is never sent. `attempts`/`timeouts` count those already made, as in _Exhausted."""
+
+    def __init__(self, attempts: int, timeouts: int, error: Exception) -> None:
+        super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
+        self.attempts = attempts
+        self.timeouts = timeouts
+        self.error = error
+
+
 class _Exhausted(Exception):
-    """Retries on the role's model are used up (429/5xx/timeouts)."""
+    """Retries on the role's model are used up (429/5xx/timeouts). `attempts` counts those the
+    model processed (5xx), `timeouts` those that may have been generated in full."""
 
     def __init__(self, attempts: int = 1, timeouts: int = 0) -> None:
-        super().__init__(f"{attempts} attempts, {timeouts} timeouts")
+        super().__init__(f"{attempts} processed attempts, {timeouts} timeouts")
         self.attempts = attempts
         self.timeouts = timeouts
 
@@ -387,27 +443,16 @@ class TokenFactoryClient:
         tool_choice: ToolChoice | None,
         max_output: int,
         response_format: dict[str, object] | None,
-    ) -> "_Request":
-        spec = self.config.roles[role]
-        payload = [m.model_dump(exclude_none=True) for m in messages]
-        extra_body: dict[str, object] = {}
-        toggle = self.config.provider.reasoning_toggle
-        if spec.reasoning != "default":
-            on = spec.reasoning == "on"
-            if toggle == "chat_template_kwargs":
-                extra_body["chat_template_kwargs"] = {"enable_thinking": on}
-            elif toggle == "system_flag":
-                payload.insert(0, {"role": "system", "content": "/think" if on else "/no_think"})
-        return _Request(
-            model=self.resolved[role].model_id,
-            messages=payload,
-            max_tokens=max_output,
-            temperature=spec.temperature,
-            timeout=spec.timeout_s or self.config.provider.timeout_s,
-            tools=[{"type": "function", "function": t.model_dump()} for t in tools or []],
+    ) -> "ChatRequest":
+        return chat_request(
+            self.config,
+            self.resolved,
+            role,
+            messages,
+            tools=tools,
             tool_choice=tool_choice,
+            max_output=max_output,
             response_format=response_format,
-            extra_body=extra_body,
         )
 
     async def _reserve(
@@ -429,13 +474,13 @@ class TokenFactoryClient:
     async def _settle(
         self, reservations: list[Reservation], tokens_in: int, tokens_out: int, cost: float
     ) -> None:
+        """Book the actual spend once per kind (Budget.settle: shielded, past a failed write)."""
         actual = {
             SpendKind.TOKENS_IN: float(tokens_in),
             SpendKind.TOKENS_OUT: float(tokens_out),
             SpendKind.INFERENCE_USD: cost,
         }
-        for reservation in reservations:
-            await self.budget.commit(reservation, actual[reservation.kind])
+        await self.budget.settle(reservations, actual)
 
     async def _complete_role(
         self,
@@ -454,29 +499,53 @@ class TokenFactoryClient:
         model_id = self.resolved[role].model_id
         out_cap = max_output or spec.max_output
         request = self._request(role, messages, tools, tool_choice, out_cap, response_format)
-        est_in = estimate_tokens(str(request.messages)) + estimate_tokens(str(request.tools))
+        est_in = estimate_message_tokens(request.messages) + estimate_tokens(str(request.tools))
         reservations = await self._reserve(run_id, model_id, est_in, out_cap)
         # Abandoned or failed generations may still be billed by the provider: charge the input
         # estimate. Unusable 200s are charged the full reservation (invariant 7, conservative).
-        input_only = (est_in, 0, self.pricing.estimate(model_id, est_in, 0))
         full = (est_in, out_cap, self.pricing.estimate(model_id, est_in, out_cap))
         started = time.monotonic()
+        tally = _Tally()
+
+        async def reserve_retry() -> None:  # invariant 7: a retry is a model call too
+            reservations.extend(await self._reserve(run_id, model_id, est_in, out_cap))
+
         try:
-            raw = await self._call_with_retries(request)
+            raw = await self._call_with_retries(request, tally, reserve_retry)
+        except _Unfunded as unfunded:
+            # The refused retry was never sent: only the attempts already made are charged.
+            tin = (unfunded.attempts + unfunded.timeouts) * est_in
+            tout = unfunded.timeouts * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
+            raise unfunded.error from None
         except _Exhausted as exhausted:
-            # Every attempt may be billed for its input; a timed-out one possibly in full.
-            tin = exhausted.attempts * est_in
+            # Every attempt the model processed may be billed for its input (a 429 or a
+            # connection error never reached it); a timed-out one possibly in full.
+            tin = (exhausted.attempts + exhausted.timeouts) * est_in
             tout = exhausted.timeouts * out_cap
             await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
-        except openai.APIStatusError as err:
-            await self._settle(reservations, 0, 0, 0.0)  # rejected (4xx): nothing generated
-            raise P2PError(
-                ErrorCode.MODEL_UNAVAILABLE,
-                f"model call for role {role.value} failed: HTTP {err.status_code}",
-            ) from None
+        except _Failed as failed:
+            cause = failed.__cause__
+            # The attempts before the final error count as above; the final one is free when
+            # it was refused (4xx), else it may have been sent: its input counts too.
+            refused = isinstance(cause, openai.APIStatusError)
+            tin = (failed.attempts + failed.timeouts + (0 if refused else 1)) * est_in
+            tout = failed.timeouts * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
+            if isinstance(cause, openai.APIStatusError):
+                raise P2PError(
+                    ErrorCode.MODEL_UNAVAILABLE,
+                    f"model call for role {role.value} failed: HTTP {cause.status_code}",
+                ) from None
+            assert cause is not None  # noqa: S101 (always raised `from err`)
+            raise cause from None
         except BaseException:
-            await self._settle(reservations, *input_only)
+            # Cancelled (or an unexpected error): the attempts already counted are charged as
+            # above, plus a request that was out with no answer yet, in full like a timeout.
+            tin = (tally.attempts + tally.timeouts + int(tally.in_flight)) * est_in
+            tout = (tally.timeouts + int(tally.in_flight)) * out_cap
+            await self._settle(reservations, tin, tout, self.pricing.estimate(model_id, tin, tout))
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
         try:
@@ -523,7 +592,9 @@ class TokenFactoryClient:
             latency_ms=latency_ms,
         )
 
-    async def _call_with_retries(self, req: "_Request") -> LegacyAPIResponse[ChatCompletion]:
+    async def _call_with_retries(
+        self, req: "ChatRequest", tally: _Tally, reserve_retry: Callable[[], Awaitable[None]]
+    ) -> LegacyAPIResponse[ChatCompletion]:
         retrying = AsyncRetrying(
             stop=stop_after_attempt(self.config.provider.max_retries),
             wait=_wait,
@@ -532,11 +603,15 @@ class TokenFactoryClient:
             sleep=self._sleep or asyncio.sleep,
         )
         create = self._openai.chat.completions.with_raw_response.create
-        attempts = timeouts = 0
         try:
             async for attempt in retrying:
+                if attempt.retry_state.attempt_number > 1:
+                    try:
+                        await reserve_retry()  # outside `attempt`: never retried itself
+                    except Exception as refused:  # BudgetExceeded, or the ledger failed
+                        raise _Unfunded(tally.attempts, tally.timeouts, refused) from refused
                 with attempt:
-                    attempts += 1
+                    tally.in_flight = True
                     try:
                         return await create(
                             model=req.model,
@@ -558,17 +633,35 @@ class TokenFactoryClient:
                             extra_body=req.extra_body or None,
                         )
                     except openai.APITimeoutError:
-                        timeouts += 1  # the provider may have generated (and billed) it all
+                        tally.in_flight = False
+                        tally.timeouts += 1  # the provider may have generated (and billed) it all
                         raise
+                    except openai.APIConnectionError as err:
+                        tally.in_flight = False
+                        if not isinstance(err.__cause__, httpx.ConnectError):
+                            tally.timeouts += 1  # lost after sending: it may have been generated
+                        raise  # a connection that never opened sent nothing: not billed
+                    except openai.RateLimitError:
+                        tally.in_flight = False
+                        raise  # refused before any work: nothing billed
+                    except openai.APIStatusError as err:
+                        tally.in_flight = False
+                        if err.status_code in _GATEWAY_TIMEOUTS:
+                            tally.timeouts += 1  # the upstream timed out, possibly after generating
+                        elif err.status_code >= 500:
+                            tally.attempts += 1  # 5xx: the input may have been processed
+                        raise  # a 4xx is refused before any work
+        except _Unfunded:
+            raise
         except Exception as err:
             if _retryable(err):
-                raise _Exhausted(attempts, timeouts) from err
-            raise
-        raise _Exhausted(attempts, timeouts)  # pragma: no cover - always returns or raises
+                raise _Exhausted(tally.attempts, tally.timeouts) from err
+            raise _Failed(tally.attempts, tally.timeouts) from err  # the retries before count
+        raise _Exhausted(tally.attempts, tally.timeouts)  # pragma: no cover - returns or raises
 
 
 @dataclass(frozen=True)
-class _Request:
+class ChatRequest:
     model: str
     messages: list[dict[str, object]]
     max_tokens: int
@@ -578,6 +671,58 @@ class _Request:
     tool_choice: ToolChoice | None
     response_format: dict[str, object] | None
     extra_body: dict[str, object]
+
+    def body(self) -> dict[str, object]:
+        """The JSON body of POST /chat/completions (the Batch API sends it as is)."""
+        body: dict[str, object] = {
+            "model": self.model,
+            "messages": self.messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+        }
+        if self.tools:
+            body["tools"] = self.tools
+        if self.tool_choice is not None:
+            body["tool_choice"] = self.tool_choice
+        if self.response_format is not None:
+            body["response_format"] = self.response_format
+        return {**body, **self.extra_body}
+
+
+def chat_request(
+    config: ModelsConfig,
+    resolved: Mapping[Role, ResolvedModel],
+    role: Role,
+    messages: list[Message],
+    *,
+    tools: list[ToolDef] | None = None,
+    tool_choice: ToolChoice | None = None,
+    max_output: int | None = None,
+    response_format: dict[str, object] | None = None,
+) -> ChatRequest:
+    """The request for `role`: its routed model, settings and reasoning switch. Shared by the
+    live client and the Batch API (app/models/batch.py), so both send the same thing."""
+    spec = config.roles[role]
+    payload = [m.model_dump(exclude_none=True) for m in messages]
+    extra_body: dict[str, object] = {}
+    toggle = config.provider.reasoning_toggle
+    if spec.reasoning != "default":
+        on = spec.reasoning == "on"
+        if toggle == "chat_template_kwargs":
+            extra_body["chat_template_kwargs"] = {"enable_thinking": on}
+        elif toggle == "system_flag":
+            payload.insert(0, {"role": "system", "content": "/think" if on else "/no_think"})
+    return ChatRequest(
+        model=resolved[role].model_id,
+        messages=payload,
+        max_tokens=max_output or spec.max_output,
+        temperature=spec.temperature,
+        timeout=spec.timeout_s or config.provider.timeout_s,
+        tools=[{"type": "function", "function": t.model_dump()} for t in tools or []],
+        tool_choice=tool_choice,
+        response_format=response_format,
+        extra_body=extra_body,
+    )
 
 
 def _prompt_version(prompt: str | None) -> str | None:

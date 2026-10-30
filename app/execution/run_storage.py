@@ -10,6 +10,10 @@ MAX_READ_BYTES = 1024 * 1024
 
 
 class RunStorage(Protocol):
+    """`get_bytes` returns None for a missing object and raises ValueError for one larger than
+    `max_bytes` without buffering it (check the size first, then read at most max_bytes + 1):
+    every object here may have been planted by untrusted code."""
+
     async def get_bytes(
         self, run_id: str, key: str, *, max_bytes: int = MAX_READ_BYTES
     ) -> bytes | None: ...

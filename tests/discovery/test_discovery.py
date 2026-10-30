@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -10,8 +11,9 @@ from app.discovery.hf_papers import HF_API
 from app.discovery.rank import github_repos
 from app.discovery.tavily import TAVILY_API, TavilyClient
 from app.domain.discovery import Discovery
+from app.domain.errors import P2PError
 from app.domain.events import WarningPayload
-from app.domain.models import StepName
+from app.domain.models import ErrorCode, StepName
 from app.ingestion.arxiv import EXPORT_API, ArxivClient, RateLimiter
 from app.models.fake import FakeModelClient
 from app.orchestrator.budget import SpendKind
@@ -52,8 +54,9 @@ async def _discover(
     case: str = "default",
     tavily_key: str | None = "test-key-not-real",
     runs: int = 1,
+    models: FakeModelClient | None = None,
 ) -> tuple[Discovery, FakeModelClient]:
-    fake = FakeModelClient(LLM_FIXTURES, case=case)
+    fake = models or FakeModelClient(LLM_FIXTURES, case=case)
     artifacts = LocalArtifactStore(tmp_path)
     ctx = await ctx_at(
         store,
@@ -172,6 +175,17 @@ async def test_cache_prevents_a_second_http_call(store: Store, tmp_path: Path) -
     assert respx.calls.call_count == 3  # HF paper, HF repos, arXiv metadata: once each
 
 
+@respx.mock
+async def test_a_failed_metadata_fetch_is_not_cached(store: Store, tmp_path: Path) -> None:
+    """arXiv down once must not hide the paper's code link for the next 24 hours."""
+    _routes(hf_summary="Code at https://github.com/microsoft/LoRA", atom=NO_CODE_ATOM)
+    respx.get(EXPORT_API).mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, content=NO_CODE_ATOM)]
+    )
+    await _discover(store, tmp_path, runs=2)
+    assert respx.get(EXPORT_API).call_count == 2  # asked again: the failure was not cached
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -214,3 +228,57 @@ async def test_without_a_tavily_key_discovery_still_completes(store: Store, tmp_
     discovery, _ = await _discover(store, tmp_path, tavily_key=None)
     assert discovery.repo is None
     assert any("DISCOVERY_DEGRADED" in n for n in discovery.notes)
+
+
+@respx.mock  # no route: any HTTP call (arXiv, HF, Tavily) fails the test
+async def test_a_canary_paper_never_searches_for_code(store: Store, tmp_path: Path) -> None:
+    """Canary titles are public: a repository anyone could publish must never steer the Coder
+    whose code runs on the developer machine (A-29 review)."""
+    canary = "c" * 64
+    fake = FakeModelClient(LLM_FIXTURES)
+    artifacts = LocalArtifactStore(tmp_path)
+    ctx = await ctx_at(
+        store,
+        StepName.DISCOVERING,
+        previous=[(StepName.INGESTING, "x"), (StepName.EXTRACTING_CLAIMS, "y")],
+        arxiv_id="0000.00001",
+    )
+    await store.set_paper_sha256(RUN, canary)
+    step = DiscoveringStep(
+        store=store,
+        arxiv=ArxivClient(limiter=RateLimiter(0.0, sleep=_no_sleep)),
+        tavily=TavilyClient(SecretStr("test-key-not-real")),
+        models=fake,
+        artifacts=artifacts,
+        canaries={canary: "0000.00001"},
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.PLANNING and result.output_ref is not None
+    discovery = Discovery.model_validate(artifacts.get_json(result.output_ref))
+    assert discovery.repo is None and discovery.datasets == []
+    assert any("canary" in note for note in discovery.notes)
+    assert not fake.calls
+
+
+class _RankerDown(FakeModelClient):
+    async def structured(self, *args: Any, **kwargs: Any) -> Any:
+        raise P2PError(ErrorCode.MODEL_UNAVAILABLE, "model for role utility unavailable")
+
+
+@respx.mock
+async def test_a_failing_ranker_degrades_discovery_instead_of_failing_the_run(
+    store: Store, tmp_path: Path
+) -> None:
+    """The Utility model is down while ranking search results: no repository, a warning."""
+    _routes(hf_summary="No link here.", atom=NO_CODE_ATOM)
+    respx.post(f"{TAVILY_API}/search").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"url": "https://github.com/someone/lora", "content": ""}]}
+        )
+    )
+    respx.post(f"{TAVILY_API}/extract").mock(return_value=httpx.Response(200, json={"results": []}))
+    discovery, _ = await _discover(store, tmp_path, models=_RankerDown(LLM_FIXTURES))
+    assert discovery.repo is None
+    assert any("DISCOVERY_DEGRADED" in n for n in discovery.notes)
+    warnings = [e.payload for e in await store.events_after(RUN, 0)]
+    assert any(isinstance(p, WarningPayload) and p.code == "DISCOVERY_DEGRADED" for p in warnings)
