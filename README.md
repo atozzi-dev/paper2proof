@@ -9,7 +9,7 @@ Built for the Nebius × NVIDIA Global AI Hackathon, *Coding and Agentic Engineer
 
 - **Live service:** <https://paper2proof.com> (gallery and replays are public; live runs need an
   invite code)
-- **Video (3 min):** [VIDEO_URL]
+- **Video (3 min):** <https://youtu.be/ltMqrJTM6R4>
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   **Limitations:** [docs/LIMITATIONS.md](docs/LIMITATIONS.md) ·
   **Platform feedback:** [docs/FEEDBACK.md](docs/FEEDBACK.md)
