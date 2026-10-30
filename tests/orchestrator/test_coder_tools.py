@@ -24,13 +24,24 @@ def test_tool_definitions_are_the_documented_set() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["../../etc/x", "/etc/passwd", "workspace/../x.py", "repo/x.py", "x.py", "workspace/"],
+    ["../../etc/x", "/etc/passwd", "workspace/../x.py", "repo/x.py", "../x.py", "workspace/"],
 )
 def test_writes_stay_in_the_workspace(path: str) -> None:
     ws = Workspace()
     with pytest.raises(ToolError):
         ws.write(path, "x")
     assert ws.files == {}
+
+
+def test_a_bare_path_is_a_workspace_path() -> None:
+    """Super VL (production, 2026-10-30) wrote `train.py` 40 times, refused each time for the
+    missing `workspace/` prefix, and never ran a smoke test."""
+    ws = Workspace()
+    ws.write("train.py", "print(1)\n")
+    assert ws.files == {"train.py": b"print(1)\n"}
+    assert ws.read("train.py") == ws.read("workspace/train.py") == "print(1)\n"
+    with pytest.raises(ToolError, match="workspace/"):
+        ws.write("../x.py", "x")
 
 
 def test_write_read_and_limits() -> None:

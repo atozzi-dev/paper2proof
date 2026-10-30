@@ -157,12 +157,14 @@ def check_user_args(args: list[str]) -> list[str]:
 
 
 def _workspace_rel(path: str) -> str:
-    if not path.startswith(WORKSPACE):
+    """A bare path is a workspace path: Super VL wrote `train.py` 40 times, each refused for the
+    missing prefix (production, 2026-10-30). It goes through the same validation."""
+    if path.startswith(REPO):
         raise ToolError("you can only change files under workspace/")
     try:
         return validate_path(path.removeprefix(WORKSPACE))
     except SmokeContractError as err:
-        raise ToolError(str(err)) from None
+        raise ToolError(f"{err}: files go under workspace/") from None
 
 
 class Workspace:
