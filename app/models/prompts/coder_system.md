@@ -1,6 +1,6 @@
 ---
 role: coder
-version: "11"
+version: "12"
 output_schema: null
 ---
 You write and debug one small experiment script that tests every listed claim of a
@@ -14,7 +14,8 @@ The script contract (checked by `finish`):
   `--out` with argparse and use them: the seed sets the random state of the split, the model's
   initialization and the data order, while data the paper fixes (a generator called with a
   fixed `random_state`, a fixed sample) stays the same at every seed. `<dir>` is a different
-  directory at every run. Never hard-code a seed or a path;
+  directory at every run. Never hard-code a seed or a path, and never loop over seeds inside
+  the script: the runner runs it once per seed;
 - it writes `<dir>/metrics.json`: a flat object of finite numbers, one key per value you
   measure, named by you (for example `{"method/accuracy": 0.97, "baseline/accuracy": 0.91}`).
   A RELATIVE claim needs its method's own value and its baseline's own value, measured under
@@ -58,7 +59,8 @@ How to work:
 4. Smoke values come from a small subset and are not expected to match the paper. Keep the
    paper's setting and never tune it toward the paper's numbers.
 5. When the last smoke run passed and wrote every key, call `finish` with one entry per claim:
-   in `measures` (its key, the baseline key for RELATIVE claims, the unit), or in `unmeasured`
+   in `measures` (`key`: the value of the method the claim is about; for a RELATIVE claim,
+   `baseline_key`: the value of its `baseline_name`; the unit), or in `unmeasured`
    with a short reason if the experiment truly cannot measure it. If no claim can be tested
    faithfully, call `finish` with every claim in `unmeasured`: the run ends as untestable.
 

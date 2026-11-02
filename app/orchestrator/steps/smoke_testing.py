@@ -10,6 +10,7 @@ the model only through wrap_untrusted (invariant 6).
 
 import ast
 import asyncio
+import contextlib
 import hashlib
 import json
 import math
@@ -41,6 +42,7 @@ from app.models.client import Message, ModelClient, Role, ToolChoice
 from app.models.prompt_files import load_prompt
 from app.models.untrusted import UNTRUSTED_NOTICE, wrap_untrusted
 from app.orchestrator.coder_tools import (
+    CHANGE_CHARS,
     TOOL_DEFS,
     ApplyPatch,
     Finish,
@@ -52,6 +54,8 @@ from app.orchestrator.coder_tools import (
     Workspace,
     WriteFile,
     check_user_args,
+    describe_changes,
+    failing_lines,
     parse_args,
 )
 from app.orchestrator.context import RunContext
@@ -74,6 +78,7 @@ TURNS_PER_RUN = 5  # model turns allowed per smoke run in the budget
 # older reads are trimmed, and Ultra and Super VL re-read them until the turns ran out.
 READS_PER_CHANGE = 8
 TOOL_RESULT_CHARS = 8_000
+
 ERROR_CHARS = 32_000  # ~8k tokens (architecture §6.4)
 KEEP_FULL_MESSAGES = 8  # the latest tool turns the Coder sees in full
 _TRIM_ABOVE = 500  # older results and arguments longer than this become a short note
@@ -125,9 +130,14 @@ class _State:
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
         self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
         self.option_warned: set[str] = set()  # the same, for extra generator options
+        self.refused: tuple[str, str] | None = None  # (workspace sha256, why) of the last refusal
         flags = data.get("stand_in_flags")
         self.stand_in_flags: list[str] = (  # every refusal, kept for the run's record
             [f for f in flags if isinstance(f, str)] if isinstance(flags, list) else []
+        )
+        hints = data.get("swap_hints")
+        self.swap_hints: list[str] = (  # every method/baseline swap hint, the same
+            [h for h in hints if isinstance(h, str)] if isinstance(hints, list) else []
         )
 
     def tried(self) -> bool:
@@ -141,6 +151,7 @@ class _State:
             "searches": self.searches,
             "last_smoke": self.last_smoke,
             "stand_in_flags": self.stand_in_flags,
+            "swap_hints": self.swap_hints,
         }
 
 
@@ -427,16 +438,32 @@ class SmokeTestingStep:
                         # The workspace is model-written, often from paper text: data, too.
                         source = "repository" if args.path.startswith("repo/") else "workspace"
                         result = wrap_untrusted(text, source=source, max_chars=TOOL_RESULT_CHARS)
-                    elif isinstance(args, WriteFile):
-                        ws.write(args.path, args.content)
+                    elif isinstance(args, WriteFile | ApplyPatch):
+                        before = dict(ws.files)
+                        if isinstance(args, WriteFile):
+                            ws.write(args.path, args.content)
+                            done = f"wrote {args.path}"
+                        else:
+                            done = f"patched {', '.join(ws.apply_patch(args.diff))}"
                         reads = 0
                         await save()
-                        result = f"OK: wrote {args.path}"
-                    elif isinstance(args, ApplyPatch):
-                        changed = ws.apply_patch(args.diff)
-                        reads = 0
-                        await save()
-                        result = f"OK: patched {', '.join(changed)}"
+                        result = f"OK: {done}"
+                        edited = [
+                            p for p in {*before, *ws.files} if before.get(p) != ws.files.get(p)
+                        ]
+                        try:  # only the edited files go to the CPU pool
+                            changes = await ctx.run_cpu(
+                                describe_changes,
+                                {p: before[p] for p in edited if p in before},
+                                {p: ws.files[p] for p in edited if p in ws.files},
+                                timeout_s=10,
+                            )
+                        except TimeoutError:  # a report, never a reason to fail the run
+                            changes = ""
+                        if changes:
+                            result += "\n" + wrap_untrusted(
+                                changes, source="workspace", max_chars=CHANGE_CHARS + 100
+                            )
                     elif isinstance(args, RunSmoke):
                         reads = 0
                         if state.smoke_runs >= max_runs:
@@ -485,20 +512,27 @@ class SmokeTestingStep:
             raise ToolError(str(err)) from None
         if script not in ws.files:
             raise ToolError(f"workspace/{script} does not exist")
-        launched = await ctx.run_cpu(launches_processes, ws.files)
-        if launched is not None:  # refused before the sandbox: no smoke run is spent
+        sha = await ctx.run_cpu(_workspace_sha256, ws.files)
+        last = state.last_smoke
+        if (  # Super VL ran one failing script 8 times in a row (production, 2026-10-30)
+            last is not None
+            and last.get("exit_code") != 0
+            and last.get("script") == script
+            and last.get("args") == list(args.args)
+            and last.get("workspace_sha256") == sha
+        ):  # checked first: a repeat costs no other check either
             raise ToolError(
-                f"workspace/{launched[0]}:{launched[1]} starts a process or runs another file: "
-                "run_smoke runs your script itself, so write the experiment as that script (no "
-                "subprocess, os.system, exec of a file or runpy)"
+                f"nothing changed since the last failing smoke run of {script} (exit code "
+                f"{last.get('exit_code')}): it would fail the same way. Change the script first "
+                "(read it to copy its lines exactly into a patch); no smoke run was spent"
             )
-        flat = await ctx.run_cpu(flat_parquet_glob, ws.files) if datasets else None
-        if flat is not None:  # the subset hides it: only the experiment would fail
-            raise ToolError(
-                f"workspace/{flat[0]}:{flat[1]} looks for parquet files directly in a folder, "
-                "but a dataset's files sit in subfolders (data/train-*.parquet): find them with "
-                "Path(os.environ['P2P_DATA_DIR'], '<folder>').rglob('*.parquet')"
-            )
+        if state.refused is not None and state.refused[0] == sha:  # the checks below, again
+            raise ToolError(state.refused[1])
+        try:
+            await self._check_workspace(ctx, ws, datasets)
+        except ToolError as err:
+            state.refused = (sha, str(err))
+            raise
         state.smoke_runs += 1
         try:
             outcome = await executor.run(env, argv, ws.files, self._timeout)
@@ -509,12 +543,23 @@ class SmokeTestingStep:
         state.last_smoke = {
             "script": script,
             "args": list(args.args),
-            "workspace_sha256": await ctx.run_cpu(_workspace_sha256, ws.files),
+            "workspace_sha256": sha,
             "exit_code": outcome.exit_code,
             "stderr": outcome.stderr[-ERROR_CHARS:],
             "metrics": outcome.metrics,
         }
         await self._emit_output(ctx, state.smoke_runs, outcome)
+        failing: list[str] = []  # the line with its neighbours, numbered: a patch can copy them
+        if outcome.exit_code != 0:
+            try:
+                lines = await ctx.run_cpu(failing_lines, ws.files, outcome.stderr, timeout_s=10)
+            except TimeoutError:  # a hint, never a reason to fail the run
+                lines = None
+            if lines is not None:
+                failing = [
+                    "failing line:",
+                    wrap_untrusted(lines, source="workspace", max_chars=4000),
+                ]
         return "\n".join(
             [
                 f"exit code: {outcome.exit_code} ({outcome.duration_s:.1f} s)",
@@ -524,8 +569,37 @@ class SmokeTestingStep:
                 wrap_untrusted(outcome.stdout[-4000:], source="smoke", max_chars=4000),
                 "stderr (tail):",
                 wrap_untrusted(outcome.stderr[-4000:], source="smoke", max_chars=4000),
+                *failing,
             ]
         )
+
+    async def _check_workspace(self, ctx: RunContext, ws: Workspace, datasets: bool) -> None:
+        """Mistakes refused before the sandbox: no smoke run is spent on them."""
+        launched = await ctx.run_cpu(launches_processes, ws.files)
+        if launched is not None:
+            raise ToolError(
+                f"workspace/{launched[0]}:{launched[1]} starts a process or runs another file: "
+                "run_smoke runs your script itself, so write the experiment as that script (no "
+                "subprocess, os.system, exec of a file or runpy)"
+            )
+        ignored = None
+        if any(b"--seed" in data for data in ws.files.values()):  # only then is it parsed
+            with contextlib.suppress(TimeoutError):  # a check, never a reason to fail the run
+                ignored = await ctx.run_cpu(ignores_seed, ws.files, timeout_s=10)
+        if ignored is not None:
+            raise ToolError(
+                f"workspace/{ignored[0]}:{ignored[1]} declares --seed but no file reads it: use "
+                "it for the split, the model's initialization and the data order. The runner "
+                "runs the script once per seed: never loop over seeds inside it (no smoke run "
+                "was spent)"
+            )
+        flat = await ctx.run_cpu(flat_parquet_glob, ws.files) if datasets else None
+        if flat is not None:  # the subset hides it: only the experiment would fail
+            raise ToolError(
+                f"workspace/{flat[0]}:{flat[1]} looks for parquet files directly in a folder, "
+                "but a dataset's files sit in subfolders (data/train-*.parquet): find them with "
+                "Path(os.environ['P2P_DATA_DIR'], '<folder>').rglob('*.parquet')"
+            )
 
     async def _emit_output(self, ctx: RunContext, iteration: int, outcome: SmokeResult) -> None:
         for stream, text in (("stdout", outcome.stdout), ("stderr", outcome.stderr)):
@@ -673,7 +747,7 @@ class SmokeTestingStep:
         if list(args.args) != last.get("args"):
             raise ToolError("finish args must match the last passing smoke run's args")
         metrics = last.get("metrics") or {}
-        _check_measures(claims, args, metrics, state.difference_warned)
+        _check_measures(claims, args, metrics, state.difference_warned, state.swap_hints)
         try:
             options = await ctx.run_cpu(extra_generator_options, ws.files, paper_text, timeout_s=10)
         except TimeoutError:  # a hint, never a reason to fail the run
@@ -711,6 +785,7 @@ class SmokeTestingStep:
                 "workspace_sha256": digest,
                 "smoke_runs": state.smoke_runs,
                 "stand_in_flags": state.stand_in_flags,
+                "swap_hints": state.swap_hints,
             },
         )
         await self._put(f"runs/{ctx.run_id}/workspace.json", state.dump(ws))
@@ -766,6 +841,67 @@ def launches_processes(files: dict[str, bytes]) -> tuple[str, int] | None:
             if _LAUNCH.search(line.split("#", 1)[0]):
                 return path, number
     return None
+
+
+def ignores_seed(files: dict[str, bytes]) -> tuple[str, int] | None:
+    """Where a script declares --seed that none of the Coder's files reads: Super VL looped
+    over seeds inside its script and ignored the runner's (production, 2026-10-30), so every
+    seed gave the same value. A read is `<x>.<dest>` under argparse's own name for it (not a
+    call such as random.seed(0)), getattr or attrgetter, vars(), __dict__ or _get_kwargs(); a
+    loop variable named seed is not one. A hint: a determined script can still evade it."""
+    declared: tuple[str, int, str] | None = None
+    used: set[str] = set()
+    for path in sorted(p for p in files if p.endswith(".py")):
+        try:
+            tree = ast.parse(files[path])
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            return None  # the smoke run shows it
+        called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                if id(node) not in called or node.attr == "__dict__":
+                    used.add(node.attr)
+                continue
+            if not isinstance(node, ast.Call):
+                continue
+            func = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if func in ("vars", "_get_kwargs"):  # every argument at once
+                used.add(_ANY_ARGUMENT)
+            elif func in ("getattr", "attrgetter"):
+                at = 1 if func == "getattr" else 0
+                name = node.args[at] if len(node.args) > at else None
+                if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                    used.add(name.value)
+                else:  # a computed name may be the seed's
+                    used.add(_ANY_ARGUMENT)
+            if func != "add_argument" or not isinstance(node.func, ast.Attribute):
+                continue
+            options = [a.value for a in node.args if isinstance(a, ast.Constant)]
+            if "--seed" not in options:
+                continue
+            dest = _argparse_dest(node, [o for o in options if isinstance(o, str)])
+            if dest is None:  # dest= a variable: the name the value gets is unknown
+                return None
+            declared = declared or (path, node.lineno, dest)
+    if declared is None or used & {declared[2], _ANY_ARGUMENT, "__dict__"}:
+        return None
+    return declared[0], declared[1]
+
+
+_ANY_ARGUMENT = "*"  # vars(), getattr with a computed name: any argument may be read
+
+
+def _argparse_dest(call: ast.Call, options: list[str]) -> str | None:
+    """The attribute argparse stores an option under: dest=, else the first long option (the
+    first option otherwise) without its dashes and with - as _. None when dest is computed."""
+    for keyword in call.keywords:
+        if keyword.arg == "dest":
+            value = keyword.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return value.value
+            return None
+    first = next((o for o in options if o.startswith("--")), options[0])
+    return first.lstrip("-").replace("-", "_")
 
 
 # scikit-learn's data generators and their defaults (1.9; checked against the installed
@@ -990,16 +1126,67 @@ def _check_own_value(
         )
 
 
+# Words that never name a baseline (a paper can call its own method "our previous model").
+_NAME_FILLER = {
+    "the", "a", "an", "of", "on", "in", "with", "and", "for", "to", "model", "method", "our",
+    "ours", "proposed", "previous",
+}  # fmt: skip
+# A baseline named by what it lacks ("MLP without dropout") shares its words with the method.
+_NEGATIONS = {"no", "not", "without", "wo", "non", "minus", "except"}
+# Words a metrics.json key uses for the baseline's role rather than its name.
+_BASELINE_ROLES = {"baseline", "vanilla", "standard", "default", "plain", "reference", "control"}
+
+
+def _words(text: str) -> list[str]:
+    return [word for word in re.split(r"[^a-z0-9]+", text.lower()) if word]
+
+
+def _likeness(parts: list[str], name: str | None) -> int:
+    """How many parts of a metrics.json key name the baseline: one of its words, the name run
+    together (resnet18) or its initials (lr), by prefix too; a role word (baseline, vanilla)
+    always does."""
+    score = sum(part in _BASELINE_ROLES for part in parts)
+    words = [w for w in _words(name or "") if w not in _NAME_FILLER and not w.isdigit()]
+    if not words:
+        return score
+    names = {*words, "".join(_words(name or ""))}
+    if len(words) > 1:
+        names.add("".join(w[0] for w in words))
+    for part in parts:
+        if len(part) > 1 and any(
+            part == n
+            or (len(n) > 2 and part.startswith(n))
+            or (len(part) > 2 and n.startswith(part))
+            for n in names
+        ):
+            score += 1
+    return score
+
+
+def looks_swapped(key: str, baseline_key: str, baseline_name: str | None) -> bool:
+    """Only `key` names the claim's baseline, by the parts the two keys do not share: Super VL
+    declared the two the wrong way round (production, 2026-10-30), which turns a verdict over.
+    Never for a baseline named by what it lacks: its words describe the method too."""
+    words = _words(baseline_name or "")
+    if _NEGATIONS & set(words) or {"w", "o"} <= set(words):  # "w/o"
+        return False
+    own, other = set(_words(key)), set(_words(baseline_key))
+    only_key, only_baseline = sorted(own - other), sorted(other - own)
+    return _likeness(only_key, baseline_name) > 0 == _likeness(only_baseline, baseline_name)
+
+
 def _check_measures(
     claims: list[tuple[Claim, ClaimType]],
     args: Finish,
     metrics: dict[str, Any],
     warned: set[str],
+    swap_hints: list[str] | None = None,
 ) -> None:
     """Every planned claim exactly once, measured (with keys the smoke run wrote, in a unit
     that fits) or declared unmeasured (execution-contracts §6); finish with none measured
     ends the run as untestable."""
     kinds = {claim.id: kind for claim, kind in claims}
+    baselines = {claim.id: claim.baseline_name for claim, _ in claims}
     named = [m.claim_id for m in args.measures] + [u.claim_id for u in args.unmeasured]
     unknown = sorted(set(named) - kinds.keys())
     if unknown:
@@ -1025,5 +1212,19 @@ def _check_measures(
             raise ToolError(f"metrics.json lacks {', '.join(missing)} ({measure.claim_id})")
         if measure.baseline_key is not None:
             _check_own_value(measure.claim_id, measure.key, measure.baseline_key, metrics, warned)
+            hint = f"{measure.claim_id}:swap:{measure.key}"
+            baseline = baselines[measure.claim_id]
+            if hint not in warned and looks_swapped(measure.key, measure.baseline_key, baseline):
+                warned.add(hint)  # a hint, once: the names can mislead (and come from a paper)
+                if swap_hints is not None:  # kept for the audit, in smoke_result.json
+                    pair = f"key {measure.key}, baseline_key {measure.baseline_key}"
+                    swap_hints.append(f"{measure.claim_id}: {pair}")
+                raise ToolError(  # the baseline's name is paper text: never quoted here
+                    f"{measure.claim_id}: {measure.key} looks like the baseline's value and "
+                    f"{measure.baseline_key} like the method's (compared with the claim's "
+                    "baseline_name). `key` must hold the value of the method the claim is about "
+                    "and `baseline_key` the value of its baseline: check which is which. If they "
+                    "are right, call finish again unchanged"
+                )
         if wrong := unit_mismatch(measure.unit, {k: metrics[k] for k in keys}):
             raise ToolError(f"{measure.claim_id}: {wrong}")

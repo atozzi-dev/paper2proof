@@ -160,6 +160,99 @@ async def test_a_planted_bug_is_fixed_and_finished(store: Store, tmp_path: Path)
     assert any(isinstance(p, SandboxOutputPayload) and p.stream == "stderr" for p in events)
 
 
+async def test_the_coder_sees_its_failing_line_and_what_each_edit_changed(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    traceback = FAIL.model_copy(
+        update={
+            "stderr": 'Traceback (most recent call last):\n  File "/work/workspace/train.py", '
+            "line 6, in <module>\nNameError: name 'accuracy_of' is not defined\n"
+        }
+    )
+    step, models = _step(
+        "planted_bug", artifacts, FakeSmokeExecutor([traceback, PASS]), FakeRunStorage()
+    )
+    await step.run(ctx)
+    wrote, failed, patched, *_ = _tool_results(models)
+    assert wrote.startswith("OK: wrote workspace/train.py") and "new file, 7 lines" in wrote
+    assert ">    6: acc = accuracy_of(a.seed)" in failed
+    assert '<untrusted_document source="workspace"' in failed
+    assert "1 line added, 1 removed" in patched and "+acc = 0.9 + a.seed / 1000" in patched
+
+
+async def test_the_coder_s_hints_fall_back_when_the_cpu_pool_times_out(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The edit report, the failing line and the seed check are hints: a timeout in the CPU
+    pool never fails the run."""
+    from app.orchestrator.coder_tools import describe_changes, failing_lines
+    from app.orchestrator.steps.smoke_testing import ignores_seed
+
+    original = RunContext.run_cpu
+    hints = (describe_changes, failing_lines, ignores_seed)
+
+    async def slow(self: RunContext, fn: Any, *args: Any, timeout_s: float | None = None) -> Any:
+        if fn in hints:
+            raise TimeoutError
+        return await original(self, fn, *args, timeout_s=timeout_s)
+
+    monkeypatch.setattr(RunContext, "run_cpu", slow)
+    ctx, artifacts = await _setup(store, tmp_path)
+    traceback = FAIL.model_copy(
+        update={"stderr": '  File "/work/workspace/train.py", line 6, in <module>\nNameError: x\n'}
+    )
+    step, models = _step(
+        "planted_bug", artifacts, FakeSmokeExecutor([traceback, PASS]), FakeRunStorage()
+    )
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    wrote, failed, patched, *_ = _tool_results(models)
+    assert wrote == "OK: wrote workspace/train.py" and patched == "OK: patched workspace/train.py"
+    assert "failing line" not in failed
+
+
+async def test_a_refused_workspace_is_refused_again_without_checking_it_again(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.orchestrator.steps.smoke_testing import launches_processes
+
+    original, checks = RunContext.run_cpu, []
+
+    async def counted(self: RunContext, fn: Any, *args: Any, timeout_s: float | None = None) -> Any:
+        if fn is launches_processes:
+            checks.append(fn)
+        return await original(self, fn, *args, timeout_s=timeout_s)
+
+    monkeypatch.setattr(RunContext, "run_cpu", counted)
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("smoke_refused_twice", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    _, first, second, *_ = _tool_results(models)
+    assert first == second and "starts a process" in first
+    assert len(checks) == 2  # the refusal, then the fixed script: never the repeat
+    assert len(smoke.runs) == 1
+
+
+async def test_a_failing_smoke_run_is_not_repeated_on_unchanged_code(
+    store: Store, tmp_path: Path
+) -> None:
+    """Super VL ran the same failing script 8 times in a row (production, 2026-10-30): a run on
+    the workspace and args that just failed is refused and costs no smoke run."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([FAIL, PASS])
+    step, models = _step("smoke_unchanged", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    assert len(smoke.runs) == 2
+    (refused,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "nothing changed since the last failing smoke run" in refused
+    assert "no smoke run was spent" in refused
+    assert artifacts.get_json(f"runs/{RUN}/workspace.json")["smoke_runs"] == 2
+
+
 async def test_escaping_writes_are_reported_and_packages_requested(
     store: Store, tmp_path: Path
 ) -> None:
@@ -402,6 +495,76 @@ async def test_a_value_only_looking_like_a_difference_is_a_hint_not_a_rule(
     errors = [r for r in _tool_results(models) if r.startswith("ERROR:")]
     assert len(errors) == refusals
     assert all("method/f1" in e and "call finish again unchanged" in e for e in errors)
+
+
+SWAPPED_METRICS = {"ours/top1_accuracy": 0.72, "resnet18/top1_accuracy": 0.68}
+
+
+async def test_a_method_and_baseline_swap_is_caught_before_the_verdict(
+    store: Store, tmp_path: Path
+) -> None:
+    """Super VL declared the baseline as `key` and the method as `baseline_key` (production,
+    2026-10-30): a planted claim was accepted and a true one rejected."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS.model_copy(update={"metrics": SWAPPED_METRICS})])
+    step, models = _step("finish_swapped", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    (error,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "c1: resnet18/top1_accuracy looks like the baseline's value" in error
+    assert "baseline_name" in error and "ResNet" not in error  # paper text stays wrapped
+    assert "check which is which" in error and "swap them" not in error  # a hint, not an order
+    smoke_result = artifacts.get_json(result.output_ref)
+    measure = smoke_result["measures"][0]
+    assert (measure["key"], measure["baseline_key"]) == (
+        "ours/top1_accuracy",
+        "resnet18/top1_accuracy",
+    )
+    hints = ["c1: key resnet18/top1_accuracy, baseline_key ours/top1_accuracy"]
+    assert smoke_result["swap_hints"] == hints  # kept for the audit, in the Proof Bundle
+    assert artifacts.get_json(f"runs/{RUN}/workspace.json")["swap_hints"] == hints  # resumes
+
+
+async def test_a_swap_hint_is_given_once(store: Store, tmp_path: Path) -> None:
+    """Names can mislead: the same finish sent again is accepted."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS.model_copy(update={"metrics": SWAPPED_METRICS})])
+    step, models = _step("finish_swapped_twice", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    assert len([r for r in _tool_results(models) if r.startswith("ERROR:")]) == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "baseline_key", "baseline_name", "swapped"),
+    [  # the two production swaps (0000.00006 c2, 0000.00008 c2)
+        ("standardized_svm/auc_mean", "raw_svm/auc_mean", "standardized RBF SVM", True),
+        ("c2/lr_rmse", "c2/gb_rmse", "linear regression", True),
+        ("baseline/top1_accuracy", "top1_accuracy", "ResNet-18", True),
+        ("resnet18/acc", "ours/acc", "ResNet-18", True),
+        # declared the right way round, or nothing to tell them apart
+        ("raw_svm/auc", "std_svm/auc", "standardized RBF SVM", False),
+        ("top1_accuracy", "baseline/top1_accuracy", "ResNet-18", False),
+        ("bert_adapter/acc", "bert/acc", "BERT", False),
+        ("method/acc", "other/acc", "ResNet-18", False),
+        ("a/acc", "b/acc", None, False),
+        # a baseline named by what it lacks shares its words with the method
+        ("mlp_dropout/accuracy", "no_dropout/accuracy", "MLP without dropout", False),
+        ("bert_finetuned/acc", "bert_frozen/acc", "BERT (no fine-tuning)", False),
+        ("with_augmentation/acc", "without/acc", "ResNet w/o augmentation", False),
+        # words a paper could use for its own method never count
+        ("ours/acc", "sota/acc", "our previous model", False),
+        # a baseline key named by its role names the baseline too
+        ("resnet50_sam/acc", "vanilla/acc", "ResNet-50 trained with SGD", False),
+        ("transformer_ours/bleu", "vanilla/bleu", "Transformer-base", False),
+    ],
+)
+def test_a_key_named_like_the_baseline_looks_swapped(
+    key: str, baseline_key: str, baseline_name: str | None, swapped: bool
+) -> None:
+    from app.orchestrator.steps.smoke_testing import looks_swapped
+
+    assert looks_swapped(key, baseline_key, baseline_name) is swapped
 
 
 def test_a_huge_metrics_file_is_not_compared_key_by_key() -> None:
@@ -894,6 +1057,69 @@ async def test_a_script_that_starts_processes_is_not_smoke_run(
     refused = _tool_results(models)[1]
     assert refused.startswith("ERROR:") and "train.py:1" in refused and "process" in refused
     assert len(smoke.runs) == 1  # the refused run never reached the sandbox
+
+
+async def test_a_script_that_ignores_the_seed_is_not_smoke_run(
+    store: Store, tmp_path: Path
+) -> None:
+    """Super VL looped over seeds inside its script and never read --seed (production,
+    2026-10-30): every seed gave the same value and each run trained three times."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("smoke_ignores_seed", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    refused = _tool_results(models)[1]
+    assert refused.startswith("ERROR: workspace/train.py:3 declares --seed but no file reads it")
+    assert "never loop over seeds" in refused and "no smoke run was spent" in refused
+    assert len(smoke.runs) == 1
+
+
+SEED_ARG = "import argparse\np = argparse.ArgumentParser()\np.add_argument('--seed', type=int)\n"
+
+
+@pytest.mark.parametrize(
+    ("code", "ignored"),
+    [
+        (SEED_ARG + "a = p.parse_args()\nfor s in [0, 1, 2]:\n    fit(random_state=s)\n", True),
+        (SEED_ARG + "a = p.parse_args()\nfor seed in [0, 1]:\n    fit(random_state=seed)\n", True),
+        (SEED_ARG + "a = p.parse_args()\ncfg = {'seed': 0}\nfit(**cfg)\n", True),
+        (SEED_ARG + "import random\na = p.parse_args()\nrandom.seed(0)\n", True),
+        (SEED_ARG.replace("type=int", "dest='rs'") + "a = p.parse_args()\nprint(a.seed)\n", True),
+        (SEED_ARG + "class E:\n    def __init__(self, a):\n        fit(a.config.seed)\n", False),
+        (SEED_ARG + "a = p.parse_args()\nfit(random_state=a.seed)\n", False),
+        (SEED_ARG + "a = p.parse_args()\nfit(random_state=getattr(a, 'seed'))\n", False),
+        (SEED_ARG + "def main(seed):\n    fit(seed)\nmain(**vars(p.parse_args()))\n", False),
+        (SEED_ARG + "a = p.parse_args()\nfit(a.__dict__['seed'])\n", False),
+        # argparse names the value after dest=, else the first long option
+        (
+            SEED_ARG.replace("'--seed'", "'--random-seed', '--seed'")
+            + "fit(p.parse_args().random_seed)\n",
+            False,
+        ),
+        (SEED_ARG.replace("type=int", "dest=D") + "fit(p.parse_args().x)\n", False),
+        (SEED_ARG + "k = 'seed'\nfit(getattr(p.parse_args(), k))\n", False),
+        (SEED_ARG + "fit(dict(p.parse_args()._get_kwargs()))\n", False),
+        (SEED_ARG.replace("type=int", "dest='rs'") + "fit(p.parse_args().rs)\n", False),
+        ("print('no arguments at all')\n", False),
+        (SEED_ARG + "def broken(:\n", False),  # the smoke run shows a syntax error
+    ],
+)
+def test_a_declared_seed_must_be_read(code: str, ignored: bool) -> None:
+    from app.orchestrator.steps.smoke_testing import ignores_seed
+
+    found = ignores_seed({"train.py": code.encode()})
+    assert (found == ("train.py", 3)) if ignored else found is None
+
+
+def test_a_seed_read_in_another_workspace_file_counts() -> None:
+    from app.orchestrator.steps.smoke_testing import ignores_seed
+
+    files = {
+        "train.py": (SEED_ARG + "run(p.parse_args())\n").encode(),
+        "lib.py": b"def run(a):\n    return a.seed\n",
+    }
+    assert ignores_seed(files) is None
 
 
 SYNTHETIC = "make_classification n=2000 features=20 informative=6 redundant=2 flip_y=0.05"
