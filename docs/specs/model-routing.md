@@ -8,12 +8,12 @@ Source: architecture §5, §6 (v0.2). Normative. Model IDs, context windows and 
 
 | Role | Default match (`config/models.yaml`) | Used by |
 |---|---|---|
-| `READER` | `nemotron-3-super` | Full-paper claim extraction |
-| `CODER` | `nemotron-3-super` | Smoke loop (tool calling) |
+| `READER` | `nemotron-3.5-super-vl` | Full-paper claim extraction |
+| `CODER` | `nemotron-3.5-super-vl` | Smoke loop (tool calling) |
 | `PLANNER` | `nemotron-3-ultra` | Experiment plan |
 | `JUDGE` | `nemotron-3-ultra` | Verdict explanation, caveats |
-| `VISION` | `nano-omni` | Numbers from rasterized tables and figures |
-| `UTILITY` | `nemotron-3-nano-30b` | Normalization, ranking, log parsing, UI summaries, JSON repair |
+| `VISION` | `nemotron-3.5-super-vl` | Numbers from rasterized tables and figures |
+| `UTILITY` | `nemotron-3_5-lightning` | Normalization, ranking, log parsing, UI summaries, JSON repair |
 
 ## Resolution at startup
 
