@@ -6,12 +6,12 @@ import type { Stats, VerdictKind } from '../types/api'
 const KINDS: VerdictKind[] = ['REPRODUCED', 'REPRODUCED_AT_REDUCED_SCALE', 'NOT_REPRODUCED', 'INCONCLUSIVE']
 
 const ROLES: { role: string; family: string; job: string }[] = [
-  { role: 'Reader', family: 'Nemotron Super', job: 'Reads the paper and extracts the quantitative claims with their source (table, section).' },
+  { role: 'Reader', family: 'Nemotron 3.5 Super VL', job: 'Reads the paper and extracts the quantitative claims with their source (table, section).' },
   { role: 'Vision', family: 'Nemotron 3.5 Super VL', job: 'Reads tables and figures the text extraction cannot (PDF papers).' },
   { role: 'Planner', family: 'Nemotron Ultra', job: 'Turns the claims into an experiment plan: scale, seeds, packages, datasets, compute minutes.' },
-  { role: 'Coder', family: 'Nemotron Super', job: 'Writes and fixes the experiment code, smoke-tested in an isolated sandbox with no network.' },
+  { role: 'Coder', family: 'Nemotron 3.5 Super VL', job: 'Writes and fixes the experiment code, smoke-tested in an isolated sandbox with no network.' },
   { role: 'Judge', family: 'Nemotron Ultra', job: 'Explains the verdict in plain words. It cannot change the verdict.' },
-  { role: 'Utility', family: 'Nemotron Nano', job: 'Small classification and summarization tasks.' },
+  { role: 'Utility', family: 'Nemotron 3.5 Lightning', job: 'Small classification and summarization tasks.' },
 ]
 
 export function AboutPage() {

@@ -101,6 +101,8 @@ describe('Home onboarding', () => {
     render(<App />)
     const steps = screen.getByRole('list', { name: 'How it works' })
     expect(within(steps).getAllByRole('listitem')).toHaveLength(3)
+    expect(steps).toHaveTextContent('Reader · Nemotron 3.5 Super VL')
+    expect(steps).not.toHaveTextContent(/Super(?! VL)|Nano/) // retired on 2026-11-09
   })
 
   it('shows the newest gallery verdict next to the form, with its chart', async () => {
@@ -135,8 +137,11 @@ describe('About', () => {
     window.location.hash = '#/about'
     render(<App />)
     const roles = await screen.findByRole('table', { name: 'Model roles' })
-    expect(within(roles).getByRole('row', { name: /Vision/ })).toHaveTextContent('Nemotron 3.5 Super VL')
-    expect(roles).not.toHaveTextContent('Nano Omni')
+    for (const role of [/Reader/, /Vision/, /Coder/]) {
+      expect(within(roles).getByRole('row', { name: role })).toHaveTextContent('Nemotron 3.5 Super VL')
+    }
+    expect(within(roles).getByRole('row', { name: /Utility/ })).toHaveTextContent('Nemotron 3.5 Lightning')
+    expect(roles).not.toHaveTextContent(/Super(?! VL)|Nano/) // retired on 2026-11-09, and no Nano Omni
     expect(within(roles).getByRole('row', { name: /Coder/ })).not.toHaveTextContent('Sandboxes')
   })
 

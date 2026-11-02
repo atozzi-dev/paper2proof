@@ -86,8 +86,8 @@ stateDiagram-v2
 | Step | What happens | Who decides |
 |---|---|---|
 | `INGESTING` | Download the LaTeX source (or the PDF) from arXiv, hash it, parse the text, rasterize pages with tables or figures | Code (in the process pool) |
-| `EXTRACTING_CLAIMS` | Reader extracts claims with metric, dataset, setting, value, std and source reference. Vision reads tables and figures from PDF pages | Super, Super VL |
-| `DISCOVERING` | Find the official repository: GitHub URLs in the HF Papers summary and the abstract, then Tavily search; candidates ranked by Utility | Code, Tavily, Nano |
+| `EXTRACTING_CLAIMS` | Reader extracts claims with metric, dataset, setting, value, std and source reference. Vision reads tables and figures from PDF pages | Super VL |
+| `DISCOVERING` | Find the official repository: GitHub URLs in the HF Papers summary and the abstract, then Tavily search; candidates ranked by Utility | Code, Tavily, Lightning |
 | `PLANNING` | Plan the experiment for the selected claim: dataset, packages, seeds, scale, GPU minutes, cost estimate. Code then corrects the plan against the limits | Ultra, code |
 | `AWAITING_APPROVAL` | Plans estimated above $0.60 wait for the user's approval (30 minutes) | User |
 | `PROVISIONING` | CPU job: validated wheels, datasets and the repository are packed into the run's bucket | Code only |
@@ -450,7 +450,7 @@ highest known price until one is published.
 |---|---|
 | 429 from Token Factory | Backoff honouring the reset headers, then the role's fallback |
 | 5xx or timeout from a model | Idempotent retry, then `MODEL_UNAVAILABLE` |
-| Invalid JSON | One repair by Utility (Nano), one retry on the original role, then `SCHEMA_ERROR` |
+| Invalid JSON | One repair by Utility (Lightning), one retry on the original role, then `SCHEMA_ERROR` |
 | No GPU capacity | `INCONCLUSIVE (CAPACITY)` after a refusal or 20 minutes in the queue |
 | Project quota used up | The run ends with a message naming the quota |
 | Stuck job | Watchdog and reaper cancel it; the step fails with `TIMEOUT` |

@@ -11,12 +11,12 @@ const STEPS = [
   {
     title: 'Read',
     body: 'Enter an arXiv ID: Nemotron models read the paper and pick the claims a run can test.',
-    chip: 'Reader · Nemotron Super',
+    chip: 'Reader · Nemotron 3.5 Super VL',
   },
   {
     title: 'Re-run',
     body: 'The experiment is planned, coded, smoke-tested and run in an isolated Nebius Token Factory sandbox, without internet.',
-    chip: 'Planner · Ultra · Coder · Super',
+    chip: 'Planner · Ultra · Coder · Super VL',
   },
   {
     title: 'Decide',

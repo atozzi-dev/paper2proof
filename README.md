@@ -65,11 +65,11 @@ listed next to it. It is a statement about our run, never about the authors.
 ```mermaid
 flowchart LR
     A["arXiv ID"] --> I["Ingest<br/>LaTeX / PDF"]
-    I --> C["Extract claims<br/>Super + Super VL"]
-    C --> D["Find the code<br/>HF Papers + Tavily + Nano"]
+    I --> C["Extract claims<br/>Super VL"]
+    C --> D["Find the code<br/>HF Papers + Tavily + Lightning"]
     D --> P["Plan<br/>Ultra"]
     P --> PR["Provision<br/>locked-down container"]
-    PR --> S["Write and smoke-test<br/>Super, Sandbox offline"]
+    PR --> S["Write and smoke-test<br/>Super VL, Sandbox offline"]
     S --> E["Run 3+ seeds<br/>Sandbox offline, CPU"]
     E --> V["Verdict<br/>pure function"]
     V --> J["Explain<br/>Ultra"]
@@ -178,7 +178,7 @@ ambiguous or missing.
 
 **Where Token Factory accelerated the work**
 
-- **One API for every model size.** Switching a role from Ultra to Super or Nano is a one-line
+- **One API for every model size.** Switching a role from Ultra to Super VL or Lightning is a one-line
   config change, which is how we tuned cost against quality per role.
 - **OpenAI compatibility.** The standard `openai` SDK, tool calling and the reasoning switch
   (`chat_template_kwargs`) worked unchanged, so the client is a thin layer with retries,
@@ -193,7 +193,7 @@ ambiguous or missing.
 ## Tavily
 
 Tavily finds what the paper does not link. When neither the arXiv abstract nor Hugging Face
-Papers names an official repository, Tavily search finds candidates, and Nano ranks them.
+Papers names an official repository, Tavily search finds candidates, and Lightning ranks them.
 A repository found this way is marked `official: false` in the plan. The Coder also uses Tavily
 to search library documentation while it fixes a failing smoke run. Both uses are capped per
 run and per day.
