@@ -198,7 +198,9 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 - the smoke `metrics.json` has every declared key, and each value fits its declared unit.
 
 The control plane turns `measures` into the manifest's `claims` and keeps the units and the
-unmeasured claims in `smoke_result.json`. An unmeasured claim gets an INCONCLUSIVE verdict with
+unmeasured claims in `smoke_result.json`, with `swap_hints`: each time `finish` said a RELATIVE
+claim's `key` looked like its baseline (`"<claim_id>: key <key>, baseline_key <key>"`, once per
+claim and key; the claim then measures what the last `finish` declared). An unmeasured claim gets an INCONCLUSIVE verdict with
 reason `NOT_MEASURED`, decided by code.
 
 ## 7. Runner entrypoint (`images/runner/entrypoint.py`)
