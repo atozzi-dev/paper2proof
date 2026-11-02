@@ -21,7 +21,7 @@ def stream() -> Iterator[io.StringIO]:
     root = logging.getLogger()
     saved = (list(root.handlers), list(root.filters), root.level)
     loggers = [logging.getLogger(name) for name in UVICORN]
-    saved_uvicorn = [(list(lg.handlers), lg.propagate) for lg in loggers]
+    saved_uvicorn = [(list(lg.handlers), lg.propagate, lg.disabled) for lg in loggers]
     for lg in loggers:  # what uvicorn's own dictConfig leaves behind before the app loads
         lg.addHandler(logging.StreamHandler(io.StringIO()))
         lg.propagate = False
@@ -30,9 +30,10 @@ def stream() -> Iterator[io.StringIO]:
     yield buffer
     root.handlers[:], root.filters[:] = saved[0], saved[1]
     root.setLevel(saved[2])
-    for lg, (handlers, propagate) in zip(loggers, saved_uvicorn, strict=True):
+    for lg, (handlers, propagate, disabled) in zip(loggers, saved_uvicorn, strict=True):
         lg.handlers[:] = handlers
         lg.propagate = propagate
+        lg.disabled = disabled
 
 
 def _lines(buffer: io.StringIO) -> list[dict[str, object]]:
@@ -93,10 +94,17 @@ def test_uvicorn_loggers_go_through_the_json_handler(stream: io.StringIO) -> Non
     for name in UVICORN:
         lg = logging.getLogger(name)
         assert lg.handlers == [] and lg.propagate
-    access = logging.getLogger("uvicorn.access")
-    access.info('%s - "%s %s HTTP/%s" %d', "10.0.0.1", "GET", f"/x?k={KNOWN}", "1.1", 200)
+    logging.getLogger("uvicorn.error").warning("worker %s", KNOWN)
     (line,) = _lines(stream)
-    assert line["logger"] == "uvicorn.access" and KNOWN not in stream.getvalue()
+    assert line["logger"] == "uvicorn.error" and KNOWN not in stream.getvalue()
+
+
+def test_the_access_log_never_records_client_addresses(stream: io.StringIO) -> None:
+    """The privacy notice (web/src/pages/Privacy.tsx) says client addresses never reach the
+    logs; uvicorn's access log wrote one with every request, next to the run ID."""
+    access = logging.getLogger("uvicorn.access")
+    access.info('%s - "%s %s HTTP/%s" %d', "203.0.113.7:5123", "GET", "/api/runs/r_x", "1.1", 200)
+    assert "203.0.113.7" not in stream.getvalue()
 
 
 def test_lines_carry_run_id_and_the_run_trace_id(stream: io.StringIO) -> None:

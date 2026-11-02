@@ -187,6 +187,9 @@ def configure_logging(
         uvicorn = logging.getLogger(name)
         uvicorn.handlers.clear()
         uvicorn.propagate = True
+    # The access log writes the client address with every request: the privacy notice
+    # (web/src/pages/Privacy.tsx) promises addresses never reach the logs, whatever the CLI flags.
+    logging.getLogger("uvicorn.access").disabled = True
     for name in CHATTY_LOGGERS:  # e.g. OPENAI_LOG=debug would log request bodies
         chatty = logging.getLogger(name)
         chatty.setLevel(max(chatty.level, logging.INFO))

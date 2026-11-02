@@ -1,5 +1,6 @@
 """In-memory token buckets (one instance, one process: the endpoint has a single replica)."""
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +18,9 @@ class RateLimiter:
     max_buckets: int = 10_000
     _buckets: dict[tuple[str, str], _Bucket] = field(default_factory=dict)
     _pruned_at: float = float("-inf")
+    # Sync dependencies call allow() from FastAPI's thread pool, the session endpoint from the
+    # event loop: a prune iterating the dict must not race an insert.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def _prune(self, now: float) -> None:
         """Drop buckets idle for over a minute (they would be full again): bounded memory, and
@@ -32,6 +36,10 @@ class RateLimiter:
 
     def allow(self, scope: str, key: str, per_minute: int) -> bool:
         """Take one token from the (scope, key) bucket refilled at `per_minute` per 60 s."""
+        with self._lock:
+            return self._allow(scope, key, per_minute)
+
+    def _allow(self, scope: str, key: str, per_minute: int) -> bool:
         now = self.clock()
         if now - self._pruned_at >= 60:  # client addresses: none kept idle much past a minute
             self._prune(now)

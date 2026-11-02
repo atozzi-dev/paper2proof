@@ -28,9 +28,10 @@ export function PrivacyPage() {
           <li>
             Like every web server, ours receives your IP address with each
             request. We use it only to send you the page and to limit how many
-            requests one address can make per minute. It is kept in the
+            requests one address can make per minute. It is kept only in the
             server&rsquo;s memory, never written to disk or to the logs, and
-            dropped once it has been idle for a minute or two.
+            cleared once it has been idle for a minute: the clean-up runs with
+            the next request the server handles, and a restart clears it all.
           </li>
           <li>
             No analytics, no advertising, no third-party scripts, fonts or
@@ -79,17 +80,17 @@ export function PrivacyPage() {
         <h2 id="privacy-where-h">Where the data is, and for how long</h2>
         <ul>
           <li>
-            The site runs on a virtual server in Poland. Its database, its
-            backup and the run files are kept in Nebius AI Cloud in Finland.
-            Everything stays in the EU.
+            The site and its database run on a virtual server in Poland. A
+            continuous backup of the database and the run files are kept in
+            Nebius AI Cloud in Finland. Everything stays in the EU.
           </li>
           <li>
             The hosting provider and Nebius process the data only on our behalf.
           </li>
           <li>
-            IP addresses: a minute or two, in memory only. The session cookie: 7
-            days. Runs: while the service runs, or until you ask us to delete
-            them.
+            IP addresses: in memory only, cleared after a minute of inactivity.
+            The session cookie: 7 days. Runs: while the service runs, or until
+            you ask us to delete them.
           </li>
         </ul>
         <p>
