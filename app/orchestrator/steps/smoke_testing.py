@@ -55,6 +55,7 @@ from app.orchestrator.coder_tools import (
     WriteFile,
     check_user_args,
     describe_changes,
+    error_hints,
     failing_lines,
     parse_args,
 )
@@ -560,6 +561,9 @@ class SmokeTestingStep:
                     "failing line:",
                     wrap_untrusted(lines, source="workspace", max_chars=4000),
                 ]
+            with contextlib.suppress(TimeoutError):  # it reads the whole workspace
+                stderr = outcome.stderr[-ERROR_CHARS:]
+                failing += await ctx.run_cpu(error_hints, ws.files, stderr, timeout_s=10)
         return "\n".join(
             [
                 f"exit code: {outcome.exit_code} ({outcome.duration_s:.1f} s)",

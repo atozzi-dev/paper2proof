@@ -178,7 +178,25 @@ async def test_the_coder_sees_its_failing_line_and_what_each_edit_changed(
     assert wrote.startswith("OK: wrote workspace/train.py") and "new file, 7 lines" in wrote
     assert ">    6: acc = accuracy_of(a.seed)" in failed
     assert '<untrusted_document source="workspace"' in failed
+    assert "newer release" not in failed  # a NameError is the script's own
     assert "1 line added, 1 removed" in patched and "+acc = 0.9 + a.seed / 1000" in patched
+
+
+async def test_a_removed_parameter_is_named_as_such(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    removed = FAIL.model_copy(
+        update={
+            "stderr": "TypeError: LogisticRegression.__init__() got an unexpected keyword "
+            "argument 'multi_class'\n"
+        }
+    )
+    step, models = _step(
+        "removed_parameter", artifacts, FakeSmokeExecutor([removed, PASS]), FakeRunStorage()
+    )
+    await step.run(ctx)
+    failed = _tool_results(models)[1]
+    assert "note: LogisticRegression in the installed version takes no `multi_class`" in failed
+    assert "changing its value will not help" in failed
 
 
 async def test_the_coder_s_hints_fall_back_when_the_cpu_pool_times_out(

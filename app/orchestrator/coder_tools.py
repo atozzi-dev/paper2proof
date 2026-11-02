@@ -503,6 +503,75 @@ def describe_changes(before: dict[str, bytes], after: dict[str, bytes]) -> str:
     return text if len(text) <= CHANGE_CHARS else text[:CHANGE_CHARS] + "\n[cut]"
 
 
+_NAME = r"[A-Za-z_][A-Za-z0-9_.]{0,59}"  # a Python name: never markup from the script's output
+_UNEXPECTED_ARGUMENT = re.compile(
+    rf"^TypeError: ({_NAME})\(\) got an unexpected keyword argument '({_NAME})'$"
+)
+_NO_ATTRIBUTE = re.compile(
+    rf"^AttributeError: (?:module '({_NAME})'|'({_NAME})' object) has no attribute '({_NAME})'$"
+)
+_NO_IMPORT = re.compile(rf"^ImportError: cannot import name '({_NAME})' from '({_NAME})'")
+_BUILTIN_TYPES = {
+    "NoneType",
+    "int",
+    "float",
+    "str",
+    "bytes",
+    "bool",
+    "list",
+    "dict",
+    "tuple",
+    "set",
+}
+_NEWER = "it was removed or renamed in a newer release than you may know"
+
+
+def error_hints(files: dict[str, bytes], stderr: str) -> list[str]:
+    """A note when the last error names something the installed library lacks: Super VL read
+    "unexpected keyword argument 'multi_class'" as a wrong value and changed it 4 times before
+    removing it (local Set A, 2026-11-02). Only Python names reach the note, and only names the
+    Coder wrote itself (stderr can come from the paper's repository), never about a function or
+    class its own files define. Pure (CPU pool)."""
+    lines = [line.strip() for line in stderr.splitlines()[-TRACEBACK_LINES:] if len(line) <= 1000]
+    last = next((line for line in reversed(lines) if re.match(r"\w+(Error|Exception)\b", line)), "")
+    code = "\n".join(
+        data.decode("utf-8", "replace") for p, data in files.items() if p.endswith(".py")
+    )
+
+    def written(name: str) -> bool:
+        return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", code) is not None
+
+    def defined(owner: str) -> bool:
+        name = re.escape(owner.split(".")[-1])
+        return re.search(rf"^[ \t]*(?:def|class)[ \t]+{name}\b", code, re.MULTILINE) is not None
+
+    if (match := _UNEXPECTED_ARGUMENT.match(last)) is not None:
+        owner = match.group(1).removesuffix(".__init__")
+        if not written(match.group(2)) or defined(owner):
+            return []
+        return [
+            f"note: {owner} in the installed version takes no `{match.group(2)}` argument: "
+            f"{_NEWER}. Remove the argument, or pass what replaced it; changing its value will "
+            "not help"
+        ]
+    if (match := _NO_ATTRIBUTE.match(last)) and match.group(2) not in _BUILTIN_TYPES:
+        owner = match.group(1) or match.group(2)
+        if not written(match.group(3)) or defined(owner):
+            return []
+        return [
+            f"note: the installed `{owner}` has no `{match.group(3)}`: {_NEWER}. Use what this "
+            "version offers instead (search_docs can tell), never a stand-in"
+        ]
+    if (match := _NO_IMPORT.match(last)) is not None:
+        if not written(match.group(1)):
+            return []
+        return [
+            f"note: the installed `{match.group(2)}` has no `{match.group(1)}` to import: "
+            f"{_NEWER}. Import what this version offers instead (search_docs can tell)"
+        ]
+    return []
+
+
 def failing_lines(files: dict[str, bytes], stderr: str) -> str | None:
     """The innermost traceback frame in the Coder's own files, with its neighbours. Only the
     last lines of stderr are read, and only lines a traceback could write. Pure (CPU pool)."""
