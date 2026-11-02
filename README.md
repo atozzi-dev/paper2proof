@@ -319,7 +319,10 @@ docker container prune --filter label=p2p-dev=1
 
 On Windows, keep the checkout under your own user profile, or restrict `var\jobs` to your
 account (`icacls var\jobs /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`): a folder such as
-`C:\Projects` lets every local account write there.
+`C:\Projects` lets every local account write there. Run `make` from Git Bash (`>>` in Windows
+PowerShell writes `.env` in UTF-16). With docker jobs, `make dev` starts uvicorn without
+`--reload`: on Windows its reloader needs an event loop that cannot start the docker CLI, and
+every job would fail. Restart it after changing the code.
 
 ### Deploying
 

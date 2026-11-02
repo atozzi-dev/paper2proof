@@ -40,10 +40,14 @@ test-docker: ## Tests on the built images (make images first; one test downloads
 test-live: ## Real Token Factory / Tavily / Nebius calls: costs money, ask first
 	@echo "not implemented yet (A-20)"; exit 1
 
-dev: ## Migrations + uvicorn --reload on :8000 with P2P_ENV=dev and .env (local artifacts, no jobs run)
+dev: ## Migrations + uvicorn --reload on :8000 with P2P_ENV=dev and .env (no --reload for docker jobs on Windows)
 	set -a; [ ! -f .env ] || . ./.env; set +a; export P2P_ENV=dev; \
+	reload='--reload --reload-dir app'; \
+	if [ "$${OS:-}" = Windows_NT ] && [ "$${P2P_JOB_BACKEND:-}" = docker ]; then \
+	  reload=''; echo 'Windows with docker jobs: no --reload (its event loop cannot start docker)'; \
+	fi; \
 	$(UV) run alembic upgrade head && \
-	$(UV) run uvicorn app.main:app --reload --reload-dir app --port 8000 \
+	$(UV) run uvicorn app.main:app $$reload --port 8000 \
 	  --timeout-graceful-shutdown 3 --loop asyncio  # SSE would block a reload; asyncio: see start.sh
 
 dev-images-env: ## Print .env lines that point dev jobs (P2P_JOB_BACKEND=docker) at the local images by id
