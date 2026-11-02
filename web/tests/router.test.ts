@@ -8,6 +8,10 @@ describe('parseRoute', () => {
     expect(parseRoute('')).toEqual({ page: 'home' })
   })
 
+  it('parses the privacy notice', () => {
+    expect(parseRoute('#/privacy')).toEqual({ page: 'privacy' })
+  })
+
   it('treats a malformed escape as not found instead of crashing', () => {
     expect(parseRoute('#/runs/%E0%A4%A')).toEqual({ page: 'not_found' })
   })

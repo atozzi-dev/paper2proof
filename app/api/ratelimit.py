@@ -16,9 +16,12 @@ class RateLimiter:
     clock: Callable[[], float] = time.monotonic
     max_buckets: int = 10_000
     _buckets: dict[tuple[str, str], _Bucket] = field(default_factory=dict)
+    _pruned_at: float = float("-inf")
 
     def _prune(self, now: float) -> None:
-        """Bounded memory: drop buckets idle for over a minute (they would be full again)."""
+        """Drop buckets idle for over a minute (they would be full again): bounded memory, and
+        no client address kept longer than it is needed (the privacy notice says so)."""
+        self._pruned_at = now
         for key in [k for k, b in self._buckets.items() if now - b.updated > 60]:
             del self._buckets[key]
         if len(self._buckets) >= self.max_buckets:  # still full: oldest first
@@ -30,6 +33,8 @@ class RateLimiter:
     def allow(self, scope: str, key: str, per_minute: int) -> bool:
         """Take one token from the (scope, key) bucket refilled at `per_minute` per 60 s."""
         now = self.clock()
+        if now - self._pruned_at >= 60:  # client addresses: none kept idle much past a minute
+            self._prune(now)
         bucket = self._buckets.get((scope, key))
         if bucket is None:
             if len(self._buckets) >= self.max_buckets:

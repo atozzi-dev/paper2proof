@@ -3,6 +3,7 @@ import { ThemeSwitch } from './components/ThemeSwitch'
 import { AboutPage } from './pages/About'
 import { GalleryPage } from './pages/Gallery'
 import { HomePage } from './pages/Home'
+import { PrivacyPage } from './pages/Privacy'
 import { RunPage } from './pages/Run'
 import { href, useRoute, type Route } from './router'
 
@@ -11,6 +12,7 @@ const TITLES: Record<Route['page'], string> = {
   run: 'Run · Paper2Proof',
   gallery: 'Gallery · Paper2Proof',
   about: 'About · Paper2Proof',
+  privacy: 'Privacy · Paper2Proof',
   not_found: 'Not found · Paper2Proof',
 }
 
@@ -64,6 +66,7 @@ function App() {
         {route.page === 'run' && <RunPage id={route.id} replay={route.replay} />}
         {route.page === 'gallery' && <GalleryPage />}
         {route.page === 'about' && <AboutPage />}
+        {route.page === 'privacy' && <PrivacyPage />}
         {route.page === 'not_found' && (
           <section>
             <h1>Page not found</h1>
@@ -79,6 +82,9 @@ function App() {
           <p>
             &ldquo;Not reproduced&rdquo; always means not reproduced under our conditions, listed next to every
             verdict.
+          </p>
+          <p>
+            <a href={href.privacy}>Privacy</a>
           </p>
         </div>
       </footer>

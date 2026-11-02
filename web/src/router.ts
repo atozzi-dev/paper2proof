@@ -6,6 +6,7 @@ export type Route =
   | { page: 'run'; id: string; replay: boolean }
   | { page: 'gallery' }
   | { page: 'about' }
+  | { page: 'privacy' }
   | { page: 'not_found' }
 
 export function parseRoute(hash: string): Route {
@@ -14,6 +15,7 @@ export function parseRoute(hash: string): Route {
   if (parts.length === 0) return { page: 'home' }
   if (parts.length === 1 && parts[0] === 'gallery') return { page: 'gallery' }
   if (parts.length === 1 && parts[0] === 'about') return { page: 'about' }
+  if (parts.length === 1 && parts[0] === 'privacy') return { page: 'privacy' }
   if (parts.length === 2 && parts[0] === 'runs') {
     let id: string
     try {
@@ -30,6 +32,7 @@ export const href = {
   home: '#/',
   gallery: '#/gallery',
   about: '#/about',
+  privacy: '#/privacy',
   run: (id: string, replay = false) => `#/runs/${encodeURIComponent(id)}${replay ? '?replay=1' : ''}`,
 }
 

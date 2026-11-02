@@ -17,6 +17,28 @@ describe('App', () => {
   })
 })
 
+describe('Privacy notice', () => {
+  it('is linked from the footer of every page', () => {
+    window.location.hash = '#/gallery'
+    render(<App />)
+    const footer = screen.getByRole('contentinfo')
+    expect(within(footer).getByRole('link', { name: 'Privacy' })).toHaveAttribute('href', '#/privacy')
+  })
+
+  it('names the controller contact, the only cookie and the absence of tracking', () => {
+    window.location.hash = '#/privacy'
+    render(<App />)
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Privacy notice')
+    expect(document.title).toBe('Privacy · Paper2Proof')
+    const contacts = screen.getAllByRole('link', { name: 'privacy@paper2proof.com' })
+    expect(contacts[0]).toHaveAttribute('href', 'mailto:privacy@paper2proof.com')
+    const main = screen.getByRole('main')
+    expect(main).toHaveTextContent('__Host-p2p_session')
+    expect(main).toHaveTextContent('No analytics')
+    expect(main).toHaveTextContent('Garante per la protezione dei dati personali')
+  })
+})
+
 describe('Theme switch', () => {
   it('follows the system by default and overrides it on request, remembered', () => {
     render(<App />)
