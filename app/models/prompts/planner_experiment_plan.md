@@ -1,6 +1,6 @@
 ---
 role: planner
-version: "9"
+version: "10"
 output_schema: app.domain.models.Plan
 ---
 You plan a small, honest experiment that tests the selected claims of a machine-learning paper
@@ -25,13 +25,14 @@ Decide:
   optimizer and learning rate, hyperparameter search, evaluation protocol. For each one give
   `id` (s1, s2, ...), `name`, `kind` (NUMBER for a number, CHOICE for a name such as an
   optimizer or a protocol), `paper` (the value as the paper writes it: a bare number for
-  NUMBER, a short name for CHOICE), `source_ref` (where the paper says so) and `planned` (the
-  value this run will use). `planned` is the paper's value whenever it fits that hardware and
-  budget; when it does not, the largest value that does, and gpu_minutes_est is then for the
-  planned values. List only what the paper states: never seeds, never the claims' own
-  numbers, never a value you would have to guess. Code compares each `planned` with its
-  `paper`: any difference, or an empty list, makes the run REDUCED, so scale is FULL only
-  when every `planned` equals its `paper`.
+  NUMBER, a short name for CHOICE) and `source_ref` (where the paper says so). Give `planned`
+  only when this run must use something else than the paper's value, because that value does
+  not fit that hardware and budget: then `planned` is the largest value that does, and
+  gpu_minutes_est is for the planned values. Leave `planned` out when the run uses the
+  paper's value: never repeat that value in other words. List only what the paper states:
+  never seeds, never the claims' own numbers, never a value you would have to guess. Code
+  makes the run REDUCED when any condition has a `planned` different from its `paper`, or
+  when the list is empty, so scale is FULL only when no condition needs a `planned`.
 - seeds: at least 3 distinct seeds.
 - packages: only what the official repository or the method needs beyond the base image
   (torch, torchvision, numpy, scipy, scikit-learn, transformers, datasets, timm, accelerate,

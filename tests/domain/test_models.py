@@ -251,6 +251,8 @@ def test_a_plan_without_setup_still_loads() -> None:
 def test_a_setup_item_is_bounded() -> None:
     item = {"id": "s1", "name": "epochs", "kind": "NUMBER", "paper": "200", "planned": "200"}
     assert SetupItem.model_validate(item).source_ref == ""
+    unplanned = {k: v for k, v in item.items() if k != "planned"}
+    assert SetupItem.model_validate(unplanned).planned is None  # the paper's value
     with pytest.raises(ValidationError):
         SetupItem.model_validate({**item, "paper": "9" * 81})
     with pytest.raises(ValidationError):

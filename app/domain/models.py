@@ -186,7 +186,9 @@ class SetupItem(_Strict):
     name: str = Field(min_length=1, max_length=80)
     kind: SetupKind
     paper: str = Field(min_length=1, max_length=80)  # the value as the paper writes it
-    planned: str = Field(min_length=1, max_length=80)  # what this run is planned to use
+    # What this run is planned to use; None is the paper's value (PLANNING fills it in), so
+    # the Planner writes it only to plan something else, never to say the same in other words.
+    planned: str | None = Field(default=None, min_length=1, max_length=80)
     source_ref: str = Field(default="", max_length=80)  # where the paper says so
 
 

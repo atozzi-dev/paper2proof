@@ -603,7 +603,7 @@ export interface components {
             /** Paper */
             paper: string;
             /** Planned */
-            planned: string;
+            planned?: string | null;
             /**
              * Source Ref
              * @default

@@ -1,26 +1,39 @@
 """The paper's setup against what a run uses (docs/specs/execution-contracts.md §6.1).
 
 The Planner lists the conditions the paper states (`Plan.setup`) and the Coder declares, at
-finish, the value its script uses for each. Everything here is deterministic and pure: models
+finish, what its script uses for each. Everything here is deterministic and pure: models
 supply the facts, this code compares them and decides whether the run is at the paper's scale.
 
-The cross-check against the cited file is a text search, a tripwire and not a proof: a value
-written in a constant the script never uses passes it (docs/LIMITATIONS.md).
+Numbers are compared by value and looked up in the file the declaration cites: a text search,
+a tripwire and not a proof (a value written in a constant the script never uses passes it).
+Choices are stated by papers in prose that no text comparison matches with code, so for them
+the Coder's declaration decides, as for a metric's unit (docs/LIMITATIONS.md).
 """
 
 import math
 import re
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 from app.domain.models import SetupItem, SetupKind, SetupRecord
 
 MAX_SETUP_ITEMS = 8
-MIN_CHOICE_CHARS = 2  # a shorter normalized value would be found in any file
+MIN_CHOICE_CHARS = 2  # a shorter normalized choice says nothing
 _UNSIGNED = r"(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 _NUMBER = re.compile(rf"[-+]?{_UNSIGNED}")
 # A numeric token of a file: never part of a name or of a longer number, and without commas,
 # which separate arguments in code (`f(1,2)` holds 1 and 2).
 _TOKEN = re.compile(rf"(?<![\w.]){_UNSIGNED}(?![\w.])")
+
+
+class Declared(NamedTuple):
+    """What `finish` declares for one condition: the value the script uses, the file that
+    states it, and whether that is the paper's choice (read for a CHOICE only)."""
+
+    id: str
+    value: str
+    where: str
+    as_paper: bool
 
 
 def as_number(text: str) -> float | None:
@@ -47,32 +60,35 @@ def same_value(kind: SetupKind, a: str, b: str) -> bool:
     return bool(normal(a)) and normal(a) == normal(b)
 
 
+def _planned(item: SetupItem) -> str:
+    """Left out, the planned value is the paper's."""
+    return item.paper if item.planned is None else item.planned
+
+
 def usable(item: SetupItem) -> bool:
     """Whether code can compare this condition at all."""
     if item.kind is SetupKind.NUMBER:
-        return as_number(item.paper) is not None and as_number(item.planned) is not None
-    return min(len(normal(item.paper)), len(normal(item.planned))) >= MIN_CHOICE_CHARS
+        return as_number(item.paper) is not None and as_number(_planned(item)) is not None
+    return min(len(normal(item.paper)), len(normal(_planned(item)))) >= MIN_CHOICE_CHARS
 
 
-def written_in(kind: SetupKind, value: str, text: str) -> bool:
-    """Whether `text` (a file) states `value`: a number as a whole numeric token of the same
-    value (the sign is punctuation there), a choice as normalized text."""
-    if kind is SetupKind.NUMBER:
-        target = as_number(value)
-        if target is None:
-            return False
-        for token in _TOKEN.finditer(text):
-            found = as_number(token.group())
-            if found is not None and math.isclose(found, abs(target), rel_tol=1e-9, abs_tol=0.0):
-                return True
+def number_written_in(value: str, text: str) -> bool:
+    """Whether `text` (a file) states the number `value` as a whole numeric token (the sign is
+    punctuation there)."""
+    target = as_number(value)
+    if target is None:
         return False
-    needle = normal(value)
-    return len(needle) >= MIN_CHOICE_CHARS and needle in normal(text)
+    for token in _TOKEN.finditer(text):
+        found = as_number(token.group())
+        if found is not None and math.isclose(found, abs(target), rel_tol=1e-9, abs_tol=0.0):
+            return True
+    return False
 
 
 def correct_setup(items: Sequence[SetupItem]) -> tuple[list[SetupItem], list[str]]:
     """The conditions code can check: comparable, one per name, the first MAX_SETUP_ITEMS,
-    renumbered s1, s2, ... The note is code-written and gives only a count."""
+    renumbered s1, s2, ..., each with its planned value filled in. The note is code-written
+    and gives only a count."""
     kept: list[SetupItem] = []
     names: set[str] = set()
     for item in items:
@@ -80,7 +96,7 @@ def correct_setup(items: Sequence[SetupItem]) -> tuple[list[SetupItem], list[str
         if not usable(item) or name in names or len(kept) == MAX_SETUP_ITEMS:
             continue
         names.add(name)
-        kept.append(item.model_copy(update={"id": f"s{len(kept) + 1}"}))
+        kept.append(item.model_copy(update={"id": f"s{len(kept) + 1}", "planned": _planned(item)}))
     dropped = len(items) - len(kept)
     if not dropped:
         return kept, []
@@ -97,23 +113,21 @@ def reduced_by(items: Sequence[SetupItem]) -> list[str]:
     if not items:
         return ["scale REDUCED: the plan lists no condition of the paper's setup to check"]
     return [
-        f"scale REDUCED: {item.name} planned {item.planned}, the paper uses {item.paper}"
+        f"scale REDUCED: {item.name} planned {_planned(item)}, the paper uses {item.paper}"
         for item in items
-        if not same_value(item.kind, item.planned, item.paper)
+        if not same_value(item.kind, _planned(item), item.paper)
     ]
 
 
 def setup_problems(
-    items: Sequence[SetupItem],
-    declared: Sequence[tuple[str, str, str]],
-    files: Mapping[str, str],
+    items: Sequence[SetupItem], declared: Sequence[Declared], files: Mapping[str, str]
 ) -> list[str]:
-    """What is wrong with a finish declaration, `(id, value, where)` per condition: ids first,
-    then unknown files, then values not written in the file they cite; one kind at a time.
-    `files` maps `workspace/<path>` and `repo/<path>` to their text. The messages go back to
-    the Coder outside the untrusted wrapper, so they carry ids and the Coder's own words only,
-    never a condition's name or values (the paper's text)."""
-    ids = [ident for ident, _, _ in declared]
+    """What is wrong with a finish declaration: ids first, then unknown files, then numbers
+    that are not numbers or not written in the file they cite; one kind at a time. `files`
+    maps `workspace/<path>` and `repo/<path>` to their text. The messages go back to the Coder
+    outside the untrusted wrapper, so they carry ids and the Coder's own words only, never a
+    condition's name or values (the paper's text)."""
+    ids = [d.id for d in declared]
     known = {item.id: item for item in items}
     problems = [f"{i} is declared more than once" for i in dict.fromkeys(ids) if ids.count(i) > 1]
     problems += [
@@ -123,36 +137,61 @@ def setup_problems(
     if problems:
         return problems
     problems = [
-        f"{ident}: {where} is not a file of the workspace or of the repository"
-        for ident, _, where in declared
-        if where not in files
+        f"{d.id}: {d.where} is not a file of the workspace or of the repository"
+        for d in declared
+        if d.where not in files
     ]
     if problems:
         return problems
-    return [
-        f"{ident}: {value} is not written in {where}"
-        for ident, value, where in declared
-        if not written_in(known[ident].kind, value, files[where])
-    ]
+    for d in declared:
+        if known[d.id].kind is not SetupKind.NUMBER:
+            continue  # a choice is declared, not looked up
+        if as_number(d.value) is None:
+            problems.append(f"{d.id}: {d.value} is not a number")
+        elif not number_written_in(d.value, files[d.where]):
+            problems.append(f"{d.id}: {d.value} is not written in {d.where}")
+    return problems
 
 
-def setup_records(
-    items: Sequence[SetupItem], declared: Sequence[tuple[str, str, str]]
-) -> list[SetupRecord]:
+def _matches_paper(item: SetupItem, declared: Declared) -> bool:
+    """A number by its value against the paper's, never against the plan's (a reduction the
+    plan chose is still a difference from the paper); a choice by the declaration."""
+    if item.kind is SetupKind.NUMBER:
+        return same_value(item.kind, declared.value, item.paper)
+    return declared.as_paper
+
+
+def setup_records(items: Sequence[SetupItem], declared: Sequence[Declared]) -> list[SetupRecord]:
     """One record per condition, in the plan's order, for a declaration `setup_problems`
-    accepted. `matches_paper` compares the value used with the paper's, never with the plan's:
-    a reduction the plan chose is still a difference from the paper."""
-    used = {ident: (value, where) for ident, value, where in declared}
+    accepted."""
+    by_id = {d.id: d for d in declared}
     return [
         SetupRecord(
             id=item.id,
             name=item.name,
             kind=item.kind,
             paper=item.paper,
-            planned=item.planned,
-            used=used[item.id][0],
-            where=used[item.id][1],
-            matches_paper=same_value(item.kind, used[item.id][0], item.paper),
+            planned=_planned(item),
+            used=by_id[item.id].value,
+            where=by_id[item.id].where,
+            matches_paper=_matches_paper(item, by_id[item.id]),
         )
         for item in items
     ]
+
+
+def off_plan(items: Sequence[SetupItem], declared: Sequence[Declared]) -> list[str]:
+    """Ids whose declaration departs from the plan: a number other than the planned one, or a
+    choice declared not the paper's while the plan follows the paper. Worth one hint: the
+    planned value may simply not run here."""
+    by_id = {d.id: d for d in declared}
+    out = []
+    for item in items:
+        used = by_id[item.id]
+        if item.kind is SetupKind.NUMBER:
+            departs = not same_value(item.kind, used.value, _planned(item))
+        else:
+            departs = not used.as_paper and same_value(item.kind, _planned(item), item.paper)
+        if departs:
+            out.append(item.id)
+    return out

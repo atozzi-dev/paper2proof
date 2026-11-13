@@ -1189,10 +1189,17 @@
             "type": "string"
           },
           "planned": {
-            "maxLength": 80,
-            "minLength": 1,
-            "title": "Planned",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned"
           },
           "source_ref": {
             "default": "",
@@ -1205,8 +1212,7 @@
           "id",
           "name",
           "kind",
-          "paper",
-          "planned"
+          "paper"
         ],
         "title": "SetupItem",
         "type": "object"

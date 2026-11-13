@@ -22,7 +22,7 @@ def test_the_coder_loads_bundled_data_in_code_and_has_a_smoke_subset_only_when_p
 
 
 def test_prompt_versions_moved_with_their_text() -> None:
-    assert load_prompt("planner_experiment_plan").version == "9"
+    assert load_prompt("planner_experiment_plan").version == "10"
     assert load_prompt("coder_system").version == "12"
 
 
@@ -46,3 +46,5 @@ def test_the_planner_lists_the_paper_s_conditions_and_what_it_plans_for_each() -
     body = load_prompt("planner_experiment_plan").body
     assert "- setup:" in body and "`planned`" in body and "`paper`" in body
     assert "never seeds" in body
+    # Set A, 2026-11-13: "GaussianNB" planned for "Gaussian naive Bayes" reduced a run
+    assert "Leave `planned` out when the run uses the" in body

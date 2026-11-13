@@ -210,28 +210,41 @@ reason `NOT_MEASURED`, decided by code.
 
 - **The plan lists the paper's conditions.** `Plan.setup` holds up to 8 `SetupItem`s: `id`
   (`s1`, `s2`, ... renumbered by code), `name`, `kind` (`NUMBER` or `CHOICE`), `paper` (the
-  value as the paper writes it), `planned` (what this run will use) and `source_ref`. Only
+  value as the paper writes it), `planned` (what this run will use; left out when it is the
+  paper's value, and filled in by code) and `source_ref`. Only
   what the paper states and what changes the result: training length, model size, data size
   and split, optimizer and learning rate, hyperparameter search, evaluation protocol. Never
   seeds, never the claims' own numbers. Every text field is model text read from the paper:
   untrusted, bounded at 80 characters.
 - **PLANNING corrects the list** (`app/orchestrator/setup_check.py`): a `NUMBER` item whose
   `paper` or `planned` is not a number, a `CHOICE` item whose value normalizes to fewer than
-  two characters and a repeated name are dropped; the first 8 are kept. The plan's scale
+  two characters and a repeated name are dropped; the first 8 are kept and a missing
+  `planned` becomes the paper's value. The plan's scale
   becomes `REDUCED` when any item has `planned` different from `paper`, or when no item is
   left (nothing to check full scale against). Code never raises `REDUCED` to `FULL`.
 - **Comparison.** `NUMBER`: both parse as numbers (`2e3`, `2,000`) and are equal within
-  rounding. `CHOICE`: equal after casefolding and keeping letters and digits only.
-- **`finish` declares what the script uses**: `setup: [{id, value, where}]`, every item of the
-  plan exactly once; `where` is a `workspace/<path>` file or a `repo/<path>` file of the
-  repository snapshot. Code refuses a declaration whose value is not written in the cited
-  file (a number as a whole numeric token, a choice as normalized text): a text search, not
-  a proof. A value different from `planned` gets one hint per item and attempt; finishing
-  again unchanged accepts it.
+  rounding. `CHOICE`, in the plan: equal after casefolding and keeping letters and digits
+  only. Papers state choices in prose ("stratified split, 30% test size") that no text
+  comparison can match with code, which is why `planned` is left out when it is the paper's
+  value (canary set, 2026-11-13: "GaussianNB" planned for "Gaussian naive Bayes" reduced a
+  faithful run).
+- **`finish` declares what the script uses**: `setup: [{id, value, where, as_paper}]`, every
+  item of the plan exactly once; `where` is a `workspace/<path>` file or a `repo/<path>`
+  file of the repository snapshot.
+  - `NUMBER`: `value` must be a number written in the cited file as a whole numeric token: a
+    text search, a tripwire and not a proof. Code compares it with the paper's value;
+    `as_paper` is not read.
+  - `CHOICE`: `value` says what the script uses and `as_paper` whether that is the paper's
+    choice. The declaration decides, as for the metric's unit: code cannot read an optimizer
+    or a protocol out of a script.
+  - A declaration off the plan (a number different from `planned`, a choice declared not the
+    paper's when the plan follows the paper) gets one hint per item and attempt; finishing
+    again unchanged accepts it.
 - **`smoke_result.json` records it**: `setup` is a list of
-  `{id, name, kind, paper, planned, used, where, matches_paper}`, where `matches_paper`
-  compares `used` with `paper` (never with `planned`) and is written by code. Each record
-  with `matches_paper: false` also emits a `SETUP_DEVIATION` warning.
+  `{id, name, kind, paper, planned, used, where, matches_paper}`, written by code:
+  `matches_paper` compares a number's `used` with `paper` (never with `planned`) and is the
+  declared `as_paper` for a choice. Each record with `matches_paper: false` also emits a
+  `SETUP_DEVIATION` warning.
 - **The effective scale** in the exec manifest is
   `full = plan.scale is FULL and len(records) == len(plan.setup) and all(matches_paper)`.
   A plan stored before this rule has no `setup` and keeps its scale.
