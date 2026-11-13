@@ -88,10 +88,10 @@ stateDiagram-v2
 | `INGESTING` | Download the LaTeX source (or the PDF) from arXiv, hash it, parse the text, rasterize pages with tables or figures | Code (in the process pool) |
 | `EXTRACTING_CLAIMS` | Reader extracts claims with metric, dataset, setting, value, std and source reference. Vision reads tables and figures from PDF pages | Super VL |
 | `DISCOVERING` | Find the official repository: GitHub URLs in the HF Papers summary and the abstract, then Tavily search; candidates ranked by Utility | Code, Tavily, Lightning |
-| `PLANNING` | Plan the experiment for the selected claim: dataset, packages, seeds, scale, GPU minutes, cost estimate. Code then corrects the plan against the limits | Ultra, code |
+| `PLANNING` | Plan the experiment for the selected claim: dataset, packages, seeds, scale, GPU minutes, cost estimate, and the conditions the paper states (the setup). Code then corrects the plan against the limits and derives the scale: full only when every listed condition is planned at the paper's value | Ultra, code |
 | `AWAITING_APPROVAL` | Plans estimated above $0.60 wait for the user's approval (30 minutes) | User |
 | `PROVISIONING` | CPU job: validated wheels, datasets and the repository are packed into the run's bucket | Code only |
-| `SMOKE_TESTING` | The Coder writes the experiment and runs it on a tiny data subset, offline, until it passes | Super (tools), code |
+| `SMOKE_TESTING` | The Coder writes the experiment and runs it on a tiny data subset, offline, until it passes; at `finish` it declares what the script uses for each condition of the setup, and code checks it and records every difference from the paper | Super (tools), code |
 | `EXECUTING` | GPU job runs the experiment over k seeds, offline | Code |
 | `ANALYZING` | `results.json` is validated against its schema and turned into measurements | Code |
 | `VERDICT` | `decide()` returns the verdict; Judge writes the explanation; the Proof Bundle is built and signed | Code, Ultra |

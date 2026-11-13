@@ -49,6 +49,23 @@ what the system cannot do, where it can be wrong, and how each case shows up in 
   run's Limitations name the line. This is a tripwire on the script's own words, not a proof: a
   stand-in that nothing in the script admits to is not caught by it, only by the implausibility
   rule above when its numbers are far enough off.
+- **The fidelity check is a tripwire, not a proof.** A run is at full scale only when every
+  condition the Planner listed from the paper matches what the Coder declared its script
+  uses (`docs/specs/execution-contracts.md` §6.1). That check has known holes:
+  - a number passes when it is written in the cited file, even in a constant the script never
+    uses;
+  - a choice (an optimizer, a tuning protocol, a preprocessing step) counts by the Coder's own
+    declaration, because papers state choices in words that code cannot match with a script;
+  - a condition the Planner does not list is not checked, and at most 8 are listed;
+  - the right setup with a wrong implementation of the method is not caught: from the numbers
+    alone it looks like a wrong claim. The code is in the Proof Bundle for that reason.
+
+  It errs on the careful side: a paraphrase the comparison does not recognize, or a plan that
+  lists nothing, makes the run reduced scale, where an absolute claim ends *Inconclusive*.
+- **Baseline calibration.** For a relative claim whose paper gives the method's value and the
+  gain, the paper's baseline is derived from the two. A baseline measured worse than it stops
+  an accusation (`BASELINE_MISMATCH`) and nothing else: the derived number is wrong whenever
+  one of the paper's two numbers is, so it never takes a *Reproduced* away.
 - **Smoke runs.** The Coder has at most 8 smoke runs to get a passing script, and is told how
   many it has left after each one. A run that never gets a passing smoke run fails
   (`SMOKE_EXHAUSTED`) without a verdict. A script that starts processes or runs other files is

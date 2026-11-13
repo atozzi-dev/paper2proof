@@ -145,6 +145,17 @@ are in the code, and most have their own tests.
   *Inconclusive* (`IMPLAUSIBLE_GAP`), never an accusation: that is a broken experiment, a
   stand-in or a unit mismatch, not a wrong claim. This holds for absolute claims, and for
   relative claims when the paper states the method's own value and the run is at full scale.
+  For a relative claim whose paper gives both the method's value and the gain, a baseline
+  measured worse than the paper's own also stops an accusation (`BASELINE_MISMATCH`): a run
+  below the paper's level cannot accuse it.
+- **Fidelity check.** Full scale is derived by code, never a label a model writes. The Planner
+  lists up to 8 conditions the paper states (training length, model size, data and split,
+  optimizer, hyperparameter search), and at the end the Coder declares what its script uses
+  for each one. Code compares: a number against the paper's value, and it must be written in
+  the file the Coder cites; a choice the paper states in words counts by the Coder's
+  declaration. Any difference, or a plan with nothing to check, makes the run *reduced
+  scale*, which can never read *Not reproduced*, and every difference is named in the
+  verdict's Limitations ("epochs: the paper uses 200, this run used 20").
 - **Signed bundles.** Every file of the Proof Bundle is hashed into its manifest, scanned for
   secrets before packing, and the manifest's hash is signed with an asymmetric Nebius KMS key
   (ECDSA P-256) whose public key is in the repository.
