@@ -620,7 +620,8 @@ export interface components {
         /**
          * SetupRecord
          * @description What the run used for one SetupItem, as SMOKE_TESTING recorded it at finish
-         *     (smoke_result.json `setup`). `matches_paper` is written by code, never by a model.
+         *     (smoke_result.json `setup`). Code writes `matches_paper`: for a number by comparing it
+         *     with the paper's, for a choice from the Coder's own declaration.
          */
         SetupRecord: {
             /** Id */

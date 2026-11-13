@@ -222,10 +222,11 @@ reason `NOT_MEASURED`, decided by code.
   be kept but planned something else makes the plan `REDUCED` all the same. Every text
   is cleaned (one line, no control or bidi characters) before it is stored, and a record
   list whose ids are not the plan's is not full scale.
-- **PLANNING corrects the list** (`app/orchestrator/setup_check.py`): a `NUMBER` item whose
-  `paper` or `planned` is not a number, a `CHOICE` item whose value normalizes to fewer than
-  two characters and a repeated name are dropped; the first 8 are kept and a missing
-  `planned` becomes the paper's value. The plan's scale
+- **PLANNING corrects the list** (`app/orchestrator/setup_check.py`): the text is cleaned and
+  cut to 80 characters; the kind follows the values (numbers are a `NUMBER`, anything else a
+  `CHOICE`, whatever the Planner labelled it); a `CHOICE` whose value normalizes to fewer
+  than two characters and a repeated name are dropped; at most 8 are kept, renumbered, and a
+  missing `planned` becomes the paper's value. The plan's scale
   becomes `REDUCED` when any item has `planned` different from `paper`, or when no item is
   left (nothing to check full scale against). Code never raises `REDUCED` to `FULL`.
 - **Comparison.** `NUMBER`: both parse as numbers (`2e3`, `2,000`) and are equal within

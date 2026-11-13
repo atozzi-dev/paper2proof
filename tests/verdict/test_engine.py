@@ -545,3 +545,12 @@ def test_calibration_leaves_a_reduced_run_and_high_variance_alone() -> None:
     assert "baseline_mean" not in reduced.tolerance
     noisy = decide(PAPER, m(Scale.FULL, [0.70, 0.90, 0.80], LOW_BASE), CFG)
     assert noisy.reason is ReasonCode.HIGH_VARIANCE
+
+
+def test_25_a_fraction_against_a_percent_keeps_its_accusation() -> None:
+    """The unit excuse at work: the paper's baseline is 92.4 (percent), ours 0.924 (a
+    fraction). Without the excuse this NOT_REPRODUCED would become a BASELINE_MISMATCH."""
+    claim = relative_valued(1.7, 94.1)
+    verdict = decide(claim, m(Scale.FULL, [0.90, 0.901, 0.899], [0.924, 0.925, 0.923]), CFG)
+    assert verdict.kind is VerdictKind.NOT_REPRODUCED
+    assert "baseline_mean" not in verdict.tolerance

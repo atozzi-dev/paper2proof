@@ -48,7 +48,7 @@ class ReasonCode(StrEnum):
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
     IMPLAUSIBLE_GAP = "IMPLAUSIBLE_GAP"  # ABSOLUTE, more than implausible_ratio times off
-    BASELINE_MISMATCH = "BASELINE_MISMATCH"  # RELATIVE: our baseline is below the paper's
+    BASELINE_MISMATCH = "BASELINE_MISMATCH"  # RELATIVE: our baseline did not reach the paper's
     NOT_MEASURED = "NOT_MEASURED"  # the experiment does not measure this claim (code-set)
 
 
@@ -184,26 +184,29 @@ class DatasetReq(_Strict):
 
 class SetupKind(StrEnum):
     NUMBER = "NUMBER"  # compared as numbers
-    CHOICE = "CHOICE"  # compared as normalized text (an optimizer, a protocol)
+    CHOICE = "CHOICE"  # words (an optimizer, a protocol): matched by the Coder's declaration
 
 
 class SetupItem(_Strict):
     """One condition of the experiment that the paper states (the Planner lists them; code
     compares). Every text field is model text read from the paper: untrusted, bounded."""
 
-    id: str = Field(min_length=1, max_length=8)  # code renumbers them: "s1", "s2", ...
-    name: str = Field(min_length=1, max_length=80)
+    # Read leniently (PLANNING cuts the text to 80 characters, fills `planned` and renumbers
+    # the ids): a long value must not invalidate the whole plan.
+    id: str = Field(min_length=1, max_length=40)  # code renumbers them: "s1", "s2", ...
+    name: str = Field(min_length=1, max_length=300)
     kind: SetupKind
-    paper: str = Field(min_length=1, max_length=80)  # the value as the paper writes it
+    paper: str = Field(min_length=1, max_length=300)  # the value as the paper writes it
     # What this run is planned to use; None is the paper's value (PLANNING fills it in), so
     # the Planner writes it only to plan something else, never to say the same in other words.
-    planned: str | None = Field(default=None, min_length=1, max_length=80)
-    source_ref: str = Field(default="", max_length=80)  # where the paper says so
+    planned: str | None = Field(default=None, max_length=300)
+    source_ref: str = Field(default="", max_length=300)  # where the paper says so
 
 
 class SetupRecord(_Strict):
     """What the run used for one SetupItem, as SMOKE_TESTING recorded it at finish
-    (smoke_result.json `setup`). `matches_paper` is written by code, never by a model."""
+    (smoke_result.json `setup`). Code writes `matches_paper`: for a number by comparing it
+    with the paper's, for a choice from the Coder's own declaration."""
 
     id: str = Field(min_length=1, max_length=8)
     name: str = Field(min_length=1, max_length=80)
@@ -227,7 +230,7 @@ class Plan(_Strict):
     gpu_minutes_est: float = Field(ge=0)
     notes: list[str] = Field(default_factory=list)
     # Lenient bound: PLANNING keeps the first usable ones (setup_check.MAX_SETUP_ITEMS).
-    setup: list[SetupItem] = Field(default_factory=list, max_length=20)
+    setup: list[SetupItem] = Field(default_factory=list, max_length=40)
 
     @field_validator("seeds")
     @classmethod

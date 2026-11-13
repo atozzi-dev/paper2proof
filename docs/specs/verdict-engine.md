@@ -34,7 +34,7 @@ class ReasonCode(StrEnum):
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
     IMPLAUSIBLE_GAP = "IMPLAUSIBLE_GAP"  # ABSOLUTE, more than implausible_ratio times off
-    BASELINE_MISMATCH = "BASELINE_MISMATCH"  # RELATIVE: our baseline is below the paper's
+    BASELINE_MISMATCH = "BASELINE_MISMATCH"  # RELATIVE: our baseline did not reach the paper's
     NOT_MEASURED = "NOT_MEASURED"  # set by VERDICT, never by decide()
 
 class Claim(BaseModel):
@@ -227,8 +227,8 @@ baseline_below_paper = worse and not unit
 - Without `reported_value` or `claimed_delta` there is no anchor: the rule is skipped.
 
 Known limit: the baseline is derived from `claimed_delta`. A delta extracted with the wrong
-sign moves the anchor, and the rule can then fire wrongly; it only ever lowers a verdict to
-the reduced-scale reading.
+sign moves the anchor, and the rule can then fire wrongly; all it can do then is turn a
+NOT_REPRODUCED into INCONCLUSIVE.
 
 Use `scipy.stats.t.ppf`. If `s == 0`, then `half = 0` (deterministic runs are allowed).
 

@@ -499,7 +499,7 @@
           "items": {
             "$ref": "#/$defs/SetupItem"
           },
-          "maxItems": 20,
+          "maxItems": 40,
           "title": "Setup",
           "type": "array"
         }
@@ -659,7 +659,7 @@
       "description": "One condition of the experiment that the paper states (the Planner lists them; code\ncompares). Every text field is model text read from the paper: untrusted, bounded.",
       "properties": {
         "id": {
-          "maxLength": 8,
+          "maxLength": 40,
           "minLength": 1,
           "title": "Id",
           "type": "string"
@@ -668,13 +668,13 @@
           "$ref": "#/$defs/SetupKind"
         },
         "name": {
-          "maxLength": 80,
+          "maxLength": 300,
           "minLength": 1,
           "title": "Name",
           "type": "string"
         },
         "paper": {
-          "maxLength": 80,
+          "maxLength": 300,
           "minLength": 1,
           "title": "Paper",
           "type": "string"
@@ -682,8 +682,7 @@
         "planned": {
           "anyOf": [
             {
-              "maxLength": 80,
-              "minLength": 1,
+              "maxLength": 300,
               "type": "string"
             },
             {
@@ -695,7 +694,7 @@
         },
         "source_ref": {
           "default": "",
-          "maxLength": 80,
+          "maxLength": 300,
           "title": "Source Ref",
           "type": "string"
         }

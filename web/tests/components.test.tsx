@@ -113,8 +113,35 @@ describe('VerdictCard', () => {
       <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={matching} />,
     )
     expect(screen.getByRole('list', { name: 'Conditions' })).toHaveTextContent(
-      "Paper's setup: all 1 listed conditions match the paper",
+      "Paper's setup: the 1 listed condition matches the paper (1 number found in the code)",
     )
+  })
+
+  it('never says no deviation was recorded next to a setup difference', () => {
+    const epochs = {
+      id: 's1',
+      name: 'epochs',
+      kind: 'CHOICE' as const,
+      paper: '200 epochs',
+      planned: '200 epochs',
+      used: '20 epochs',
+      where: 'workspace/train.py',
+      matches_paper: false,
+    }
+    const differing = { ...runConditions, deviations: [], setup: [epochs] }
+    render(
+      <VerdictCard
+        claim={claimAbs}
+        verdict={notReproduced}
+        explanationMd=""
+        {...conditions}
+        warnings={[]}
+        conditions={differing}
+      />,
+    )
+    const list = screen.getByRole('list', { name: 'Conditions' })
+    expect(list).not.toHaveTextContent('None recorded')
+    expect(list).toHaveTextContent(`Deviations from the paper: see "Paper's setup"`)
   })
 
   it('has no setup line for a run that recorded none', () => {

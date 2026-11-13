@@ -302,3 +302,22 @@ def test_p11_a_baseline_at_or_above_the_papers_changes_nothing(
     sign, ours, paper = _anchor(claim, meas)
     assume(sign * ours >= sign * paper)
     assert decide(claim, meas, CFG) == decide(claim, meas, NO_CALIBRATION)
+
+
+@EXAMPLES
+@given(anchored_cases())
+def test_p12_the_calibration_only_replaces_an_accusation(
+    case: tuple[Claim, Measurements],
+) -> None:
+    """Compared with the rule switched off, a verdict is unchanged or was NOT_REPRODUCED and
+    is now INCONCLUSIVE/BASELINE_MISMATCH with the same numbers."""
+    claim, meas = case
+    before, after = decide(claim, meas, NO_CALIBRATION), decide(claim, meas, CFG)
+    if after == before:
+        return
+    assert before.kind is VerdictKind.NOT_REPRODUCED
+    assert (after.kind, after.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.BASELINE_MISMATCH)
+    extra = ("baseline_mean", "baseline_paper")
+    tolerance = {k: v for k, v in after.tolerance.items() if k not in extra}
+    restored = {"kind": before.kind, "reason": before.reason, "tolerance": tolerance}
+    assert after.model_copy(update=restored) == before

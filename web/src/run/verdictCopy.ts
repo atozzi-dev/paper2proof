@@ -126,6 +126,18 @@ function hardwareText(
   return exec.length ? `Nebius job ${exec.map((j) => j.name).join(', ')}` : 'Not reported for this run'
 }
 
+/** As app/verdict/limitations.py::matched_text: numbers were found in the code, choices are declared. */
+function matchedText(setup: { kind: string }[]): string {
+  const numbers = setup.filter((s) => s.kind === 'NUMBER').length
+  const choices = setup.length - numbers
+  const parts = []
+  if (numbers) parts.push(`${numbers} number${numbers === 1 ? '' : 's'} found in the code`)
+  if (choices) parts.push(`${choices} choice${choices === 1 ? '' : 's'} as declared by the Coder`)
+  const head =
+    setup.length === 1 ? 'the 1 listed condition matches the paper' : `all ${setup.length} listed conditions match the paper`
+  return `${head} (${parts.join(', ')})`
+}
+
 /** The conditions a verdict was reached under: scale, seeds, hardware, code, deviations. */
 export function verdictConditions(
   verdict: Verdict,
@@ -159,7 +171,7 @@ export function verdictConditions(
       value: differ.length
         ? `${differ.length} of ${setup.length} listed conditions differ from the paper: ` +
           differ.map((s) => `${s.name} (the paper uses ${s.paper}, this run used ${s.used})`).join(' · ')
-        : `all ${setup.length} listed conditions match the paper`,
+        : matchedText(setup),
     })
   }
   const known = c !== null || p !== undefined
@@ -171,7 +183,13 @@ export function verdictConditions(
   out.push({
     label: 'Deviations from the paper',
     // Without the plan we can't know: never claim there were none.
-    value: unique.length ? unique.join(' · ') : known ? 'None recorded' : 'not available yet',
+    value: unique.length
+      ? unique.join(' · ')
+      : setup.some((s) => !s.matches_paper)
+        ? `see "Paper's setup"` // never "None recorded" next to a setup difference
+        : known
+          ? 'None recorded'
+          : 'not available yet',
   })
   return out
 }

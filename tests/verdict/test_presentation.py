@@ -324,7 +324,10 @@ def _limits(full: bool, setup: list[SetupRecord]) -> list[str]:
 
 def test_full_scale_names_how_many_conditions_matched() -> None:
     lines = _limits(True, [_used(), _used(name="trees")])
-    assert lines[0] == "- Run at full scale: all 2 listed conditions match the paper."
+    assert lines[0] == (
+        "- Run at full scale: all 2 listed conditions match the paper (2 numbers found in "
+        "the code)."
+    )
     assert not [line for line in lines if line.startswith("- Setup:")]
 
 
@@ -367,3 +370,16 @@ def test_a_setup_path_is_code_and_never_a_verdict_word() -> None:
     assert plain[3].endswith("(`workspace/train_model.py`).")
     odd = _limits(False, [_used("20", where="workspace/NOT_REPRODUCED/__init__.py")])
     assert "NOT_REPRODUCED" not in odd[3] and odd[3].endswith("((withheld)).")
+
+
+def test_full_scale_says_which_conditions_code_found_and_which_were_declared() -> None:
+    """A choice matches by the Coder's word: the verdict must not claim more than that."""
+    choice = _used(name="optimizer").model_copy(update={"kind": SetupKind.CHOICE})
+    assert _limits(True, [_used(), _used(name="trees"), choice])[0] == (
+        "- Run at full scale: all 3 listed conditions match the paper (2 numbers found in the "
+        "code, 1 choice as declared by the Coder)."
+    )
+    assert _limits(True, [choice])[0] == (
+        "- Run at full scale: the 1 listed condition matches the paper (1 choice as declared "
+        "by the Coder)."
+    )

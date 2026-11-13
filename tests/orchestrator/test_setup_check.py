@@ -290,3 +290,23 @@ def test_each_cited_file_is_scanned_once() -> None:
     started = time.perf_counter()
     assert setup_problems(items, declared, {"repo/big.py": big}) == []
     assert time.perf_counter() - started < 5
+
+
+# --- final review, 2026-11-13 ---------------------------------------------------------------
+
+
+def test_a_choice_whose_values_are_numbers_is_compared_as_a_number() -> None:
+    """As text, "1.0" and "10" normalize to the same thing: the reduction was lost and the
+    plan stayed FULL."""
+    mislabelled = SetupItem(id="a", name="C", kind=CHOICE, paper="1.0", planned="10")
+    (kept,), _ = correct_setup([mislabelled])
+    assert kept.kind is NUMBER
+    assert reduced_by([kept]) == ["scale REDUCED: C planned 10, the paper uses 1.0"]
+
+
+def test_a_long_value_is_cut_not_refused() -> None:
+    prose = "per-feature standardization (zero mean, unit variance) using the training split" * 2
+    (kept,), notes = correct_setup([SetupItem(id="a", name="scaling", kind=CHOICE, paper=prose)])
+    assert notes == [] and len(kept.paper) <= 80 and kept.paper == kept.planned
+    (record,) = setup_records([kept], [used("s1", "StandardScaler()")])
+    assert record.paper == kept.paper

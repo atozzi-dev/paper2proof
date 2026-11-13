@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 from app.domain.contracts import ScaleSpec
-from app.domain.models import Measurements, SetupRecord
+from app.domain.models import Measurements, SetupKind, SetupRecord
 from app.verdict.explanation import mentions_verdict
 from app.verdict.scale import ScaleNote
 
@@ -47,7 +47,7 @@ def limitations(
     lines: list[str] = []
     differ = [record for record in setup if not record.matches_paper]
     if scale.full and setup:  # EXECUTING made it full because every record matches
-        lines.append(f"Run at full scale: all {len(setup)} listed conditions match the paper.")
+        lines.append(f"Run at full scale: {matched_text(setup)}.")
     elif scale.full:  # a run from before the setup was listed
         lines.append("Run at full scale (the paper's data and schedule).")
     else:
@@ -139,6 +139,25 @@ def _shown_path(where: str) -> str:
     if mentions_verdict(where):
         return WITHHELD
     return f"`{where}`" if _PATH.fullmatch(where) else _plain(where) or WITHHELD
+
+
+def matched_text(setup: Sequence[SetupRecord]) -> str:
+    """How a run whose every listed condition matches stands against the paper's setup, without
+    claiming more than was checked: numbers were found in the code, choices are the Coder's
+    declaration."""
+    numbers = sum(record.kind is SetupKind.NUMBER for record in setup)
+    choices = len(setup) - numbers
+    parts = []
+    if numbers:
+        parts.append(f"{numbers} number{'s' if numbers != 1 else ''} found in the code")
+    if choices:
+        parts.append(f"{choices} choice{'s' if choices != 1 else ''} as declared by the Coder")
+    head = (
+        "the 1 listed condition matches the paper"
+        if len(setup) == 1
+        else f"all {len(setup)} listed conditions match the paper"
+    )
+    return f"{head} ({', '.join(parts)})"
 
 
 def setup_line(record: SetupRecord) -> str:

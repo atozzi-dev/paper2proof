@@ -17,7 +17,7 @@ confidence: 0.95
 implausible_ratio: 2.0
 # A RELATIVE claim at full scale whose measured baseline is worse than the paper's own
 # baseline (reported_value - claimed_delta) by more than this many tolerance bands
-# (max(tol_rel * |value|, tol_abs)) is judged as at reduced scale: the experiment is below
-# the paper's level, so only the direction counts and it never accuses. One-sided: a
-# baseline better than the paper's changes nothing. null disables the rule.
+# (max(tol_rel * |value|, tol_abs)) cannot accuse the paper: a NOT_REPRODUCED becomes
+# INCONCLUSIVE/BASELINE_MISMATCH, and no other verdict changes. One-sided: a baseline
+# better than the paper's changes nothing. At least 1; null disables the rule.
 calibration_factor: 2.0

@@ -255,7 +255,7 @@ def test_a_setup_item_is_bounded() -> None:
     unplanned = {k: v for k, v in item.items() if k != "planned"}
     assert SetupItem.model_validate(unplanned).planned is None  # the paper's value
     with pytest.raises(ValidationError):
-        SetupItem.model_validate({**item, "paper": "9" * 81})
+        SetupItem.model_validate({**item, "paper": "9" * 301})
     with pytest.raises(ValidationError):
         SetupItem.model_validate({**item, "kind": "RANGE"})
 
@@ -273,3 +273,20 @@ def test_a_setup_record_s_match_is_a_real_boolean() -> None:
     }
     with pytest.raises(ValidationError):
         SetupRecord.model_validate(record)
+
+
+def test_a_planner_s_setup_item_is_read_leniently() -> None:
+    """A long value or an empty `planned` must not invalidate the whole plan: code cuts and
+    fills them (PLANNING), so a run that used to plan still plans."""
+    item = {"id": "condition-17", "name": "scaling", "kind": "CHOICE", "paper": "x" * 200}
+    assert SetupItem.model_validate({**item, "planned": ""}).planned == ""
+    plan = {
+        "mode": "FROM_SCRATCH",
+        "claim_ids": ["c1"],
+        "claim_types": {"c1": "ABSOLUTE"},
+        "scale": "FULL",
+        "seeds": [0, 1, 2],
+        "gpu_minutes_est": 1.0,
+        "setup": [{**item, "name": f"n{i}"} for i in range(30)],
+    }
+    assert len(Plan.model_validate(plan).setup) == 30

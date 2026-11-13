@@ -23,6 +23,7 @@ from app.domain.models import SetupItem, SetupKind, SetupRecord
 
 MAX_SETUP_ITEMS = 8
 MIN_CHOICE_CHARS = 2  # a shorter normalized choice says nothing
+STORED_CHARS = 80  # the bound of SetupRecord's text fields
 _UNSIGNED = r"(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 _NUMBER = re.compile(rf"[-+]?{_UNSIGNED}")
 # A numeric token of a file: never part of a name or of a longer number, and without commas,
@@ -46,6 +47,11 @@ def clean(text: str) -> str:
     spaced = "".join(" " if ch.isspace() else ch for ch in text)
     visible = "".join(ch for ch in spaced if not unicodedata.category(ch).startswith("C"))
     return " ".join(visible.split())
+
+
+def _cut(text: str) -> str:
+    """The Planner's text is read leniently and cut here to what a record holds."""
+    return text[:STORED_CHARS].rstrip()
 
 
 def as_number(text: str) -> float | None:
@@ -93,22 +99,22 @@ def _tidy(item: SetupItem) -> SetupItem | None:
     """The condition with its text cleaned, or None when nothing is left of its name or of the
     paper's value. A NUMBER the paper states in words ("200 epochs") is kept as a CHOICE:
     dropped, it would take the reduction planned on it out of the gate."""
-    name, paper = clean(item.name), clean(item.paper)
-    planned = None if item.planned is None else clean(item.planned) or None
+    name, paper = _cut(clean(item.name)), _cut(clean(item.paper))
+    planned = None if item.planned is None else _cut(clean(item.planned)) or None
     if not name or not paper:
         return None
-    kind = item.kind
-    if kind is SetupKind.NUMBER and (
-        as_number(paper) is None or (planned is not None and as_number(planned) is None)
-    ):
-        kind = SetupKind.CHOICE
+    # The kind follows the values, not the Planner's label: numbers are compared as numbers
+    # (as text, "1.0" and "10" would normalize to the same choice), words as a choice.
+    numeric = as_number(paper) is not None and (planned is None or as_number(planned) is not None)
+    kind = SetupKind.NUMBER if numeric else SetupKind.CHOICE
     return item.model_copy(
         update={
             "name": name,
             "kind": kind,
             "paper": paper,
             "planned": planned,
-            "source_ref": clean(item.source_ref),
+            "id": item.id[:8],
+            "source_ref": _cut(clean(item.source_ref)),
         }
     )
 

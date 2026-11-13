@@ -585,3 +585,37 @@ async def test_an_unreadable_setup_never_costs_the_verdict(store: Store, tmp_pat
     assert verdict is not None
     ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
     assert "Setup:" not in ready.explanation_md
+
+
+@pytest.mark.parametrize(
+    ("used", "kind"),
+    [("200", VerdictKind.REPRODUCED), ("20", VerdictKind.REPRODUCED_AT_REDUCED_SCALE)],
+)
+async def test_the_setup_the_run_used_decides_the_scale_of_its_verdict(
+    store: Store, tmp_path: Path, used: str, kind: VerdictKind
+) -> None:
+    """From the finish record to the verdict: the same measurements are a full REPRODUCED
+    when the run followed the paper's setup, and only "at reduced scale" when it did not."""
+    from app.domain.models import SetupItem, SetupKind
+    from app.orchestrator.steps.executing import full_scale
+
+    record = {
+        "id": "s1",
+        "name": "epochs",
+        "kind": "NUMBER",
+        "paper": "200",
+        "planned": "200",
+        "used": used,
+        "where": "workspace/train.py",
+        "matches_paper": used == "200",
+    }
+    epochs = SetupItem(id="s1", name="epochs", kind=SetupKind.NUMBER, paper="200", planned="200")
+    plan = Plan(
+        mode=PlanMode.FROM_SCRATCH, claim_ids=["c1"], claim_types={"c1": ClaimType.RELATIVE},
+        scale=Scale.FULL, seeds=[0, 1, 2], gpu_minutes_est=10, setup=[epochs],
+    )  # fmt: skip
+    full = full_scale(plan, {"setup": [record]})
+    assert full is (used == "200")
+    raw = _results([0.95, 0.96, 0.95], [0.90, 0.91, 0.90], **({"scale": FULL} if full else {}))
+    verdict, _ = await _verdict(store, tmp_path, raw, full=full, unit="fraction", setup=[record])
+    assert verdict is not None and verdict.kind is kind
