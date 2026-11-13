@@ -517,6 +517,8 @@ export interface components {
             seeds_used_by_claim: {
                 [key: string]: number[];
             };
+            /** Setup */
+            setup: components["schemas"]["SetupRecord"][];
         };
         /**
          * RunStatus
@@ -615,6 +617,28 @@ export interface components {
          * @enum {string}
          */
         SetupKind: "NUMBER" | "CHOICE";
+        /**
+         * SetupRecord
+         * @description What the run used for one SetupItem, as SMOKE_TESTING recorded it at finish
+         *     (smoke_result.json `setup`). `matches_paper` is written by code, never by a model.
+         */
+        SetupRecord: {
+            /** Id */
+            id: string;
+            kind: components["schemas"]["SetupKind"];
+            /** Matches Paper */
+            matches_paper: boolean;
+            /** Name */
+            name: string;
+            /** Paper */
+            paper: string;
+            /** Planned */
+            planned: string;
+            /** Used */
+            used: string;
+            /** Where */
+            where: string;
+        };
         /** Stats */
         Stats: {
             /** Runs By Verdict */

@@ -893,6 +893,13 @@
             },
             "title": "Seeds Used By Claim",
             "type": "object"
+          },
+          "setup": {
+            "items": {
+              "$ref": "#/components/schemas/SetupRecord"
+            },
+            "title": "Setup",
+            "type": "array"
           }
         },
         "required": [
@@ -904,6 +911,7 @@
           "hardware",
           "code",
           "deviations",
+          "setup",
           "exit_reason"
         ],
         "title": "RunConditions",
@@ -1224,6 +1232,67 @@
         ],
         "title": "SetupKind",
         "type": "string"
+      },
+      "SetupRecord": {
+        "additionalProperties": false,
+        "description": "What the run used for one SetupItem, as SMOKE_TESTING recorded it at finish\n(smoke_result.json `setup`). `matches_paper` is written by code, never by a model.",
+        "properties": {
+          "id": {
+            "maxLength": 8,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SetupKind"
+          },
+          "matches_paper": {
+            "title": "Matches Paper",
+            "type": "boolean"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "paper": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Paper",
+            "type": "string"
+          },
+          "planned": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Planned",
+            "type": "string"
+          },
+          "used": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Used",
+            "type": "string"
+          },
+          "where": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Where",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "paper",
+          "planned",
+          "used",
+          "where",
+          "matches_paper"
+        ],
+        "title": "SetupRecord",
+        "type": "object"
       },
       "Stats": {
         "properties": {

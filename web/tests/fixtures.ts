@@ -49,6 +49,7 @@ export const runConditions: RunConditions = {
   hardware: { platform: 'gpu-l40s-a', preset: '1gpu-8vcpu-32gb', preemptible: true, gpu: 'NVIDIA L40S' },
   code: 'FROM_SCRATCH',
   deviations: ['Smaller model than the paper.'],
+  setup: [],
   exit_reason: 'completed',
 }
 

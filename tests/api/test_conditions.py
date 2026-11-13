@@ -49,6 +49,7 @@ async def _store_run(
     hardware: dict[str, Any] | None,
     analysis: Any = None,
     gpu: str = "NVIDIA L40S",
+    setup: list[dict[str, Any]] | None = None,
 ) -> None:
     prefix = f"runs/{run_id}"
     artifacts.put_json(f"{prefix}/plan.json", _plan())
@@ -87,6 +88,11 @@ async def _store_run(
     steps = [
         (StepName.PLANNING, f"{prefix}/plan.json"),
         (StepName.EXECUTING, f"{prefix}/execution_1.json"),
+    ]
+    if setup is not None:  # what `finish` recorded for the plan's setup
+        artifacts.put_json(f"{prefix}/smoke_result.json", {"setup": setup})
+        steps.insert(1, (StepName.SMOKE_TESTING, f"{prefix}/smoke_result.json"))
+    steps += [
         (StepName.ANALYZING, f"{prefix}/analysis_1.json"),
     ]
     await store.begin_run(run_id, steps[0][0], 1)
@@ -97,6 +103,16 @@ async def _store_run(
         )
 
 
+RECORD = {
+    "id": "s1",
+    "name": "epochs",
+    "kind": "NUMBER",
+    "paper": "200",
+    "planned": "200",
+    "used": "20",
+    "where": "workspace/train.py",
+    "matches_paper": False,
+}
 GPU = {"platform": "gpu-l40s-a", "preset": "1gpu-8vcpu-32gb", "preemptible": True}
 
 
@@ -121,6 +137,7 @@ async def test_the_run_view_carries_the_conditions_of_its_verdict(
         "hardware": {**GPU, "gpu": "NVIDIA L40S"},
         "code": "FROM_SCRATCH",
         "deviations": ["Smaller model than the paper."],
+        "setup": [],
         "exit_reason": "completed",
     }
     assert "runs/" not in json.dumps(body)  # storage keys stay internal
@@ -198,3 +215,22 @@ async def test_conditions_follow_the_run_visibility(
     await store.set_listed(run_id, True)
     listed = await other_client.get(f"/api/runs/{run_id}")
     assert listed.json()["conditions"]["hardware"]["platform"] == GPU["platform"]
+
+
+async def test_the_setup_records_are_exposed(
+    client: httpx.AsyncClient, store: Store, artifacts: LocalArtifactStore
+) -> None:
+    """What the run used against the paper's conditions, next to its verdicts."""
+    run_id = await _run(client)
+    await _store_run(store, artifacts, run_id, hardware=GPU, setup=[RECORD])
+    body = (await client.get(f"/api/runs/{run_id}")).json()
+    assert body["conditions"]["setup"] == [RECORD]
+
+
+async def test_unreadable_setup_records_are_left_out(
+    client: httpx.AsyncClient, store: Store, artifacts: LocalArtifactStore
+) -> None:
+    run_id = await _run(client)
+    await _store_run(store, artifacts, run_id, hardware=GPU, setup=[{"id": "s1"}])
+    body = (await client.get(f"/api/runs/{run_id}")).json()
+    assert body["conditions"]["setup"] == []

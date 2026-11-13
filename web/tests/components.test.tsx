@@ -88,6 +88,42 @@ describe('VerdictCard', () => {
     expect(list).not.toHaveTextContent(/AI Cloud|GPU reported/)
   })
 
+  it('says how the run stands against the conditions the paper states', () => {
+    const epochs = {
+      id: 's1',
+      name: 'epochs',
+      kind: 'NUMBER' as const,
+      paper: '200',
+      planned: '200',
+      used: '20',
+      where: 'workspace/train.py',
+      matches_paper: false,
+    }
+    const trees = { ...epochs, id: 's2', name: 'trees', used: '200', matches_paper: true }
+    const differing = { ...runConditions, setup: [epochs, trees] }
+    const { unmount } = render(
+      <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={differing} />,
+    )
+    expect(screen.getByRole('list', { name: 'Conditions' })).toHaveTextContent(
+      "Paper's setup: 1 of 2 listed conditions differ from the paper: epochs (the paper uses 200, this run used 20)",
+    )
+    unmount()
+    const matching = { ...runConditions, setup: [trees] }
+    render(
+      <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={matching} />,
+    )
+    expect(screen.getByRole('list', { name: 'Conditions' })).toHaveTextContent(
+      "Paper's setup: all 1 listed conditions match the paper",
+    )
+  })
+
+  it('has no setup line for a run that recorded none', () => {
+    render(
+      <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={runConditions} />,
+    )
+    expect(screen.getByRole('list', { name: 'Conditions' })).not.toHaveTextContent("Paper's setup")
+  })
+
   it('lists the recorded conditions: scale factor, seeds used and the hardware', () => {
     render(
       <VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} conditions={runConditions} />,

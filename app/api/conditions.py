@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from app.domain.contracts import ExecManifest
-from app.domain.models import Plan, PlanMode, Scale, StepName
+from app.domain.models import Plan, PlanMode, Scale, SetupRecord, StepName
 from app.storage.artifacts import ArtifactStore
 from app.storage.store import StepRecord, Store
 from app.verdict.explanation import mentions_verdict
@@ -43,6 +43,9 @@ class RunConditions(BaseModel):
     hardware: HardwareView
     code: PlanMode | None  # None when the plan can't be read
     deviations: list[str]  # deviations from the paper recorded in the plan
+    # what the run used for each condition of the plan's setup; the name and the values
+    # are the paper's and the Coder's words (model text, bounded): shown as plain text
+    setup: list[SetupRecord]
     exit_reason: ExitReason
 
 
@@ -129,8 +132,20 @@ async def _conditions(store: Store, artifacts: ArtifactStore, run_id: str) -> Ru
         ),
         code=plan.mode if plan else None,
         deviations=plan.notes if plan else [],
+        setup=_setup(await _read(artifacts, refs.get(StepName.SMOKE_TESTING))),
         exit_reason=analysis.exit_reason,
     )
+
+
+def _setup(smoke: dict[str, Any] | None) -> list[SetupRecord]:
+    """What `finish` recorded for the plan's setup (smoke_result.json); records that cannot be
+    read are left out, like every other part of the conditions."""
+    raw = smoke.get("setup") if smoke else None
+    try:
+        return [SetupRecord.model_validate(r) for r in raw] if isinstance(raw, list) else []
+    except ValidationError:
+        log.warning("setup records not readable")
+        return []
 
 
 async def _plan(artifacts: ArtifactStore, key: str | None) -> Plan | None:

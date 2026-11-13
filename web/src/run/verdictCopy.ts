@@ -46,6 +46,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   REPO_SNAPSHOT_UNAVAILABLE: 'Repository files unavailable',
   REPO_TOO_LARGE: 'Repository too large to fetch',
   STAND_IN_FLAGGED: 'Stand-in refused',
+  SETUP_DEVIATION: "Not the paper's setup",
   VISION_PAGE_SKIPPED: 'A page could not be read',
   JOB_PREEMPTED: 'GPU job preempted',
   NO_GPU_CAPACITY: 'No capacity for the experiment',
@@ -148,6 +149,17 @@ export function verdictConditions(
     out.push({
       label: 'Code',
       value: mode === 'REPO_FIRST' ? "Adapted from the authors' repository" : 'Written from the paper (no official code used)',
+    })
+  }
+  const setup = c?.setup ?? []
+  if (setup.length) {
+    const differ = setup.filter((s) => !s.matches_paper)
+    out.push({
+      label: "Paper's setup",
+      value: differ.length
+        ? `${differ.length} of ${setup.length} listed conditions differ from the paper: ` +
+          differ.map((s) => `${s.name} (the paper uses ${s.paper}, this run used ${s.used})`).join(' · ')
+        : `all ${setup.length} listed conditions match the paper`,
     })
   }
   const known = c !== null || p !== undefined
