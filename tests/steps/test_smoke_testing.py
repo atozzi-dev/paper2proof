@@ -8,7 +8,7 @@ import pytest
 
 from app.domain.contracts import ArchiveDigests
 from app.domain.errors import P2PError
-from app.domain.events import SandboxOutputPayload
+from app.domain.events import SandboxOutputPayload, WarningPayload
 from app.domain.models import (
     Claim,
     ClaimType,
@@ -18,6 +18,8 @@ from app.domain.models import (
     Plan,
     PlanMode,
     Scale,
+    SetupItem,
+    SetupKind,
     StepName,
 )
 from app.execution.run_storage import FakeRunStorage
@@ -60,6 +62,7 @@ async def _setup(
     two_claims: bool = False,
     datasets: list[DatasetReq] | None = None,
     packages: list[PackageReq] | None = None,
+    setup: list[SetupItem] | None = None,
 ) -> tuple[RunContext, LocalArtifactStore]:
     artifacts = LocalArtifactStore(tmp_path)
     ids = ["c1", "c2"] if two_claims else ["c1"]
@@ -75,6 +78,7 @@ async def _setup(
         entrypoint_hint=entrypoint_hint,
         datasets=datasets or [],
         packages=packages or [],
+        setup=setup or [],
     )
     artifacts.put_json(PLAN_KEY, {"plan": plan.model_dump(mode="json"), "est_cost_usd": 0.1})
     artifacts.put_json(REPORT_KEY, {"overlay_sha256": "a" * 64, **(report or {})})
@@ -1281,3 +1285,155 @@ def test_ordinary_code_does_not_launch_processes(line: str) -> None:
     from app.orchestrator.steps.smoke_testing import launches_processes
 
     assert launches_processes({"train.py": f"{line}\n".encode()}) is None
+
+
+# --- the paper's setup, declared at finish (A-43) -------------------------------------------
+
+EPOCHS = SetupItem(
+    id="s1", name="epochs", kind=SetupKind.NUMBER, paper="200", planned="200", source_ref="Sec. 4"
+)
+
+
+def _warnings(events: list[Any]) -> list[tuple[str, str]]:
+    return [(p.code, p.message) for p in events if isinstance(p, WarningPayload)]
+
+
+async def test_a_followed_setup_is_recorded_as_matching(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS])
+    step, models = _step("setup_followed", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    assert not [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert artifacts.get_json(result.output_ref)["setup"] == [
+        {
+            "id": "s1",
+            "name": "epochs",
+            "kind": "NUMBER",
+            "paper": "200",
+            "planned": "200",
+            "used": "200",
+            "where": "workspace/train.py",
+            "matches_paper": True,
+        }
+    ]
+    events = [e.payload for e in await store.events_after(RUN, 0)]
+    assert not [w for w in _warnings(events) if w[0] == "SETUP_DEVIATION"]
+
+
+async def test_every_condition_must_be_declared(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS])
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("setup_not_declared", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and len(smoke.runs) == 1
+    (error,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "s1 is not declared" in error
+
+
+async def test_a_declared_value_must_be_written_in_the_cited_file(
+    store: Store, tmp_path: Path
+) -> None:
+    """A text search, not a proof: it stops a declaration the script does not even state."""
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS])
+    smoke = FakeSmokeExecutor([PASS, PASS])
+    step, models = _step("setup_not_written", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    (error,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "s1: 200 is not written in workspace/train.py" in error
+    assert "explicit constant" in error
+    assert len(smoke.runs) == 2  # the fix changed the workspace: it is smoke-tested again
+    assert artifacts.get_json(result.output_ref)["setup"][0]["matches_paper"] is True
+
+
+async def test_a_deviation_is_hinted_once_then_accepted(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS])
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("setup_deviation_confirmed", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    (error,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "setup s1" in error and "judged at reduced scale" in error
+    assert "200" not in error and "epochs" not in error  # the paper's text stays wrapped
+    (record,) = artifacts.get_json(result.output_ref)["setup"]
+    assert (record["used"], record["matches_paper"]) == ("20", False)
+    events = [e.payload for e in await store.events_after(RUN, 0)]
+    assert [w for w in _warnings(events) if w[0] == "SETUP_DEVIATION"] == [
+        (
+            "SETUP_DEVIATION",
+            "epochs: the paper uses 200, this run used 20 (workspace/train.py)",
+        )
+    ]
+
+
+async def test_where_must_be_a_workspace_or_repository_file(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS])
+    step, models = _step("setup_outside", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    (error,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "s1: workspace/../plan.json is not a file of the workspace or of the repository" in error
+
+
+async def test_the_coder_sees_the_setup_as_untrusted_data(store: Store, tmp_path: Path) -> None:
+    hostile = EPOCHS.model_copy(update={"name": HOSTILE})
+    ctx, artifacts = await _setup(store, tmp_path, setup=[hostile])
+    step, models = _step("setup_followed", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage())
+    await step.run(ctx)
+    _, messages = models.requests[0]
+    prompt = str(messages[1].content)
+    assert HOSTILE in prompt and HOSTILE not in _outside_untrusted(prompt)
+    assert "Setup to follow in the full run" in _outside_untrusted(prompt)
+
+
+async def test_a_plan_without_setup_asks_for_none(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([FAIL, PASS])
+    step, models = _step("planted_bug", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["setup"] == []
+    _, messages = models.requests[0]
+    assert "Setup to follow" not in str(messages[1].content)
+
+
+MODEL = SetupItem(
+    id="s2", name="model", kind=SetupKind.CHOICE, paper="Gaussian naive Bayes", planned=None
+)
+
+
+async def test_a_choice_matches_by_the_coder_s_declaration(store: Store, tmp_path: Path) -> None:
+    """Set A, 2026-11-13: papers state choices in prose ("Gaussian naive Bayes") that no text
+    comparison matches with code (`GaussianNB()`), so the declaration decides, like the unit."""
+    planned = MODEL.model_copy(update={"planned": MODEL.paper})
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS, planned])
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("setup_choice_followed", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    assert not [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    choice = artifacts.get_json(result.output_ref)["setup"][1]
+    assert (choice["used"], choice["matches_paper"]) == ("GaussianNB()", True)
+
+
+async def test_a_choice_declared_off_the_paper_is_hinted_once_then_recorded(
+    store: Store, tmp_path: Path
+) -> None:
+    planned = MODEL.model_copy(update={"planned": MODEL.paper})
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS, planned])
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("setup_choice_deviation", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING and result.output_ref is not None
+    (error,) = [r for r in _tool_results(models) if r.startswith("ERROR:")]
+    assert "setup s2" in error and "Gaussian" not in error
+    records = artifacts.get_json(result.output_ref)["setup"]
+    assert [r["matches_paper"] for r in records] == [True, False]
+    events = [e.payload for e in await store.events_after(RUN, 0)]
+    assert [w for w in _warnings(events) if w[0] == "SETUP_DEVIATION"] == [
+        (
+            "SETUP_DEVIATION",
+            "model: the paper uses Gaussian naive Bayes, this run used BernoulliNB() "
+            "(workspace/train.py)",
+        )
+    ]

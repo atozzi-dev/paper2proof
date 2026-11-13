@@ -23,7 +23,7 @@ def test_the_coder_loads_bundled_data_in_code_and_has_a_smoke_subset_only_when_p
 
 def test_prompt_versions_moved_with_their_text() -> None:
     assert load_prompt("planner_experiment_plan").version == "10"
-    assert load_prompt("coder_system").version == "12"
+    assert load_prompt("coder_system").version == "13"
 
 
 def test_the_coder_is_told_which_key_is_the_method_and_that_seeds_are_the_runner_s() -> None:
@@ -48,3 +48,9 @@ def test_the_planner_lists_the_paper_s_conditions_and_what_it_plans_for_each() -
     assert "never seeds" in body
     # Set A, 2026-11-13: "GaussianNB" planned for "Gaussian naive Bayes" reduced a run
     assert "Leave `planned` out when the run uses the" in body
+
+
+def test_the_coder_declares_the_setup_it_used() -> None:
+    """Production, 2026-10-30: a script trained 200 steps under a plan that said full scale."""
+    body = load_prompt("coder_system").body
+    assert "`setup`" in body and "explicit constant" in body

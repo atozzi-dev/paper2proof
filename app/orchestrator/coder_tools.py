@@ -110,12 +110,22 @@ class Unmeasured(_Args):
     reason: str = Field(min_length=1, max_length=200)  # model text: shown as such
 
 
+class SetupUsed(_Args):
+    """What the script uses for one condition of the plan's setup, and the file that says so."""
+
+    id: str = Field(min_length=1, max_length=8)
+    value: str = Field(min_length=1, max_length=80)
+    where: str = Field(min_length=1, max_length=200)  # workspace/<path> or repo/<path>
+    as_paper: bool  # a CHOICE: whether this is the paper's choice (a NUMBER is compared)
+
+
 class Finish(_Args):
     entrypoint: str = Field(max_length=200)
     args: list[str] = Field(default_factory=list, max_length=20)
     expected_outputs: list[str] = Field(default_factory=list, max_length=10)
     measures: list[Measure] = Field(default_factory=list, max_length=MAX_CLAIMS_PER_JOB)
     unmeasured: list[Unmeasured] = Field(default_factory=list, max_length=MAX_CLAIMS_PER_JOB)
+    setup: list[SetupUsed] = Field(default_factory=list, max_length=20)  # the plan's setup
 
 
 ARGS: dict[str, type[_Args]] = {
@@ -147,7 +157,10 @@ _DESCRIPTIONS = {
     "error rate) or raw (not a share: loss, BLEU, reward); or in `unmeasured` with a short "
     "reason, only if the experiment truly cannot measure it. If no claim can be tested "
     "faithfully here (the method or its data cannot run), list every claim in `unmeasured`: "
-    "the run then ends as untestable instead of testing a stand-in.",
+    "the run then ends as untestable instead of testing a stand-in. When your task has a "
+    "setup table, also list every one of its conditions once in `setup`: its `id`, the "
+    "`value` the full run uses, `where` that value is written (a workspace/ or repo/ "
+    "file) and `as_paper` (true when it is the value or the choice of the paper).",
 }
 TOOL_DEFS = [
     ToolDef(name=name, description=_DESCRIPTIONS[name], parameters=model.model_json_schema())

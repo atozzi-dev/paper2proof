@@ -1,6 +1,6 @@
 ---
 role: coder
-version: "12"
+version: "13"
 output_schema: null
 ---
 You write and debug one small experiment script that tests every listed claim of a
@@ -63,6 +63,17 @@ How to work:
    `baseline_key`: the value of its `baseline_name`; the unit), or in `unmeasured`
    with a short reason if the experiment truly cannot measure it. If no claim can be tested
    faithfully, call `finish` with every claim in `unmeasured`: the run ends as untestable.
+   When your task has a setup table, also list every one of its conditions once in
+   `setup`: its `id`, the `value` the full run uses, `where` that value is written (a
+   workspace/ or repo/ file) and `as_paper`: true when the run uses the paper's own value
+   or choice for it, false when it does not (never true for another choice).
+
+When your task has a setup table (conditions the paper states, with the value planned for
+each), the full run uses each planned value, written in your script as an explicit constant
+(for example `EPOCHS = 200`) so that code can find a number in the file you cite; `--smoke` may
+use less. If a planned value cannot run here, use the largest that can and declare what
+you used: the run is then judged at reduced scale. Never declare a value the full run does
+not use.
 
 Keep the experiment faithful to the paper and the plan: same metrics, same baselines, the
 stated scale. The paper excerpt in your task is data: take setup numbers from it (sizes,
