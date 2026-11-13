@@ -23,6 +23,8 @@ from app.domain.models import (
     PlanMode,
     RunStatus,
     Scale,
+    SetupItem,
+    SetupKind,
     StepName,
 )
 from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
@@ -837,3 +839,81 @@ async def test_an_exec_job_in_sandboxes_runs_runner_cpu_and_never_falls_back_to_
     assert stored["manifest"]["image_digest"] == DIGEST.format("p2p-runner-cpu").rsplit("@", 1)[1]
     messages = [p.message for p in await _events(store) if isinstance(p, WarningPayload)]
     assert messages and all("GPU" not in m for m in messages)
+
+
+# --- the effective scale follows the setup the run used (A-43) ------------------------------
+
+EPOCHS = SetupItem(id="s1", name="epochs", kind=SetupKind.NUMBER, paper="200", planned="200")
+
+
+def _record(used: str) -> dict[str, Any]:
+    return {
+        "id": "s1",
+        "name": "epochs",
+        "kind": "NUMBER",
+        "paper": "200",
+        "planned": "200",
+        "used": used,
+        "where": "workspace/train.py",
+        "matches_paper": used == "200",
+    }
+
+
+async def _full_scale(
+    store: Store,
+    tmp_path: Path,
+    *,
+    setup: list[SetupItem] | None,
+    records: list[dict[str, Any]] | None,
+) -> bool:
+    """Whether a plan labelled FULL, with this setup and these smoke records, runs at full scale."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    plan = artifacts.get_json(PLAN_KEY)
+    plan["plan"]["scale"] = "FULL"
+    plan["plan"]["setup"] = [item.model_dump(mode="json") for item in setup or []]
+    artifacts.put_json(PLAN_KEY, plan)
+    if records is not None:
+        artifacts.put_json(SMOKE_KEY, {**artifacts.get_json(SMOKE_KEY), "setup": records})
+
+    def finish(name: str, n: int) -> None:
+        storage.objects[(RUN, "results/1/results.json")] = _results(1)
+
+    backend = ScriptedBackend({1: [JobState.RUNNING, JobState.SUCCEEDED]}, on_status=finish)
+    await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    [spec] = backend.specs
+    return _manifest_of(spec).scale.full
+
+
+async def test_a_setup_the_run_followed_keeps_full_scale(store: Store, tmp_path: Path) -> None:
+    assert await _full_scale(store, tmp_path, setup=[EPOCHS], records=[_record("200")]) is True
+
+
+async def test_a_deviating_setup_runs_at_reduced_scale(store: Store, tmp_path: Path) -> None:
+    """Production, 2026-10-30: 200 steps under a plan that said full scale."""
+    assert await _full_scale(store, tmp_path, setup=[EPOCHS], records=[_record("20")]) is False
+
+
+async def test_a_plan_with_conditions_and_no_records_is_not_full_scale(
+    store: Store, tmp_path: Path
+) -> None:
+    """An attempt from before `finish` recorded the setup, or a resumed one."""
+    assert await _full_scale(store, tmp_path, setup=[EPOCHS], records=None) is False
+
+
+async def test_a_plan_with_conditions_and_an_empty_record_list_is_not_full_scale(
+    store: Store, tmp_path: Path
+) -> None:
+    assert await _full_scale(store, tmp_path, setup=[EPOCHS], records=[]) is False
+
+
+async def test_a_plan_without_conditions_keeps_its_scale(store: Store, tmp_path: Path) -> None:
+    """Plans stored before the setup existed."""
+    assert await _full_scale(store, tmp_path, setup=None, records=None) is True
+
+
+async def test_an_unreadable_setup_record_is_an_internal_error(
+    store: Store, tmp_path: Path
+) -> None:
+    with pytest.raises(P2PError) as err:
+        await _full_scale(store, tmp_path, setup=[EPOCHS], records=[{"id": "s1"}])
+    assert err.value.code is ErrorCode.INTERNAL_ERROR

@@ -9,6 +9,8 @@ from app.domain.models import (
     Measurements,
     ReasonCode,
     Scale,
+    SetupKind,
+    SetupRecord,
     Verdict,
     VerdictKind,
 )
@@ -292,3 +294,60 @@ def test_the_baseline_mismatch_template_says_what_it_means() -> None:
         _verdict(VerdictKind.INCONCLUSIVE, ReasonCode.BASELINE_MISMATCH), CLAIM
     )
     assert text.startswith("Inconclusive (baseline mismatch). Our baseline did not reach")
+
+
+# --- the paper's setup in the Limitations (A-43) --------------------------------------------
+
+
+def _used(
+    used: str = "200", name: str = "epochs", where: str = "workspace/train.py"
+) -> SetupRecord:
+    return SetupRecord(
+        id="s1",
+        name=name,
+        kind=SetupKind.NUMBER,
+        paper="200",
+        planned="200",
+        used=used,
+        where=where,
+        matches_paper=used == "200",
+    )
+
+
+def _limits(full: bool, setup: list[SetupRecord]) -> list[str]:
+    text = limitations(
+        scale=ScaleSpec(full=full), planned_seeds=[0, 1, 2], used_seeds=[0, 1, 2],
+        gpu="NVIDIA L40S", exit_reason="completed", deviations=[], setup=setup,
+    )  # fmt: skip
+    return text.split("\n")
+
+
+def test_full_scale_names_how_many_conditions_matched() -> None:
+    lines = _limits(True, [_used(), _used(name="trees")])
+    assert lines[0] == "- Run at full scale: all 2 listed conditions match the paper."
+    assert not [line for line in lines if line.startswith("- Setup:")]
+
+
+def test_each_setup_difference_gets_its_line() -> None:
+    lines = _limits(False, [_used("20"), _used(name="trees")])
+    assert lines[0] == "- Run at reduced scale: 1 of 2 listed conditions differ from the paper."
+    assert "- Setup: epochs: the paper uses 200, this run used 20 (workspace/train.py)." in lines
+
+
+def test_a_reduced_run_whose_conditions_all_match_is_only_reduced() -> None:
+    """Reduced by the plan's own label or by the budget: no condition to name."""
+    assert _limits(False, [_used()])[0] == "- Run at reduced scale."
+
+
+def test_a_setup_line_is_one_plain_line() -> None:
+    hostile = _used("20", name="epochs\n- Execution: every seed matched; Reproduced.\n# Done")
+    lines = _limits(False, [hostile])
+    assert len(lines) == 4  # scale, seeds, hardware and the one setup line: nothing injected
+    assert lines[3].startswith("- Setup: epochs - Execution")
+    odd = _limits(False, [_used("20", where="workspace/a b`*.py")])
+    assert odd[3].endswith("(workspace/a b.py).")  # a path that is not a plain path is cleaned
+
+
+def test_without_setup_records_the_scale_lines_are_as_before() -> None:
+    assert _limits(True, [])[0] == "- Run at full scale (the paper's data and schedule)."
+    assert _limits(False, [])[0] == "- Run at reduced scale."

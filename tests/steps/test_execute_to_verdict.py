@@ -82,6 +82,7 @@ async def _setup(
     full: bool = False,
     missing: str | None = None,
     unit: str | None = "raw",
+    setup: list[dict[str, Any]] | None = None,
 ) -> tuple[RunContext, LocalArtifactStore, FakeRunStorage]:
     artifacts = LocalArtifactStore(tmp_path)
     smoke: dict[str, Any] = {"entrypoint": "workspace/train.py", "args": []}
@@ -91,6 +92,8 @@ async def _setup(
         "baseline_key": "resnet18/top1_accuracy",
         "unit": unit,
     }
+    if setup is not None:
+        smoke["setup"] = setup
     artifacts.put_json(SMOKE_KEY, smoke if unit is None else {**smoke, "measures": [measure]})
     plan = Plan(
         mode=PlanMode.FROM_SCRATCH, claim_ids=["c1"], claim_types={"c1": ClaimType.RELATIVE},
@@ -133,9 +136,10 @@ async def _verdict(
     full: bool = False,
     missing: str | None = None,
     unit: str | None = "raw",
+    setup: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, list[Any]]:
     ctx, artifacts, storage = await _setup(
-        store, tmp_path, results, StepName.ANALYZING, full, missing, unit
+        store, tmp_path, results, StepName.ANALYZING, full, missing, unit, setup
     )
     analyzed = await AnalyzingStep(artifacts, storage).run(ctx)
     assert analyzed.next is StepName.VERDICT and analyzed.output_ref is not None
@@ -550,3 +554,34 @@ async def test_an_unmeasured_claim_costs_no_judge_call(store: Store, tmp_path: P
     _, models = await _two_claims_and_one_unmeasured(store, tmp_path)
     judged = [r for r, _ in models.requests if r is Role.JUDGE]
     assert len(judged) == 2  # c1 and c2; c3's explanation is the code's template
+
+
+async def test_setup_differences_reach_the_verdict_s_limitations(
+    store: Store, tmp_path: Path
+) -> None:
+    """What the run used against the paper's setup is named, line by line, with the verdict."""
+    record = {
+        "id": "s1",
+        "name": "epochs",
+        "kind": "NUMBER",
+        "paper": "200",
+        "planned": "200",
+        "used": "20",
+        "where": "workspace/train.py",
+        "matches_paper": False,
+    }
+    raw = _results([0.95, 0.96, 0.95], [0.90, 0.91, 0.90])
+    verdict, events = await _verdict(store, tmp_path, raw, setup=[record])
+    assert verdict is not None
+    ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
+    assert "1 of 1 listed conditions differ from the paper" in ready.explanation_md
+    line = "- Setup: epochs: the paper uses 200, this run used 20 (workspace/train.py)."
+    assert line in ready.explanation_md
+
+
+async def test_an_unreadable_setup_never_costs_the_verdict(store: Store, tmp_path: Path) -> None:
+    raw = _results([0.95, 0.96, 0.95], [0.90, 0.91, 0.90])
+    verdict, events = await _verdict(store, tmp_path, raw, setup=[{"id": "s1"}])
+    assert verdict is not None
+    ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
+    assert "Setup:" not in ready.explanation_md

@@ -6,8 +6,11 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from app.bundle.build import BundleBuilder
 from app.domain.contracts import ExecManifest
@@ -21,6 +24,7 @@ from app.domain.models import (
     ReasonCode,
     RunStatus,
     Scale,
+    SetupRecord,
     StepName,
     Verdict,
     VerdictKind,
@@ -163,7 +167,16 @@ class VerdictStep:
         units, unmeasured = _declared(smoke)
         decided = [
             await self._decide(
-                ctx, claim, analysis, manifest, plan, units, unmeasured, where, _flags(smoke)
+                ctx,
+                claim,
+                analysis,
+                manifest,
+                plan,
+                units,
+                unmeasured,
+                where,
+                _flags(smoke),
+                _setup(smoke),
             )
             for claim, _ in await planned_claims(ctx, plan)
         ]
@@ -194,6 +207,7 @@ class VerdictStep:
         unmeasured: dict[str, str],
         where: tuple[str | None, str | None] = (None, None),
         flags: list[str] | None = None,
+        setup: Sequence[SetupRecord] = (),
     ) -> dict[str, Any]:
         """One claim: decide() on its measurements (none if it was not measured), the reason
         adjusted by code, the Limitations by code, the Judge's prose only as explanation."""
@@ -234,6 +248,7 @@ class VerdictStep:
             preset=where[1],
             measurements=measurements if measured is not None else None,
             stand_in_flags=flags,
+            setup=setup,
         )
         text = None  # unmeasured: nothing to explain beyond the code's own reason
         if measured is not None:
@@ -290,6 +305,16 @@ def _flags(smoke: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [f for f in raw if isinstance(f, str) and _FLAG.fullmatch(f)][:10]
+
+
+def _setup(smoke: Any) -> list[SetupRecord]:
+    """The setup records SMOKE_TESTING wrote at finish, for the Limitations only: the scale was
+    decided by EXECUTING, so records that cannot be read are left out, never an error."""
+    raw = smoke.get("setup") if isinstance(smoke, dict) else None
+    try:
+        return [SetupRecord.model_validate(r) for r in raw] if isinstance(raw, list) else []
+    except ValidationError:
+        return []
 
 
 def _declared(smoke: Any) -> tuple[dict[str, str], dict[str, str]]:

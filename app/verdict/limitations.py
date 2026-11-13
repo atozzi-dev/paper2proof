@@ -3,14 +3,16 @@
 percent/fraction conversion and deviations from the paper's setup."""
 
 import re
+from collections.abc import Sequence
 
 from app.domain.contracts import ScaleSpec
-from app.domain.models import Measurements
+from app.domain.models import Measurements, SetupRecord
 from app.verdict.scale import ScaleNote
 
 DEVIATION_CHARS = 300
 _SPACE = re.compile(r"\s+")
 _MARKUP = re.compile(r"[#*_`>|\[\]<]")
+_PATH = re.compile(r"(?:workspace|repo)/[A-Za-z0-9._/-]{1,190}")  # printed as it is
 
 _EXIT = {
     "completed": None,
@@ -36,12 +38,16 @@ def limitations(
     preset: str | None = None,
     measurements: Measurements | None = None,
     stand_in_flags: list[str] | None = None,
+    setup: Sequence[SetupRecord] = (),
 ) -> str:
     """`gpu` is what the job reported (results.json: "cpu" without a GPU); `platform` and
     `preset` are where EXECUTING submitted it (None for runs recorded before they were kept).
     `measurements` are the claim's decided values, one per used seed (None: not measured)."""
     lines: list[str] = []
-    if scale.full:
+    differ = [record for record in setup if not record.matches_paper]
+    if scale.full and setup:  # EXECUTING made it full because every record matches
+        lines.append(f"Run at full scale: all {len(setup)} listed conditions match the paper.")
+    elif scale.full:  # a run from before the setup was listed
         lines.append("Run at full scale (the paper's data and schedule).")
     else:
         parts = []
@@ -50,6 +56,8 @@ def limitations(
         if scale.epochs is not None:
             of = f" of {scale.paper_epochs}" if scale.paper_epochs else ""
             parts.append(f"{scale.epochs}{of} epochs")
+        if differ:
+            parts.append(f"{len(differ)} of {len(setup)} listed conditions differ from the paper")
         detail = f": {', '.join(parts)}" if parts else ""
         lines.append(f"Run at reduced scale{detail}.")
     if unmeasured_reason is not None:  # the Coder's reason is model text: plain, bounded
@@ -74,6 +82,11 @@ def limitations(
             + ", ".join(stand_in_flags)
             + ") and was changed before the experiment ran: check the code in the Proof Bundle."
         )
+    lines += [  # the record's texts are the paper's and the Coder's: one plain line each
+        f"Setup: {_plain(r.name)}: the paper uses {_plain(r.paper)}, this run used "
+        f"{_plain(r.used)} ({r.where if _PATH.fullmatch(r.where) else _plain(r.where)})."
+        for r in differ
+    ]
     lines += [f"Deviation: {_plain(d)}" for d in deviations if _plain(d)]
     return "\n".join(f"- {line}" for line in lines)
 

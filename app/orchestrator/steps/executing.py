@@ -35,7 +35,16 @@ from app.domain.contracts import (
 )
 from app.domain.errors import P2PError
 from app.domain.events import MAX_LINES, EventType
-from app.domain.models import Claim, ClaimType, ErrorCode, Plan, RunStatus, Scale, StepName
+from app.domain.models import (
+    Claim,
+    ClaimType,
+    ErrorCode,
+    Plan,
+    RunStatus,
+    Scale,
+    SetupRecord,
+    StepName,
+)
 from app.execution.backend import CapacityError, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -132,6 +141,23 @@ def _claim_specs(planned: list[tuple[Claim, ClaimType]], smoke: Any) -> list[Cla
     if not specs:
         raise P2PError(ErrorCode.INTERNAL_ERROR, "no planned claim is measured")
     return specs
+
+
+def full_scale(plan: Plan, smoke: dict[str, Any]) -> bool:
+    """The scale the experiment runs at (execution-contracts §6.1): full only when the plan is,
+    every condition of its setup has a record from `finish`, and each record matches the
+    paper. A plan stored before the setup existed lists none and keeps its scale."""
+    try:
+        records = [SetupRecord.model_validate(r) for r in smoke.get("setup") or []]
+    except ValidationError:
+        raise P2PError(
+            ErrorCode.INTERNAL_ERROR, "the smoke result's setup is not readable"
+        ) from None
+    return (
+        plan.scale is Scale.FULL
+        and len(records) == len(plan.setup)
+        and all(record.matches_paper for record in records)
+    )
 
 
 def _workspace_digest(smoke: Any) -> str:
@@ -296,7 +322,7 @@ class ExecutingStep:
                 results=f"/mnt/run/results/{attempt}",
             ),
             claims=claims,
-            scale=ScaleSpec(full=plan.scale is Scale.FULL),
+            scale=ScaleSpec(full=full_scale(plan, smoke)),
             archives=archives,
             workspace_sha256=_workspace_digest(smoke),
         )
