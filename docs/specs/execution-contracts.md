@@ -216,6 +216,12 @@ reason `NOT_MEASURED`, decided by code.
   and split, optimizer and learning rate, hyperparameter search, evaluation protocol. Never
   seeds, never the claims' own numbers. Every text field is model text read from the paper:
   untrusted, bounded at 80 characters.
+- **The gate fails closed.** A `NUMBER` the paper states in words ("200 epochs") is kept
+  as a `CHOICE`; conditions that plan a value other than the paper's are kept first, so
+  the cap or a repeated name never drops one; and a listed condition that still cannot
+  be kept but planned something else makes the plan `REDUCED` all the same. Every text
+  is cleaned (one line, no control or bidi characters) before it is stored, and a record
+  list whose ids are not the plan's is not full scale.
 - **PLANNING corrects the list** (`app/orchestrator/setup_check.py`): a `NUMBER` item whose
   `paper` or `planned` is not a number, a `CHOICE` item whose value normalizes to fewer than
   two characters and a repeated name are dropped; the first 8 are kept and a missing

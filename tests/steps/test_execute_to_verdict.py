@@ -575,7 +575,7 @@ async def test_setup_differences_reach_the_verdict_s_limitations(
     assert verdict is not None
     ready = next(p for p in events if isinstance(p, VerdictReadyPayload))
     assert "1 of 1 listed conditions differ from the paper" in ready.explanation_md
-    line = "- Setup: epochs: the paper uses 200, this run used 20 (workspace/train.py)."
+    line = '- Setup: "epochs": the paper uses "200", this run used "20" (`workspace/train.py`).'
     assert line in ready.explanation_md
 
 

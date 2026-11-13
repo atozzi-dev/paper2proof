@@ -85,6 +85,7 @@ from app.orchestrator.steps.common import (
 )
 from app.orchestrator.steps.executing import printable
 from app.storage.artifacts import ArtifactStore
+from app.verdict.limitations import setup_line
 from app.verdict.scale import unit_mismatch
 
 SMOKE_TIMEOUT_S = 150
@@ -368,6 +369,7 @@ class SmokeTestingStep:
                             for item in plan.setup
                         ],
                         indent=1,
+                        ensure_ascii=False,  # escapes would eat the table's budget
                     ),
                     source="plan",
                     max_chars=4000,
@@ -882,10 +884,7 @@ class SmokeTestingStep:
                     EventType.WARNING,
                     {
                         "code": "SETUP_DEVIATION",
-                        "message": printable(
-                            f"{record.name}: the paper uses {record.paper}, this run used "
-                            f"{record.used} ({record.where})"
-                        ),
+                        "message": setup_line(record),
                     },
                 )
         await self._put(f"runs/{ctx.run_id}/workspace.json", state.dump(ws))

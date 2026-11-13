@@ -109,7 +109,7 @@ def test_unusable_and_repeated_conditions_are_dropped() -> None:
     kept, notes = correct_setup(listed)
     assert len(kept) == MAX_SETUP_ITEMS == 8
     assert [k.id for k in kept] == [f"s{i}" for i in range(1, 9)]
-    assert [k.name for k in kept][:2] == ["epochs", "condition 0"]
+    assert [k.name for k in kept][:2] == ["epochs", "batches"]  # in words: now a choice
     assert notes == ["4 setup conditions dropped (not comparable, repeated or beyond the first 8)"]
 
 
@@ -117,7 +117,7 @@ def test_a_clean_list_is_only_renumbered() -> None:
     kept, notes = correct_setup([item("x", "epochs"), item("y", "optimizer", CHOICE, "SGD")])
     assert [(k.id, k.name) for k in kept] == [("s1", "epochs"), ("s2", "optimizer")]
     assert notes == []
-    assert correct_setup([item(paper="many")]) == (
+    assert correct_setup([item(kind=CHOICE, paper="—")]) == (
         [],
         ["1 setup condition dropped (not comparable, repeated or beyond the first 8)"],
     )
@@ -227,3 +227,66 @@ def test_what_departs_from_the_plan() -> None:
     assert off_plan(ITEMS, [used("s1", "20"), used("s2", "Adam", as_paper=False)]) == ["s1", "s2"]
     planned_adam = [item(), item("s2", "optimizer", CHOICE, "SGD", "Adam")]
     assert off_plan(planned_adam, [used("s1", "200"), used("s2", "Adam", as_paper=False)]) == []
+
+
+# --- security review, 2026-11-13 ------------------------------------------------------------
+
+
+def test_a_number_the_paper_states_in_words_is_kept_as_a_choice() -> None:
+    """ "200 epochs" planned "5 epochs" was dropped as not comparable, and the plan stayed FULL:
+    the very reduction the gate exists for."""
+    worded = SetupItem(id="a", name="epochs", kind=NUMBER, paper="200 epochs", planned="5 epochs")
+    (kept,), notes = correct_setup([worded])
+    assert kept.kind is CHOICE and notes == []
+    assert reduced_by([kept]) == [
+        "scale REDUCED: epochs planned 5 epochs, the paper uses 200 epochs"
+    ]
+
+
+def test_a_condition_that_plans_a_reduction_is_kept_first() -> None:
+    listed = [item(f"x{i}", f"condition {i}", paper=str(i + 1)) for i in range(8)]
+    listed.append(item("late", "epochs", paper="200", planned="20"))
+    kept, _ = correct_setup(listed)
+    assert kept[0].name == "epochs" and len(kept) == 8
+    repeated = [item("a", "epochs"), item("b", "Epochs", paper="200", planned="20")]
+    (only,), _ = correct_setup(repeated)
+    assert only.planned == "20"
+
+
+def test_a_dropped_condition_that_planned_something_else_still_reduces() -> None:
+    garbage = SetupItem(id="a", name="optimizer", kind=CHOICE, paper="—", planned="Adam")
+    listed = [item(), garbage]
+    kept, _ = correct_setup(listed)
+    assert [k.name for k in kept] == ["epochs"]
+    assert reduced_by(kept) == []
+    assert reduced_by(kept, listed=listed) == [
+        "scale REDUCED: 1 listed condition that could not be kept planned something else "
+        "than the paper's value"
+    ]
+
+
+def test_text_is_cleaned_before_it_is_stored() -> None:
+    """No control, ANSI or bidi characters, one line: the text is shown next to verdicts."""
+    dirty = item(name="epo\nchs\x1b[31m\u202e", paper="200")
+    (kept,), _ = correct_setup([dirty])
+    assert kept.name == "epo chs[31m"
+    (record,) = setup_records([kept], [used("s1", "200\u202e", "workspace/train.py")])
+    assert record.used == "200" and record.where == "workspace/train.py"
+
+
+def test_a_value_that_is_only_control_characters_is_a_problem() -> None:
+    assert setup_problems([item()], [used("s1", "\u202e\x07")], FILES) == [
+        "s1: the declared value is empty"
+    ]
+
+
+def test_each_cited_file_is_scanned_once() -> None:
+    """Eight numbers cited in one 4 MB repository file must not cost eight scans."""
+    items = [item(f"s{i}", f"n{i}", paper=str(100 + i)) for i in range(1, 9)]
+    big = "x = 1.5\n" * 200_000 + "".join(f"v{i} = {100 + i}\n" for i in range(1, 9))
+    declared = [used(f"s{i}", str(100 + i), "repo/big.py") for i in range(1, 9)]
+    import time
+
+    started = time.perf_counter()
+    assert setup_problems(items, declared, {"repo/big.py": big}) == []
+    assert time.perf_counter() - started < 5

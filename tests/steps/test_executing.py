@@ -917,3 +917,10 @@ async def test_an_unreadable_setup_record_is_an_internal_error(
     with pytest.raises(P2PError) as err:
         await _full_scale(store, tmp_path, setup=[EPOCHS], records=[{"id": "s1"}])
     assert err.value.code is ErrorCode.INTERNAL_ERROR
+
+
+async def test_records_for_other_conditions_are_not_full_scale(
+    store: Store, tmp_path: Path
+) -> None:
+    other = {**_record("200"), "id": "s9"}
+    assert await _full_scale(store, tmp_path, setup=[EPOCHS], records=[other]) is False

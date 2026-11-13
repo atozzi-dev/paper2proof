@@ -12,9 +12,11 @@ from pydantic import BaseModel, ValidationError
 
 from app.domain.contracts import ExecManifest
 from app.domain.models import Plan, PlanMode, Scale, SetupRecord, StepName
+from app.orchestrator.setup_check import clean
 from app.storage.artifacts import ArtifactStore
 from app.storage.store import StepRecord, Store
 from app.verdict.explanation import mentions_verdict
+from app.verdict.limitations import WITHHELD
 from app.verdict.results import Analysis, ExitReason
 
 log = logging.getLogger(__name__)
@@ -142,10 +144,29 @@ def _setup(smoke: dict[str, Any] | None) -> list[SetupRecord]:
     read are left out, like every other part of the conditions."""
     raw = smoke.get("setup") if smoke else None
     try:
-        return [SetupRecord.model_validate(r) for r in raw] if isinstance(raw, list) else []
+        records = [SetupRecord.model_validate(r) for r in raw] if isinstance(raw, list) else []
     except ValidationError:
         log.warning("setup records not readable")
         return []
+    return [
+        record.model_copy(
+            update={
+                "name": _shown(record.name),
+                "paper": _shown(record.paper),
+                "planned": _shown(record.planned),
+                "used": _shown(record.used),
+                "where": _shown(record.where),
+            }
+        )
+        for record in records
+    ]
+
+
+def _shown(text: str) -> str:
+    """A setup record's text is the paper's or the Coder's: shown clean, on one line, and
+    never when it reads like a verdict (as for the GPU name)."""
+    cleaned = clean(text)
+    return WITHHELD if not cleaned or mentions_verdict(cleaned) else cleaned
 
 
 async def _plan(artifacts: ArtifactStore, key: str | None) -> Plan | None:

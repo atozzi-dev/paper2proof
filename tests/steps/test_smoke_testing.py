@@ -1361,7 +1361,7 @@ async def test_a_deviation_is_hinted_once_then_accepted(store: Store, tmp_path: 
     assert [w for w in _warnings(events) if w[0] == "SETUP_DEVIATION"] == [
         (
             "SETUP_DEVIATION",
-            "epochs: the paper uses 200, this run used 20 (workspace/train.py)",
+            '"epochs": the paper uses "200", this run used "20" (`workspace/train.py`)',
         )
     ]
 
@@ -1433,7 +1433,30 @@ async def test_a_choice_declared_off_the_paper_is_hinted_once_then_recorded(
     assert [w for w in _warnings(events) if w[0] == "SETUP_DEVIATION"] == [
         (
             "SETUP_DEVIATION",
-            "model: the paper uses Gaussian naive Bayes, this run used BernoulliNB() "
-            "(workspace/train.py)",
+            '"model": the paper uses "Gaussian naive Bayes", this run used "BernoulliNB()" '
+            "(`workspace/train.py`)",
         )
     ]
+
+
+async def test_a_setup_check_that_times_out_refuses_the_finish(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check decides the scale: on a timeout the finish is refused, never waved through."""
+    from app.orchestrator.setup_check import setup_problems
+
+    original = RunContext.run_cpu
+
+    async def slow(self: RunContext, fn: Any, *args: Any, timeout_s: float | None = None) -> Any:
+        if fn is setup_problems:
+            raise TimeoutError
+        return await original(self, fn, *args, timeout_s=timeout_s)
+
+    monkeypatch.setattr(RunContext, "run_cpu", slow)
+    ctx, artifacts = await _setup(store, tmp_path, setup=[EPOCHS])
+    step, models = _step("setup_followed", artifacts, FakeSmokeExecutor([PASS]), FakeRunStorage())
+    with pytest.raises(IndexError, match="exhausted"):  # the fixture has no further turn:
+        await step.run(ctx)  # the finish was refused, so the loop asked the model again
+    assert any("the setup check timed out" in r for r in _tool_results(models))
+    with pytest.raises(FileNotFoundError):  # nothing was recorded as finished
+        artifacts.get_json(f"runs/{RUN}/smoke_result.json")

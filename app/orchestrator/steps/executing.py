@@ -156,6 +156,7 @@ def full_scale(plan: Plan, smoke: dict[str, Any]) -> bool:
     return (
         plan.scale is Scale.FULL
         and len(records) == len(plan.setup)
+        and {record.id for record in records} == {item.id for item in plan.setup}
         and all(record.matches_paper for record in records)
     )
 

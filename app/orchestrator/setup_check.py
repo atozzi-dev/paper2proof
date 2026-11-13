@@ -8,10 +8,14 @@ Numbers are compared by value and looked up in the file the declaration cites: a
 a tripwire and not a proof (a value written in a constant the script never uses passes it).
 Choices are stated by papers in prose that no text comparison matches with code, so for them
 the Coder's declaration decides, as for a metric's unit (docs/LIMITATIONS.md).
+
+The gate fails closed: a reduction the Planner states is never lost with a condition code
+cannot keep, and every text is cleaned before it is stored (it is shown next to verdicts).
 """
 
 import math
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
@@ -34,6 +38,14 @@ class Declared(NamedTuple):
     value: str
     where: str
     as_paper: bool
+
+
+def clean(text: str) -> str:
+    """One line with no control, format or other invisible characters (ANSI escapes, bidi
+    overrides): model text that is stored and later shown next to verdicts."""
+    spaced = "".join(" " if ch.isspace() else ch for ch in text)
+    visible = "".join(ch for ch in spaced if not unicodedata.category(ch).startswith("C"))
+    return " ".join(visible.split())
 
 
 def as_number(text: str) -> float | None:
@@ -65,6 +77,42 @@ def _planned(item: SetupItem) -> str:
     return item.paper if item.planned is None else item.planned
 
 
+def _plans_other(item: SetupItem) -> bool:
+    """The Planner states a value other than the paper's: a reduction, however it is written
+    and whether or not code can keep the condition."""
+    if item.planned is None:
+        return False
+    if same_value(SetupKind.NUMBER, item.planned, item.paper):
+        return False
+    if same_value(SetupKind.CHOICE, item.planned, item.paper):
+        return False
+    return clean(item.planned) != clean(item.paper)
+
+
+def _tidy(item: SetupItem) -> SetupItem | None:
+    """The condition with its text cleaned, or None when nothing is left of its name or of the
+    paper's value. A NUMBER the paper states in words ("200 epochs") is kept as a CHOICE:
+    dropped, it would take the reduction planned on it out of the gate."""
+    name, paper = clean(item.name), clean(item.paper)
+    planned = None if item.planned is None else clean(item.planned) or None
+    if not name or not paper:
+        return None
+    kind = item.kind
+    if kind is SetupKind.NUMBER and (
+        as_number(paper) is None or (planned is not None and as_number(planned) is None)
+    ):
+        kind = SetupKind.CHOICE
+    return item.model_copy(
+        update={
+            "name": name,
+            "kind": kind,
+            "paper": paper,
+            "planned": planned,
+            "source_ref": clean(item.source_ref),
+        }
+    )
+
+
 def usable(item: SetupItem) -> bool:
     """Whether code can compare this condition at all."""
     if item.kind is SetupKind.NUMBER:
@@ -72,61 +120,95 @@ def usable(item: SetupItem) -> bool:
     return min(len(normal(item.paper)), len(normal(_planned(item)))) >= MIN_CHOICE_CHARS
 
 
-def number_written_in(value: str, text: str) -> bool:
-    """Whether `text` (a file) states the number `value` as a whole numeric token (the sign is
-    punctuation there)."""
-    target = as_number(value)
-    if target is None:
-        return False
-    for token in _TOKEN.finditer(text):
-        found = as_number(token.group())
-        if found is not None and math.isclose(found, abs(target), rel_tol=1e-9, abs_tol=0.0):
-            return True
-    return False
+def _select(items: Sequence[SetupItem]) -> tuple[list[SetupItem], list[SetupItem]]:
+    """(kept, dropped): the conditions code can check, one per name, at most MAX_SETUP_ITEMS,
+    those that plan a reduction first so that the cap or a repeated name never drops one; and
+    the listed conditions that were not kept, as the Planner wrote them."""
+    tidied = [(index, _tidy(item)) for index, item in enumerate(items)]
+    candidates = [(i, t) for i, t in tidied if t is not None and usable(t)]
+    candidates.sort(key=lambda pair: not _plans_other(pair[1]))  # stable: reductions first
+    kept: list[tuple[int, SetupItem]] = []
+    names: set[str] = set()
+    for index, item in candidates:
+        name = normal(item.name)
+        if name in names or len(kept) == MAX_SETUP_ITEMS:
+            continue
+        names.add(name)
+        kept.append((index, item))
+    taken = {index for index, _ in kept}
+    return [item for _, item in kept], [item for i, item in enumerate(items) if i not in taken]
 
 
 def correct_setup(items: Sequence[SetupItem]) -> tuple[list[SetupItem], list[str]]:
-    """The conditions code can check: comparable, one per name, the first MAX_SETUP_ITEMS,
-    renumbered s1, s2, ..., each with its planned value filled in. The note is code-written
-    and gives only a count."""
-    kept: list[SetupItem] = []
-    names: set[str] = set()
-    for item in items:
-        name = normal(item.name)
-        if not usable(item) or name in names or len(kept) == MAX_SETUP_ITEMS:
-            continue
-        names.add(name)
-        kept.append(item.model_copy(update={"id": f"s{len(kept) + 1}", "planned": _planned(item)}))
-    dropped = len(items) - len(kept)
+    """The conditions code can check (`_select`), renumbered s1, s2, ..., each with its text
+    cleaned and its planned value filled in. The note is code-written and gives only a
+    count."""
+    selected, dropped = _select(items)
+    kept = [
+        item.model_copy(update={"id": f"s{number}", "planned": _planned(item)})
+        for number, item in enumerate(selected, start=1)
+    ]
     if not dropped:
         return kept, []
-    plural = "s" if dropped != 1 else ""
+    plural = "s" if len(dropped) != 1 else ""
     return kept, [
-        f"{dropped} setup condition{plural} dropped (not comparable, repeated or beyond the "
-        f"first {MAX_SETUP_ITEMS})"
+        f"{len(dropped)} setup condition{plural} dropped (not comparable, repeated or beyond "
+        f"the first {MAX_SETUP_ITEMS})"
     ]
 
 
-def reduced_by(items: Sequence[SetupItem]) -> list[str]:
+def reduced_by(items: Sequence[SetupItem], listed: Sequence[SetupItem] | None = None) -> list[str]:
     """Why a plan with these (corrected) conditions cannot be at full scale: nothing to check
-    it against, or a value planned away from the paper's. Empty when nothing reduces it."""
-    if not items:
-        return ["scale REDUCED: the plan lists no condition of the paper's setup to check"]
-    return [
-        f"scale REDUCED: {item.name} planned {_planned(item)}, the paper uses {item.paper}"
-        for item in items
-        if not same_value(item.kind, _planned(item), item.paper)
-    ]
+    it against, a value planned away from the paper's, or, among the conditions the Planner
+    `listed`, one that could not be kept but planned something else. Empty when nothing
+    reduces it."""
+    lost = sum(_plans_other(item) for item in _select(listed)[1]) if listed is not None else 0
+    notes = (
+        [
+            f"scale REDUCED: {item.name} planned {_planned(item)}, the paper uses {item.paper}"
+            for item in items
+            if not same_value(item.kind, _planned(item), item.paper)
+        ]
+        if items
+        else ["scale REDUCED: the plan lists no condition of the paper's setup to check"]
+    )
+    if lost:  # code-written, a count only: the dropped text is not repeated
+        plural = "s" if lost != 1 else ""
+        notes.append(
+            f"scale REDUCED: {lost} listed condition{plural} that could not be kept planned "
+            "something else than the paper's value"
+        )
+    return notes
+
+
+def _numbers_in(text: str) -> list[float]:
+    """Every number written in a file as a whole numeric token (unsigned: the sign is
+    punctuation there), found in one pass."""
+    found = (as_number(token.group()) for token in _TOKEN.finditer(text))
+    return [value for value in found if value is not None]
+
+
+def number_written_in(value: str, text: str) -> bool:
+    """Whether `text` (a file) states the number `value`."""
+    return _written(value, _numbers_in(text))
+
+
+def _written(value: str, numbers: Sequence[float]) -> bool:
+    target = as_number(value)
+    if target is None:
+        return False
+    return any(math.isclose(n, abs(target), rel_tol=1e-9, abs_tol=0.0) for n in numbers)
 
 
 def setup_problems(
     items: Sequence[SetupItem], declared: Sequence[Declared], files: Mapping[str, str]
 ) -> list[str]:
-    """What is wrong with a finish declaration: ids first, then unknown files, then numbers
-    that are not numbers or not written in the file they cite; one kind at a time. `files`
-    maps `workspace/<path>` and `repo/<path>` to their text. The messages go back to the Coder
-    outside the untrusted wrapper, so they carry ids and the Coder's own words only, never a
-    condition's name or values (the paper's text)."""
+    """What is wrong with a finish declaration: ids first, then unknown files, then values
+    that are empty, numbers that are not numbers or not written in the file they cite; one
+    kind at a time. `files` maps `workspace/<path>` and `repo/<path>` to their text; each
+    cited file is scanned once. The messages go back to the Coder outside the untrusted
+    wrapper, so they carry ids and the Coder's own words only, never a condition's name or
+    values (the paper's text)."""
     ids = [d.id for d in declared]
     known = {item.id: item for item in items}
     problems = [f"{i} is declared more than once" for i in dict.fromkeys(ids) if ids.count(i) > 1]
@@ -137,19 +219,26 @@ def setup_problems(
     if problems:
         return problems
     problems = [
-        f"{d.id}: {d.where} is not a file of the workspace or of the repository"
+        f"{d.id}: {clean(d.where)} is not a file of the workspace or of the repository"
         for d in declared
         if d.where not in files
     ]
     if problems:
         return problems
+    numbers: dict[str, list[float]] = {}
     for d in declared:
-        if known[d.id].kind is not SetupKind.NUMBER:
+        value = clean(d.value)
+        if not value:
+            problems.append(f"{d.id}: the declared value is empty")
+        elif known[d.id].kind is not SetupKind.NUMBER:
             continue  # a choice is declared, not looked up
-        if as_number(d.value) is None:
-            problems.append(f"{d.id}: {d.value} is not a number")
-        elif not number_written_in(d.value, files[d.where]):
-            problems.append(f"{d.id}: {d.value} is not written in {d.where}")
+        elif as_number(value) is None:
+            problems.append(f"{d.id}: {value} is not a number")
+        else:
+            if d.where not in numbers:
+                numbers[d.where] = _numbers_in(files[d.where])
+            if not _written(value, numbers[d.where]):
+                problems.append(f"{d.id}: {value} is not written in {clean(d.where)}")
     return problems
 
 
@@ -163,17 +252,17 @@ def _matches_paper(item: SetupItem, declared: Declared) -> bool:
 
 def setup_records(items: Sequence[SetupItem], declared: Sequence[Declared]) -> list[SetupRecord]:
     """One record per condition, in the plan's order, for a declaration `setup_problems`
-    accepted."""
+    accepted. Every text is cleaned: the records are shown with the verdicts."""
     by_id = {d.id: d for d in declared}
     return [
         SetupRecord(
             id=item.id,
-            name=item.name,
+            name=clean(item.name),
             kind=item.kind,
-            paper=item.paper,
-            planned=_planned(item),
-            used=by_id[item.id].value,
-            where=by_id[item.id].where,
+            paper=clean(item.paper),
+            planned=clean(_planned(item)),
+            used=clean(by_id[item.id].value),
+            where=clean(by_id[item.id].where),
             matches_paper=_matches_paper(item, by_id[item.id]),
         )
         for item in items

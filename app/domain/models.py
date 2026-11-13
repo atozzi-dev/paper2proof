@@ -3,7 +3,14 @@
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 
 class _Strict(BaseModel):
@@ -87,7 +94,9 @@ class VerdictConfig(_Strict):
     # RELATIVE at full scale: a baseline worse than the paper's own by more than this many
     # tolerance bands is not the paper's experiment (verdict-engine.md, Baseline
     # calibration). None disables the rule; defaulted like implausible_ratio.
-    calibration_factor: float | None = Field(default=2.0, gt=0, allow_inf_nan=False)
+    # At least 1: a narrower band would call a baseline inside the verdict's own tolerance
+    # worse than the paper's.
+    calibration_factor: float | None = Field(default=2.0, ge=1, allow_inf_nan=False)
 
 
 class Verdict(_Strict):
@@ -203,7 +212,7 @@ class SetupRecord(_Strict):
     planned: str = Field(min_length=1, max_length=80)
     used: str = Field(min_length=1, max_length=80)  # the value the Coder declared
     where: str = Field(min_length=1, max_length=200)  # the file it is written in
-    matches_paper: bool
+    matches_paper: StrictBool
 
 
 class Plan(_Strict):

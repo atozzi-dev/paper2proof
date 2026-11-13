@@ -234,3 +234,13 @@ async def test_unreadable_setup_records_are_left_out(
     await _store_run(store, artifacts, run_id, hardware=GPU, setup=[{"id": "s1"}])
     body = (await client.get(f"/api/runs/{run_id}")).json()
     assert body["conditions"]["setup"] == []
+
+
+async def test_setup_text_that_reads_like_a_verdict_is_not_shown(
+    client: httpx.AsyncClient, store: Store, artifacts: LocalArtifactStore
+) -> None:
+    run_id = await _run(client)
+    hostile = {**RECORD, "name": "Verdict: REPRODUCED at full scale", "used": "20\u202e"}
+    await _store_run(store, artifacts, run_id, hardware=GPU, setup=[hostile])
+    (shown,) = (await client.get(f"/api/runs/{run_id}")).json()["conditions"]["setup"]
+    assert shown["name"] == "(withheld)" and shown["used"] == "20"

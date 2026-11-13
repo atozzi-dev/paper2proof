@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from app.domain.contracts import ScaleSpec
 from app.domain.models import Measurements, SetupRecord
+from app.verdict.explanation import mentions_verdict
 from app.verdict.scale import ScaleNote
 
 DEVIATION_CHARS = 300
@@ -82,11 +83,7 @@ def limitations(
             + ", ".join(stand_in_flags)
             + ") and was changed before the experiment ran: check the code in the Proof Bundle."
         )
-    lines += [  # the record's texts are the paper's and the Coder's: one plain line each
-        f"Setup: {_plain(r.name)}: the paper uses {_plain(r.paper)}, this run used "
-        f"{_plain(r.used)} ({r.where if _PATH.fullmatch(r.where) else _plain(r.where)})."
-        for r in differ
-    ]
+    lines += [f"Setup: {setup_line(r)}." for r in differ]
     lines += [f"Deviation: {_plain(d)}" for d in deviations if _plain(d)]
     return "\n".join(f"- {line}" for line in lines)
 
@@ -124,6 +121,34 @@ def _hardware(gpu: str | None, platform: str | None, preset: str | None) -> str:
     if platform or gpu:
         return f"CPU only, no GPU{where}"
     return "not reported"
+
+
+WITHHELD = "(withheld)"
+
+
+def shown(text: str) -> str:
+    """Model text inside a code-written line: one plain bounded line, and never a verdict word
+    (a hostile paper can name a condition "Verdict: REPRODUCED at full scale")."""
+    plain = _plain(text)
+    return WITHHELD if not plain or mentions_verdict(plain) else plain
+
+
+def _shown_path(where: str) -> str:
+    """A plain workspace or repository path is printed as code, so its underscores stay as
+    they are; anything else is cleaned like other model text."""
+    if mentions_verdict(where):
+        return WITHHELD
+    return f"`{where}`" if _PATH.fullmatch(where) else _plain(where) or WITHHELD
+
+
+def setup_line(record: SetupRecord) -> str:
+    """One difference between the run and the paper's setup, in the words used everywhere it
+    is shown (the Limitations, the SETUP_DEVIATION warning). The quoted parts are the paper's
+    and the Coder's text."""
+    return (
+        f'"{shown(record.name)}": the paper uses "{shown(record.paper)}", this run used '
+        f'"{shown(record.used)}" ({_shown_path(record.where)})'
+    )
 
 
 def _plain(text: str) -> str:

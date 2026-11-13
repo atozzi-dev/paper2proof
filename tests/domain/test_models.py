@@ -19,6 +19,7 @@ from app.domain.models import (
     RunStatus,
     Scale,
     SetupItem,
+    SetupRecord,
     StepName,
     Verdict,
     VerdictConfig,
@@ -257,3 +258,18 @@ def test_a_setup_item_is_bounded() -> None:
         SetupItem.model_validate({**item, "paper": "9" * 81})
     with pytest.raises(ValidationError):
         SetupItem.model_validate({**item, "kind": "RANGE"})
+
+
+def test_a_setup_record_s_match_is_a_real_boolean() -> None:
+    record = {
+        "id": "s1",
+        "name": "epochs",
+        "kind": "NUMBER",
+        "paper": "200",
+        "planned": "200",
+        "used": "20",
+        "where": "workspace/train.py",
+        "matches_paper": "true",
+    }
+    with pytest.raises(ValidationError):
+        SetupRecord.model_validate(record)

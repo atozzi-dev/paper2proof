@@ -64,7 +64,7 @@ class VerdictConfig(BaseModel):
     min_seeds: int = 3
     confidence: float = 0.95
     implausible_ratio: float | None = 2.0  # k, finite and > 1; None disables the rule
-    calibration_factor: float | None = 2.0  # c, finite and > 0; None disables the rule
+    calibration_factor: float | None = 2.0  # c, finite and >= 1; None disables the rule
 
 class Verdict(BaseModel):
     kind: VerdictKind

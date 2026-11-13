@@ -862,3 +862,14 @@ async def test_the_planner_is_asked_for_the_paper_s_conditions(
     await _plan(store, tmp_path, "setup_full", models=models)
     prompt = _prompt(models)
     assert "- setup:" in prompt and "`planned`" in prompt
+
+
+def test_a_reduction_stated_on_a_condition_code_cannot_keep_still_reduces_the_plan() -> None:
+    """Security review, 2026-11-13: the gate failed open when the Planner's own reduction sat
+    on a condition that was dropped."""
+    plan = _setup_plan(Scale.FULL)
+    garbage = SetupItem(id="y", name="optimizer", kind=SetupKind.CHOICE, paper="—", planned="Adam")
+    plan = plan.model_copy(update={"setup": [*plan.setup, garbage]})
+    corrected, notes = correct_plan(plan, selected={"c1": ClaimType.RELATIVE}, gpu_cap=30)
+    assert corrected.scale is Scale.REDUCED
+    assert any("could not be kept planned something else" in n for n in notes)

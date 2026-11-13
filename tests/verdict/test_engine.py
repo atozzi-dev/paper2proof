@@ -408,7 +408,7 @@ def test_the_calibration_factor_is_configured() -> None:
     assert VerdictConfig().calibration_factor == 2.0  # configs written before the rule still load
     assert load_verdict_config(ROOT / "config" / "verdict.yaml").calibration_factor == 2.0
     assert VerdictConfig(calibration_factor=None).calibration_factor is None  # disabled
-    for bad in (0.0, -1.0, math.inf, math.nan):
+    for bad in (0.0, 0.5, -1.0, math.inf, math.nan):  # below 1 is inside the tolerance
         with pytest.raises(ValueError, match="calibration_factor"):
             VerdictConfig(calibration_factor=bad)
 

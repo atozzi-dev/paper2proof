@@ -149,7 +149,7 @@ def correct_plan(
     # Full scale is derived, never a label (execution-contracts §6.1): it needs conditions of
     # the paper to check, every one planned at the paper's value. Code never raises the scale.
     setup, dropped = correct_setup(plan.setup)
-    why = reduced_by(setup)
+    why = reduced_by(setup, listed=plan.setup)  # a dropped reduction still reduces
     if not setup and scale is Scale.REDUCED:
         why = []  # reduced already: a missing list changes nothing
     if why:
