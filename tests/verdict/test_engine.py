@@ -473,11 +473,13 @@ LOW_BASE = [0.80, 0.801, 0.802]
 NO_CALIBRATION = VerdictConfig(calibration_factor=None)
 
 
-def test_19_a_baseline_below_the_paper_s_is_judged_at_reduced_scale() -> None:
+def test_19_a_baseline_below_the_paper_s_takes_no_reproduced_verdict_away() -> None:
+    """Set A, 2026-11-13: two true RELATIVE claims lost their REPRODUCED because the paper's own
+    method value was the planted false number, which moved the derived baseline. The anchor is
+    too weak to take a verdict away: it only stops an accusation."""
     verdict = decide(PAPER, m(Scale.FULL, [0.82, 0.821, 0.819], LOW_BASE), CFG)
-    assert (verdict.kind, verdict.reason) == (VerdictKind.REPRODUCED_AT_REDUCED_SCALE, None)
-    assert verdict.tolerance["baseline_paper"] == pytest.approx(0.924)
-    assert verdict.tolerance["baseline_mean"] == pytest.approx(0.801)
+    assert (verdict.kind, verdict.reason) == (VerdictKind.REPRODUCED, None)
+    assert "baseline_mean" not in verdict.tolerance
 
 
 def test_20_a_baseline_below_the_paper_s_never_accuses() -> None:
@@ -486,6 +488,8 @@ def test_20_a_baseline_below_the_paper_s_never_accuses() -> None:
         VerdictKind.INCONCLUSIVE,
         ReasonCode.BASELINE_MISMATCH,
     )
+    assert verdict.tolerance["baseline_paper"] == pytest.approx(0.924)
+    assert verdict.tolerance["baseline_mean"] == pytest.approx(0.801)
 
 
 def test_21_a_baseline_above_the_paper_s_changes_nothing() -> None:
@@ -513,15 +517,19 @@ def test_24_the_calibration_can_be_disabled() -> None:
 
 
 def test_calibration_follows_the_metric_direction() -> None:
-    """The KAN run of 2026-10-30 (RMSE, lower is better): the MLP baseline at 0.020 against the
-    paper's 0.000648. The method gap rule comes first; without it the direction alone would
-    have been a full REPRODUCED."""
+    """RMSE, lower is better, with the KAN paper's numbers (2026-10-30): an MLP baseline at
+    0.020 against the paper's 0.000648 is worse, and a method that loses to it must not
+    accuse the paper. The method gap rule comes first when it applies."""
     claim = relative_valued(-0.000515, 0.000133, hib=False)
-    meas = m(Scale.FULL, [0.0054, 0.0060, 0.0051], [0.021, 0.020, 0.020])
+    meas = m(Scale.FULL, [0.030, 0.031, 0.029], [0.021, 0.020, 0.020])
     assert decide(claim, meas, CFG).reason is ReasonCode.IMPLAUSIBLE_GAP
     verdict = decide(claim, meas, VerdictConfig(implausible_ratio=None))
-    assert verdict.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    assert verdict.reason is ReasonCode.BASELINE_MISMATCH
     assert verdict.tolerance["baseline_paper"] == pytest.approx(0.000648)
+    better = m(Scale.FULL, [0.030, 0.031, 0.029], [0.0005, 0.0006, 0.0004])  # below the paper's
+    assert decide(claim, better, VerdictConfig(implausible_ratio=None)).kind is (
+        VerdictKind.NOT_REPRODUCED
+    )
 
 
 def test_calibration_needs_the_paper_s_method_value_and_its_delta() -> None:

@@ -273,16 +273,16 @@ def test_a_baseline_below_the_papers_is_named_in_the_facts() -> None:
         }
     )
     measured = Measurements(
-        scale=Scale.FULL, per_seed=[0.82, 0.821, 0.819], baseline_per_seed=[0.80, 0.801, 0.802]
+        scale=Scale.FULL, per_seed=[0.79, 0.791, 0.792], baseline_per_seed=[0.80, 0.801, 0.802]
     )
     verdict = decide(claim, measured, VerdictConfig())
-    assert verdict.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    assert verdict.reason is ReasonCode.BASELINE_MISMATCH
     last = judge_facts(claim, verdict).split("\n")[-1]
     assert last == (
         "- The paper's baseline is 0.924 (its value for the method minus the claimed "
         "difference); the experiment measured 0.801 for the baseline on average, which is "
-        "worse. The run is not at the paper's level, so the verdict code compares the "
-        "direction only."
+        "worse. The run is not at the paper's level, so the verdict code does not count its "
+        "result against the claim."
     )
     assert not mentions_verdict(last)
 

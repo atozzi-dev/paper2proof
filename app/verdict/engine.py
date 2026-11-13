@@ -66,7 +66,7 @@ def _paper_baseline(claim: Claim) -> float | None:
 
 def _below_paper(ours: float, paper: float, sign: float, claim: Claim, cfg: VerdictConfig) -> bool:
     """Our baseline is worse than the paper's by more than the calibration band: the experiment
-    is below the paper's level, so its direction is all it can show. One-sided: a baseline
+    is below the paper's level, so it cannot accuse the paper. One-sided: a baseline
     better than the paper's is no evidence against our run (a paper that understates its
     baseline is the claim to catch). A fraction against a percent is a unit mismatch, excused
     only when the value times 100 lands on the paper's, never by merely being better."""
@@ -154,14 +154,13 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
         ):
             kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP
             tolerance["method_mean"] = own
-        elif full and (paper_b := _paper_baseline(claim)) is not None:
-            ours_b = math.fsum(base or []) / n  # the baseline's own value, as measured
-            if _below_paper(ours_b, paper_b, sign, claim, cfg):  # judged as at reduced scale
-                tolerance["baseline_mean"], tolerance["baseline_paper"] = ours_b, paper_b
-                if kind is VerdictKind.REPRODUCED:
-                    kind = VerdictKind.REPRODUCED_AT_REDUCED_SCALE
-                elif kind is VerdictKind.NOT_REPRODUCED:
-                    kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.BASELINE_MISMATCH
+        elif (
+            kind is VerdictKind.NOT_REPRODUCED  # at full scale only; never takes a verdict away
+            and (paper_b := _paper_baseline(claim)) is not None
+            and _below_paper(ours_b := math.fsum(base or []) / n, paper_b, sign, claim, cfg)
+        ):
+            kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.BASELINE_MISMATCH
+            tolerance["baseline_mean"], tolerance["baseline_paper"] = ours_b, paper_b
 
     # Report numbers in the claim's original direction.
     lo, hi = (ci_low, ci_high) if sign > 0 else (-ci_high, -ci_low)

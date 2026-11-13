@@ -184,7 +184,7 @@ def _relative_paper(claim: Claim, verdict: Verdict) -> list[str]:
             f"The paper's baseline is {paper_b:g} (its value for the method minus the claimed "
             f"difference); the experiment measured {_fmt(ours_b)[0]} for the baseline on "
             "average, which is worse. The run is not at the paper's level, so the verdict code "
-            "compares the direction only."
+            "does not count its result against the claim."
         )
     return lines
 

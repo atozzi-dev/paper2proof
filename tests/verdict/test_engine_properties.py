@@ -282,7 +282,7 @@ def _band(claim: Claim, v: float) -> float:
 
 @EXAMPLES
 @given(anchored_cases())
-def test_p10_a_baseline_below_the_papers_gives_no_full_verdict(
+def test_p10_a_baseline_below_the_papers_never_accuses(
     case: tuple[Claim, Measurements],
 ) -> None:
     claim, meas = case
@@ -290,8 +290,7 @@ def test_p10_a_baseline_below_the_papers_gives_no_full_verdict(
     assume(sign * ours < sign * paper - _band(claim, paper))
     assume(abs(100 * ours - paper) > _band(claim, paper))  # not a fraction against a percent
     assume(abs(ours - 100 * paper) > _band(claim, 100 * paper))
-    kind = decide(claim, meas, CFG).kind
-    assert kind not in (VerdictKind.REPRODUCED, VerdictKind.NOT_REPRODUCED)
+    assert decide(claim, meas, CFG).kind is not VerdictKind.NOT_REPRODUCED
 
 
 @EXAMPLES

@@ -156,13 +156,11 @@ positive = ci_low > 0 and mean >= cfg.rho * delta
 own = mean(per_seed)                       # the method's own value, raw direction
 if scale == FULL and reported_value is not None and implausible_method(own, reported_value):
     return INCONCLUSIVE(IMPLAUSIBLE_GAP)   # numbers still returned; tolerance["method_mean"] = own
-if scale == FULL and baseline_below_paper():   # see Baseline calibration
-    if positive:      return REPRODUCED_AT_REDUCED_SCALE
-    if ci_high <= 0:  return INCONCLUSIVE(BASELINE_MISMATCH)
-    return INCONCLUSIVE(HIGH_VARIANCE)
 if positive:  return REPRODUCED if scale == FULL else REPRODUCED_AT_REDUCED_SCALE
 if ci_high <= 0:
-    return NOT_REPRODUCED if scale == FULL else INCONCLUSIVE(REDUCED_SCALE_CONTRADICTS)
+    if scale != FULL:           return INCONCLUSIVE(REDUCED_SCALE_CONTRADICTS)
+    if baseline_below_paper():  return INCONCLUSIVE(BASELINE_MISMATCH)   # see Baseline calibration
+    return NOT_REPRODUCED
 return INCONCLUSIVE(HIGH_VARIANCE)
 ```
 
@@ -200,9 +198,9 @@ When the paper gives both the method's value and the delta, its baseline is know
 anchor that is measured, not declared:
 
 ```
-applies when scale == FULL, cfg.calibration_factor is not None,
-             reported_value is not None and claimed_delta is not None,
-             and the method gap did not fire
+applies when the verdict would be NOT_REPRODUCED (so at full scale, after the method gap),
+             cfg.calibration_factor is not None,
+             reported_value is not None and claimed_delta is not None
 
 paper_b = reported_value - claimed_delta          # the paper's baseline, raw direction
 ours_b  = mean(baseline_per_seed)                 # raw direction
@@ -215,9 +213,12 @@ baseline_below_paper = worse and not unit
 - **One-sided.** A baseline better than the paper's changes nothing: a paper that understates
   its baseline is exactly the false claim to catch (the canary set's planted RELATIVE claims
   are built that way), and "our baseline is too good" is no evidence against our run.
-- **Judged as at reduced scale.** The run is not at the paper's level, so only the direction
-  counts: REPRODUCED becomes REPRODUCED_AT_REDUCED_SCALE and NOT_REPRODUCED becomes
-  INCONCLUSIVE(BASELINE_MISMATCH). HIGH_VARIANCE is unchanged.
+- **It only stops an accusation.** NOT_REPRODUCED becomes INCONCLUSIVE(BASELINE_MISMATCH);
+  REPRODUCED and HIGH_VARIANCE are unchanged. The anchor is derived from two extracted
+  numbers, too weak to take a verdict away: on the canary set (2026-11-13) a version that
+  also lowered REPRODUCED hit two true claims, because their papers' own method value was
+  the planted false number and it moved the derived baseline. Enough to refuse to accuse,
+  in line with the engine's asymmetry.
 - **A fraction against a percent** is a unit mismatch, not another experiment, as for the
   method gap; it is excused only when the value times 100 lands on the paper's (two-sided),
   never merely by being better.
@@ -303,7 +304,7 @@ Table-driven examples, all with `cfg` defaults unless stated:
 | 16 | ABSOLUTE v=0.990 (a falsified claim) | FULL [0.894, 0.895, 0.896] (ratio 0.90) | NOT_REPRODUCED |
 | 17 | ABSOLUTE v=2.0 | FULL [1.0, 1.0, 1.0] (exactly k = 2 times: inside the band) | NOT_REPRODUCED |
 | 18 | ABSOLUTE v=0.5 | FULL [-2.0, -2.1, -1.9] (opposite signs) | NOT_REPRODUCED |
-| 19 | RELATIVE delta=0.017, v=0.941 (paper baseline 0.924) | FULL method [0.82,0.821,0.819], base [0.80,0.801,0.802] | REPRODUCED_AT_REDUCED_SCALE |
+| 19 | RELATIVE delta=0.017, v=0.941 (paper baseline 0.924) | FULL method [0.82,0.821,0.819], base [0.80,0.801,0.802] | REPRODUCED (the calibration never takes it away) |
 | 20 | as #19 | FULL base [0.80,0.801,0.802], method == base - 0.01 each seed | INCONCLUSIVE/BASELINE_MISMATCH |
 | 21 | as #19 | FULL base [0.95,0.951,0.952] (better than the paper's), method == base - 0.01 | NOT_REPRODUCED |
 | 22 | as #19 | FULL base [0.92,0.921,0.922] (inside the band), method [0.94,0.941,0.939] | REPRODUCED |
@@ -326,10 +327,10 @@ Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`)
   scale with the measured mean far off `reported_value`, is now INCONCLUSIVE/IMPLAUSIBLE_GAP
   with the same numbers; for an ABSOLUTE claim it was NOT_REPRODUCED or
   INCONCLUSIVE/HIGH_VARIANCE.
-- **P10 (no full verdict from a baseline below the paper's):** for any RELATIVE claim at
+- **P10 (no accusation from a baseline below the paper's):** for any RELATIVE claim at
   full scale with `reported_value` and `claimed_delta`, whose baseline mean is worse than
   the paper's baseline beyond the band and not within the band at a factor of 100 either
-  way, `kind` is neither REPRODUCED nor NOT_REPRODUCED.
+  way, `kind != NOT_REPRODUCED`.
 - **P11 (a baseline at or above the paper's changes nothing):** when the baseline mean is
   not worse than the paper's baseline, the verdict equals the one with
   `calibration_factor = None`.
