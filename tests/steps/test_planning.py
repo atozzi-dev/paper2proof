@@ -25,6 +25,8 @@ from app.domain.models import (
     PlanMode,
     RunStatus,
     Scale,
+    SetupItem,
+    SetupKind,
     StepName,
 )
 from app.execution.package_policy import PYPI
@@ -774,3 +776,89 @@ async def test_a_huge_claim_field_is_matched_within_a_bound() -> None:
     from app.orchestrator.steps.planning import NAMED_CHARS
 
     assert NAMED_CHARS <= 4096
+
+
+# --- the paper's setup: the scale is derived, never a label (A-43) -------------------------
+
+
+def _setup_plan(scale: Scale, *, planned: str = "200", listed: bool = True) -> Plan:
+    epochs = SetupItem(
+        id="x", name="epochs", kind=SetupKind.NUMBER, paper="200", planned=planned, source_ref="4"
+    )
+    return Plan(
+        mode=PlanMode.FROM_SCRATCH,
+        claim_ids=["c1"],
+        claim_types={"c1": ClaimType.RELATIVE},
+        scale=scale,
+        seeds=[0, 1, 2],
+        gpu_minutes_est=10,
+        setup=[epochs] if listed else [],
+    )
+
+
+async def test_full_scale_needs_every_listed_condition_at_the_paper_s_value(
+    store: Store, tmp_path: Path
+) -> None:
+    plan, _, _ = await _plan(store, tmp_path, "setup_full")
+    assert plan.scale is Scale.FULL
+    assert [(i.id, i.name, i.planned) for i in plan.setup] == [
+        ("s1", "epochs", "200"),
+        ("s2", "optimizer", "SGD"),
+    ]
+    assert not any("scale REDUCED" in n for n in plan.notes)
+
+
+async def test_a_planned_value_below_the_paper_s_makes_the_plan_reduced(
+    store: Store, tmp_path: Path
+) -> None:
+    """Production, 2026-10-30: plans labelled FULL ran 200 steps where the paper runs thousands."""
+    plan, _, _ = await _plan(store, tmp_path, "setup_reduced_by_plan")
+    assert plan.scale is Scale.REDUCED
+    assert "scale REDUCED: epochs planned 20, the paper uses 200" in plan.notes
+
+
+async def test_a_plan_without_conditions_is_reduced(store: Store, tmp_path: Path) -> None:
+    plan, _, _ = await _plan(store, tmp_path, "setup_missing")
+    assert plan.scale is Scale.REDUCED and plan.setup == []
+    assert "scale REDUCED: the plan lists no condition of the paper's setup to check" in plan.notes
+
+
+async def test_a_plan_that_lists_matching_conditions_stays_full(
+    store: Store, tmp_path: Path
+) -> None:
+    plan, _, _ = await _plan(store, tmp_path, "two_seeds")
+    assert plan.scale is Scale.FULL and len(plan.setup) == 2
+
+
+def test_the_code_never_raises_the_scale() -> None:
+    corrected, notes = correct_plan(
+        _setup_plan(Scale.REDUCED), selected={"c1": ClaimType.RELATIVE}, gpu_cap=30
+    )
+    assert corrected.scale is Scale.REDUCED and notes == []
+    assert [i.id for i in corrected.setup] == ["s1"]
+
+
+def test_a_reduced_plan_without_conditions_gets_no_extra_note() -> None:
+    """It is reduced already: the missing list changes nothing, so there is nothing to say."""
+    corrected, notes = correct_plan(
+        _setup_plan(Scale.REDUCED, listed=False), selected={"c1": ClaimType.RELATIVE}, gpu_cap=30
+    )
+    assert corrected.scale is Scale.REDUCED and notes == []
+
+
+def test_correcting_a_corrected_setup_changes_nothing() -> None:
+    selected = {"c1": ClaimType.RELATIVE}
+    once, notes = correct_plan(_setup_plan(Scale.FULL, planned="20"), selected=selected, gpu_cap=30)
+    assert once.scale is Scale.REDUCED
+    assert notes == ["scale REDUCED: epochs planned 20, the paper uses 200"]
+    twice, again = correct_plan(once, selected=selected, gpu_cap=30)
+    assert twice == once and again == []
+
+
+async def test_the_planner_is_asked_for_the_paper_s_conditions(
+    store: Store, tmp_path: Path
+) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="setup_full")
+    await _plan(store, tmp_path, "setup_full", models=models)
+    prompt = _prompt(models)
+    assert "- setup:" in prompt and "`planned`" in prompt

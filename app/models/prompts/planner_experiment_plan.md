@@ -1,6 +1,6 @@
 ---
 role: planner
-version: "8"
+version: "9"
 output_schema: app.domain.models.Plan
 ---
 You plan a small, honest experiment that tests the selected claims of a machine-learning paper
@@ -20,6 +20,18 @@ Decide:
   fraction of the data, a smaller model); running fewer seeds than the paper is not a
   reduction of scale. At REDUCED scale prefer the paper's RELATIVE claims (method vs
   baseline under identical conditions): ABSOLUTE numbers are not comparable at reduced scale.
+- setup: up to 8 conditions of the experiment that the paper states and that change the
+  result: training length (epochs, iterations, steps, trees), model size, data size and split,
+  optimizer and learning rate, hyperparameter search, evaluation protocol. For each one give
+  `id` (s1, s2, ...), `name`, `kind` (NUMBER for a number, CHOICE for a name such as an
+  optimizer or a protocol), `paper` (the value as the paper writes it: a bare number for
+  NUMBER, a short name for CHOICE), `source_ref` (where the paper says so) and `planned` (the
+  value this run will use). `planned` is the paper's value whenever it fits that hardware and
+  budget; when it does not, the largest value that does, and gpu_minutes_est is then for the
+  planned values. List only what the paper states: never seeds, never the claims' own
+  numbers, never a value you would have to guess. Code compares each `planned` with its
+  `paper`: any difference, or an empty list, makes the run REDUCED, so scale is FULL only
+  when every `planned` equals its `paper`.
 - seeds: at least 3 distinct seeds.
 - packages: only what the official repository or the method needs beyond the base image
   (torch, torchvision, numpy, scipy, scikit-learn, transformers, datasets, timm, accelerate,

@@ -43,6 +43,7 @@ from app.orchestrator.budget import SpendKind
 from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import EXEC_PLATFORM, EXEC_PRESET, estimate_plan_cost
 from app.orchestrator.fsm import StepResult
+from app.orchestrator.setup_check import correct_setup, reduced_by
 from app.orchestrator.steps.common import (
     PAPER_EXCERPT_CHARS,
     ingested_paper,
@@ -145,6 +146,15 @@ def correct_plan(
     if gpu > gpu_cap:
         gpu, scale = gpu_cap, Scale.REDUCED
         notes.append(f"GPU estimate clamped to the {gpu_cap:g}-minute budget: scale REDUCED")
+    # Full scale is derived, never a label (execution-contracts §6.1): it needs conditions of
+    # the paper to check, every one planned at the paper's value. Code never raises the scale.
+    setup, dropped = correct_setup(plan.setup)
+    why = reduced_by(setup)
+    if not setup and scale is Scale.REDUCED:
+        why = []  # reduced already: a missing list changes nothing
+    if why:
+        scale = Scale.REDUCED
+    notes += [note for note in (*dropped, *why) if note not in plan.notes]
     corrected = plan.model_copy(
         update={
             "claim_ids": claim_ids,
@@ -153,6 +163,7 @@ def correct_plan(
             "datasets": datasets,
             "gpu_minutes_est": gpu,
             "scale": scale,
+            "setup": setup,
             "notes": [*plan.notes, *notes],
         }
     )
