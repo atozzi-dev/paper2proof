@@ -459,6 +459,8 @@ export interface components {
             scale: components["schemas"]["Scale"];
             /** Seeds */
             seeds: number[];
+            /** Setup */
+            setup?: components["schemas"]["SetupItem"][];
         };
         /**
          * PlanMode
@@ -477,7 +479,7 @@ export interface components {
          * ReasonCode
          * @enum {string}
          */
-        ReasonCode: "BUDGET" | "CAPACITY" | "MISSING_DATA" | "RUNTIME_ERROR" | "UNDERSPECIFIED_CLAIM" | "INSUFFICIENT_SEEDS" | "HIGH_VARIANCE" | "REDUCED_SCALE_ABSOLUTE" | "REDUCED_SCALE_CONTRADICTS" | "IMPLAUSIBLE_GAP" | "NOT_MEASURED";
+        ReasonCode: "BUDGET" | "CAPACITY" | "MISSING_DATA" | "RUNTIME_ERROR" | "UNDERSPECIFIED_CLAIM" | "INSUFFICIENT_SEEDS" | "HIGH_VARIANCE" | "REDUCED_SCALE_ABSOLUTE" | "REDUCED_SCALE_CONTRADICTS" | "IMPLAUSIBLE_GAP" | "BASELINE_MISMATCH" | "NOT_MEASURED";
         /** RunCard */
         RunCard: {
             /** Arxiv Id */
@@ -587,6 +589,32 @@ export interface components {
             /** Invite Code */
             invite_code: string;
         };
+        /**
+         * SetupItem
+         * @description One condition of the experiment that the paper states (the Planner lists them; code
+         *     compares). Every text field is model text read from the paper: untrusted, bounded.
+         */
+        SetupItem: {
+            /** Id */
+            id: string;
+            kind: components["schemas"]["SetupKind"];
+            /** Name */
+            name: string;
+            /** Paper */
+            paper: string;
+            /** Planned */
+            planned: string;
+            /**
+             * Source Ref
+             * @default
+             */
+            source_ref: string;
+        };
+        /**
+         * SetupKind
+         * @enum {string}
+         */
+        SetupKind: "NUMBER" | "CHOICE";
         /** Stats */
         Stats: {
             /** Runs By Verdict */

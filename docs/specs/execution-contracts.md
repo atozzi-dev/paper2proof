@@ -188,7 +188,7 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 - No network. No writes outside `<dir>` and `/tmp`.
 - Exit code 0 on success.
 
-`finish(entrypoint, args, expected_outputs, measures, unmeasured)` validates:
+`finish(entrypoint, args, expected_outputs, measures, unmeasured, setup)` validates:
 - the entrypoint file exists in the workspace and the last smoke run passed with `--smoke` and
   the same args, on the same workspace;
 - every claim of the plan appears exactly once, either in `measures`
@@ -196,12 +196,45 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
   of `fraction`, `percent`, `raw`) or in `unmeasured` (`{claim_id, reason}`, reason ≤ 200
   characters, model text shown as such); at least one claim is measured;
 - the smoke `metrics.json` has every declared key, and each value fits its declared unit.
+- every condition of `Plan.setup` is declared once and written in the file it cites (§6.1).
 
 The control plane turns `measures` into the manifest's `claims` and keeps the units and the
 unmeasured claims in `smoke_result.json`, with `swap_hints`: each time `finish` said a RELATIVE
 claim's `key` looked like its baseline (`"<claim_id>: key <key>, baseline_key <key>"`, once per
 claim and key; the claim then measures what the last `finish` declared). An unmeasured claim gets an INCONCLUSIVE verdict with
 reason `NOT_MEASURED`, decided by code.
+
+### 6.1 The paper's setup (`Plan.setup`) and the effective scale
+
+`scale: FULL` is a fact code derives, never a label a model writes alone.
+
+- **The plan lists the paper's conditions.** `Plan.setup` holds up to 8 `SetupItem`s: `id`
+  (`s1`, `s2`, ... renumbered by code), `name`, `kind` (`NUMBER` or `CHOICE`), `paper` (the
+  value as the paper writes it), `planned` (what this run will use) and `source_ref`. Only
+  what the paper states and what changes the result: training length, model size, data size
+  and split, optimizer and learning rate, hyperparameter search, evaluation protocol. Never
+  seeds, never the claims' own numbers. Every text field is model text read from the paper:
+  untrusted, bounded at 80 characters.
+- **PLANNING corrects the list** (`app/orchestrator/setup_check.py`): a `NUMBER` item whose
+  `paper` or `planned` is not a number, a `CHOICE` item whose value normalizes to fewer than
+  two characters and a repeated name are dropped; the first 8 are kept. The plan's scale
+  becomes `REDUCED` when any item has `planned` different from `paper`, or when no item is
+  left (nothing to check full scale against). Code never raises `REDUCED` to `FULL`.
+- **Comparison.** `NUMBER`: both parse as numbers (`2e3`, `2,000`) and are equal within
+  rounding. `CHOICE`: equal after casefolding and keeping letters and digits only.
+- **`finish` declares what the script uses**: `setup: [{id, value, where}]`, every item of the
+  plan exactly once; `where` is a `workspace/<path>` file or a `repo/<path>` file of the
+  repository snapshot. Code refuses a declaration whose value is not written in the cited
+  file (a number as a whole numeric token, a choice as normalized text): a text search, not
+  a proof. A value different from `planned` gets one hint per item and attempt; finishing
+  again unchanged accepts it.
+- **`smoke_result.json` records it**: `setup` is a list of
+  `{id, name, kind, paper, planned, used, where, matches_paper}`, where `matches_paper`
+  compares `used` with `paper` (never with `planned`) and is written by code. Each record
+  with `matches_paper: false` also emits a `SETUP_DEVIATION` warning.
+- **The effective scale** in the exec manifest is
+  `full = plan.scale is FULL and len(records) == len(plan.setup) and all(matches_paper)`.
+  A plan stored before this rule has no `setup` and keeps its scale.
 
 ## 7. Runner entrypoint (`images/runner/entrypoint.py`)
 

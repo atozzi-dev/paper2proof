@@ -15,3 +15,9 @@ confidence: 0.95
 # mismatch (count vs rate, fraction vs percent), not a wrong claim; a wrong claim is off by a
 # few to tens of percent (our planted ones: at most 11%). null disables the rule.
 implausible_ratio: 2.0
+# A RELATIVE claim at full scale whose measured baseline is worse than the paper's own
+# baseline (reported_value - claimed_delta) by more than this many tolerance bands
+# (max(tol_rel * |value|, tol_abs)) is judged as at reduced scale: the experiment is below
+# the paper's level, so only the direction counts and it never accuses. One-sided: a
+# baseline better than the paper's changes nothing. null disables the rule.
+calibration_factor: 2.0

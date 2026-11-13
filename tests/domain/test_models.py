@@ -18,6 +18,7 @@ from app.domain.models import (
     ReasonCode,
     RunStatus,
     Scale,
+    SetupItem,
     StepName,
     Verdict,
     VerdictConfig,
@@ -232,3 +233,25 @@ def test_sandbox_output_is_capped_at_50_lines() -> None:
 
     with pytest.raises(ValidationError):
         SandboxOutputPayload(iteration=1, stream="stdout", lines=["l"] * 51)
+
+
+def test_a_plan_without_setup_still_loads() -> None:
+    """Plans stored before the fidelity check have no `setup`: they keep loading."""
+    stored = {
+        "mode": "FROM_SCRATCH",
+        "claim_ids": ["c1"],
+        "claim_types": {"c1": "ABSOLUTE"},
+        "scale": "FULL",
+        "seeds": [0, 1, 2],
+        "gpu_minutes_est": 1.0,
+    }
+    assert Plan.model_validate(stored).setup == []
+
+
+def test_a_setup_item_is_bounded() -> None:
+    item = {"id": "s1", "name": "epochs", "kind": "NUMBER", "paper": "200", "planned": "200"}
+    assert SetupItem.model_validate(item).source_ref == ""
+    with pytest.raises(ValidationError):
+        SetupItem.model_validate({**item, "paper": "9" * 81})
+    with pytest.raises(ValidationError):
+        SetupItem.model_validate({**item, "kind": "RANGE"})

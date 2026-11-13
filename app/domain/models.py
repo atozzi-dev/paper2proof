@@ -41,6 +41,7 @@ class ReasonCode(StrEnum):
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
     IMPLAUSIBLE_GAP = "IMPLAUSIBLE_GAP"  # ABSOLUTE, more than implausible_ratio times off
+    BASELINE_MISMATCH = "BASELINE_MISMATCH"  # RELATIVE: our baseline is below the paper's
     NOT_MEASURED = "NOT_MEASURED"  # the experiment does not measure this claim (code-set)
 
 
@@ -83,6 +84,10 @@ class VerdictConfig(_Strict):
     # written before the rule still load.
     # None disables the implausible-gap rule; finite only (verdict.json is strict JSON)
     implausible_ratio: float | None = Field(default=2.0, gt=1, allow_inf_nan=False)
+    # RELATIVE at full scale: a baseline worse than the paper's own by more than this many
+    # tolerance bands is not the paper's experiment (verdict-engine.md, Baseline
+    # calibration). None disables the rule; defaulted like implausible_ratio.
+    calibration_factor: float | None = Field(default=2.0, gt=0, allow_inf_nan=False)
 
 
 class Verdict(_Strict):
@@ -168,6 +173,37 @@ class DatasetReq(_Strict):
     max_bytes: int = Field(default=2_000_000_000, gt=0, le=10_000_000_000)
 
 
+class SetupKind(StrEnum):
+    NUMBER = "NUMBER"  # compared as numbers
+    CHOICE = "CHOICE"  # compared as normalized text (an optimizer, a protocol)
+
+
+class SetupItem(_Strict):
+    """One condition of the experiment that the paper states (the Planner lists them; code
+    compares). Every text field is model text read from the paper: untrusted, bounded."""
+
+    id: str = Field(min_length=1, max_length=8)  # code renumbers them: "s1", "s2", ...
+    name: str = Field(min_length=1, max_length=80)
+    kind: SetupKind
+    paper: str = Field(min_length=1, max_length=80)  # the value as the paper writes it
+    planned: str = Field(min_length=1, max_length=80)  # what this run is planned to use
+    source_ref: str = Field(default="", max_length=80)  # where the paper says so
+
+
+class SetupRecord(_Strict):
+    """What the run used for one SetupItem, as SMOKE_TESTING recorded it at finish
+    (smoke_result.json `setup`). `matches_paper` is written by code, never by a model."""
+
+    id: str = Field(min_length=1, max_length=8)
+    name: str = Field(min_length=1, max_length=80)
+    kind: SetupKind
+    paper: str = Field(min_length=1, max_length=80)
+    planned: str = Field(min_length=1, max_length=80)
+    used: str = Field(min_length=1, max_length=80)  # the value the Coder declared
+    where: str = Field(min_length=1, max_length=200)  # the file it is written in
+    matches_paper: bool
+
+
 class Plan(_Strict):
     mode: PlanMode
     claim_ids: list[str] = Field(min_length=1)
@@ -179,6 +215,8 @@ class Plan(_Strict):
     entrypoint_hint: str | None = None
     gpu_minutes_est: float = Field(ge=0)
     notes: list[str] = Field(default_factory=list)
+    # Lenient bound: PLANNING keeps the first usable ones (setup_check.MAX_SETUP_ITEMS).
+    setup: list[SetupItem] = Field(default_factory=list, max_length=20)
 
     @field_validator("seeds")
     @classmethod

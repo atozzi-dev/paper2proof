@@ -719,6 +719,14 @@
             "minItems": 1,
             "title": "Seeds",
             "type": "array"
+          },
+          "setup": {
+            "items": {
+              "$ref": "#/components/schemas/SetupItem"
+            },
+            "maxItems": 20,
+            "title": "Setup",
+            "type": "array"
           }
         },
         "required": [
@@ -776,6 +784,7 @@
           "REDUCED_SCALE_ABSOLUTE",
           "REDUCED_SCALE_CONTRADICTS",
           "IMPLAUSIBLE_GAP",
+          "BASELINE_MISMATCH",
           "NOT_MEASURED"
         ],
         "title": "ReasonCode",
@@ -1153,6 +1162,62 @@
         ],
         "title": "SessionRequest",
         "type": "object"
+      },
+      "SetupItem": {
+        "additionalProperties": false,
+        "description": "One condition of the experiment that the paper states (the Planner lists them; code\ncompares). Every text field is model text read from the paper: untrusted, bounded.",
+        "properties": {
+          "id": {
+            "maxLength": 8,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SetupKind"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "paper": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Paper",
+            "type": "string"
+          },
+          "planned": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Planned",
+            "type": "string"
+          },
+          "source_ref": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Source Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "paper",
+          "planned"
+        ],
+        "title": "SetupItem",
+        "type": "object"
+      },
+      "SetupKind": {
+        "enum": [
+          "NUMBER",
+          "CHOICE"
+        ],
+        "title": "SetupKind",
+        "type": "string"
       },
       "Stats": {
         "properties": {

@@ -402,6 +402,15 @@ def test_the_implausible_ratio_is_configured() -> None:
             VerdictConfig(implausible_ratio=bad)
 
 
+def test_the_calibration_factor_is_configured() -> None:
+    assert VerdictConfig().calibration_factor == 2.0  # configs written before the rule still load
+    assert load_verdict_config(ROOT / "config" / "verdict.yaml").calibration_factor == 2.0
+    assert VerdictConfig(calibration_factor=None).calibration_factor is None  # disabled
+    for bad in (0.0, -1.0, math.inf, math.nan):
+        with pytest.raises(ValueError, match="calibration_factor"):
+            VerdictConfig(calibration_factor=bad)
+
+
 def test_load_verdict_config_reads_the_repo_file() -> None:
     cfg = load_verdict_config()
     assert cfg.tol_abs["top1_accuracy"] == 0.005

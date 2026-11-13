@@ -34,6 +34,7 @@ class ReasonCode(StrEnum):
     REDUCED_SCALE_ABSOLUTE = "REDUCED_SCALE_ABSOLUTE"
     REDUCED_SCALE_CONTRADICTS = "REDUCED_SCALE_CONTRADICTS"
     IMPLAUSIBLE_GAP = "IMPLAUSIBLE_GAP"  # ABSOLUTE, more than implausible_ratio times off
+    BASELINE_MISMATCH = "BASELINE_MISMATCH"  # RELATIVE: our baseline is below the paper's
     NOT_MEASURED = "NOT_MEASURED"  # set by VERDICT, never by decide()
 
 class Claim(BaseModel):
@@ -63,6 +64,7 @@ class VerdictConfig(BaseModel):
     min_seeds: int = 3
     confidence: float = 0.95
     implausible_ratio: float | None = 2.0  # k, finite and > 1; None disables the rule
+    calibration_factor: float | None = 2.0  # c, finite and > 0; None disables the rule
 
 class Verdict(BaseModel):
     kind: VerdictKind
@@ -154,6 +156,10 @@ positive = ci_low > 0 and mean >= cfg.rho * delta
 own = mean(per_seed)                       # the method's own value, raw direction
 if scale == FULL and reported_value is not None and implausible_method(own, reported_value):
     return INCONCLUSIVE(IMPLAUSIBLE_GAP)   # numbers still returned; tolerance["method_mean"] = own
+if scale == FULL and baseline_below_paper():   # see Baseline calibration
+    if positive:      return REPRODUCED_AT_REDUCED_SCALE
+    if ci_high <= 0:  return INCONCLUSIVE(BASELINE_MISMATCH)
+    return INCONCLUSIVE(HIGH_VARIANCE)
 if positive:  return REPRODUCED if scale == FULL else REPRODUCED_AT_REDUCED_SCALE
 if ci_high <= 0:
     return NOT_REPRODUCED if scale == FULL else INCONCLUSIVE(REDUCED_SCALE_CONTRADICTS)
@@ -182,6 +188,46 @@ implausible_method(own, v) = implausible_gap(own, v)
   value, and its verdict already says it ran at reduced scale.
 - `tolerance["method_mean"]` carries `own` for the Judge's Facts (the verdict's `mean` is the
   difference).
+
+#### Baseline calibration (RELATIVE)
+
+An experiment written by a model can be far below the paper's level and still look like the
+paper's: production, 2026-10-30, a KAN-against-MLP run labelled full scale trained for 200 steps
+and measured the MLP baseline at 0.020 where the paper reports 0.00065. For accuracy-like
+metrics the method gap above never fires (0.80 against 0.95 is within a factor of two), so an
+under-trained method that loses to its baseline would be NOT_REPRODUCED: a false accusation.
+When the paper gives both the method's value and the delta, its baseline is known and is an
+anchor that is measured, not declared:
+
+```
+applies when scale == FULL, cfg.calibration_factor is not None,
+             reported_value is not None and claimed_delta is not None,
+             and the method gap did not fire
+
+paper_b = reported_value - claimed_delta          # the paper's baseline, raw direction
+ours_b  = mean(baseline_per_seed)                 # raw direction
+band(v) = cfg.calibration_factor * max(cfg.tol_rel * |v|, cfg.tol_abs.get(metric, cfg.default_tol_abs))
+worse   = sign * ours_b < sign * paper_b - band(paper_b)          # sign: +1 higher is better
+unit    = |100 * ours_b - paper_b| <= band(paper_b) or |ours_b - 100 * paper_b| <= band(100 * paper_b)
+baseline_below_paper = worse and not unit
+```
+
+- **One-sided.** A baseline better than the paper's changes nothing: a paper that understates
+  its baseline is exactly the false claim to catch (the canary set's planted RELATIVE claims
+  are built that way), and "our baseline is too good" is no evidence against our run.
+- **Judged as at reduced scale.** The run is not at the paper's level, so only the direction
+  counts: REPRODUCED becomes REPRODUCED_AT_REDUCED_SCALE and NOT_REPRODUCED becomes
+  INCONCLUSIVE(BASELINE_MISMATCH). HIGH_VARIANCE is unchanged.
+- **A fraction against a percent** is a unit mismatch, not another experiment, as for the
+  method gap; it is excused only when the value times 100 lands on the paper's (two-sided),
+  never merely by being better.
+- `tolerance["baseline_mean"]` and `tolerance["baseline_paper"]` carry `ours_b` and `paper_b`
+  when the rule fires, for the Judge's Facts.
+- Without `reported_value` or `claimed_delta` there is no anchor: the rule is skipped.
+
+Known limit: the baseline is derived from `claimed_delta`. A delta extracted with the wrong
+sign moves the anchor, and the rule can then fire wrongly; it only ever lowers a verdict to
+the reduced-scale reading.
 
 Use `scipy.stats.t.ppf`. If `s == 0`, then `half = 0` (deterministic runs are allowed).
 
@@ -257,6 +303,12 @@ Table-driven examples, all with `cfg` defaults unless stated:
 | 16 | ABSOLUTE v=0.990 (a falsified claim) | FULL [0.894, 0.895, 0.896] (ratio 0.90) | NOT_REPRODUCED |
 | 17 | ABSOLUTE v=2.0 | FULL [1.0, 1.0, 1.0] (exactly k = 2 times: inside the band) | NOT_REPRODUCED |
 | 18 | ABSOLUTE v=0.5 | FULL [-2.0, -2.1, -1.9] (opposite signs) | NOT_REPRODUCED |
+| 19 | RELATIVE delta=0.017, v=0.941 (paper baseline 0.924) | FULL method [0.82,0.821,0.819], base [0.80,0.801,0.802] | REPRODUCED_AT_REDUCED_SCALE |
+| 20 | as #19 | FULL base [0.80,0.801,0.802], method == base - 0.01 each seed | INCONCLUSIVE/BASELINE_MISMATCH |
+| 21 | as #19 | FULL base [0.95,0.951,0.952] (better than the paper's), method == base - 0.01 | NOT_REPRODUCED |
+| 22 | as #19 | FULL base [0.92,0.921,0.922] (inside the band), method [0.94,0.941,0.939] | REPRODUCED |
+| 23 | RELATIVE delta=1.7, v=94.1 (percent) | FULL base [0.924,0.925,0.923], method [0.941,0.942,0.940] (fractions) | calibration does not fire |
+| 24 | as #20, `calibration_factor = None` | FULL | NOT_REPRODUCED |
 
 Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`):
 
@@ -274,6 +326,13 @@ Property-based tests with Hypothesis (`tests/verdict/test_engine_properties.py`)
   scale with the measured mean far off `reported_value`, is now INCONCLUSIVE/IMPLAUSIBLE_GAP
   with the same numbers; for an ABSOLUTE claim it was NOT_REPRODUCED or
   INCONCLUSIVE/HIGH_VARIANCE.
+- **P10 (no full verdict from a baseline below the paper's):** for any RELATIVE claim at
+  full scale with `reported_value` and `claimed_delta`, whose baseline mean is worse than
+  the paper's baseline beyond the band and not within the band at a factor of 100 either
+  way, `kind` is neither REPRODUCED nor NOT_REPRODUCED.
+- **P11 (a baseline at or above the paper's changes nothing):** when the baseline mean is
+  not worse than the paper's baseline, the verdict equals the one with
+  `calibration_factor = None`.
 - **P9 (method gap):** for any RELATIVE claim at full scale whose method is measured more
   than `implausible_ratio` times off `reported_value` (same sign, both non-zero), and not by a
   factor of about 100, `kind == INCONCLUSIVE` and `reason == IMPLAUSIBLE_GAP`.
