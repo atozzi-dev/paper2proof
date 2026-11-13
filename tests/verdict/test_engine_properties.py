@@ -217,8 +217,12 @@ def far_off_relative_cases(draw: st.DrawFn) -> tuple[Claim, Measurements]:
     by a factor of 100 (a percent/fraction mismatch), at full scale."""
     reported = draw(value.filter(lambda x: abs(x) >= 1e-3))
     claim = draw(claims(ClaimType.RELATIVE)).model_copy(update={"reported_value": reported})
+    # 1% clear of the factor-100 excuse on both sides: the jitter below moves the mean by up
+    # to 0.4%, enough to carry a factor of 49.95 across 100 / K (found by Hypothesis)
     factor = draw(
-        st.floats(min_value=K * 1.01, max_value=1000).filter(lambda f: not 100 / K <= f <= 100 * K)
+        st.floats(min_value=K * 1.01, max_value=1000).filter(
+            lambda f: not 0.99 * 100 / K <= f <= 1.01 * 100 * K
+        )
     )
     centre = reported * factor if draw(st.booleans()) else reported / factor
     k = draw(st.integers(min_value=3, max_value=8))
