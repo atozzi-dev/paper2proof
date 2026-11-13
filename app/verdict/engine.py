@@ -56,6 +56,35 @@ def _implausible_method(mean: float, reported: float, k: float) -> bool:
     )
 
 
+def _paper_baseline(claim: Claim) -> float | None:
+    """The paper's own baseline of a RELATIVE claim, in the raw direction: known when the paper
+    gives both the method's value and the delta."""
+    if claim.reported_value is None or claim.claimed_delta is None:
+        return None
+    return claim.reported_value - claim.claimed_delta
+
+
+def _below_paper(ours: float, paper: float, sign: float, claim: Claim, cfg: VerdictConfig) -> bool:
+    """Our baseline is worse than the paper's by more than the calibration band: the experiment
+    is below the paper's level, so its direction is all it can show. One-sided: a baseline
+    better than the paper's is no evidence against our run (a paper that understates its
+    baseline is the claim to catch). A fraction against a percent is a unit mismatch, excused
+    only when the value times 100 lands on the paper's, never by merely being better."""
+    factor = cfg.calibration_factor
+    if factor is None:
+        return False
+
+    def band(v: float) -> float:
+        return factor * max(
+            cfg.tol_rel * abs(v), cfg.tol_abs.get(claim.metric, cfg.default_tol_abs)
+        )
+
+    if sign * ours >= sign * paper - band(paper):
+        return False
+    unit = abs(100 * ours - paper) <= band(paper) or abs(ours - 100 * paper) <= band(100 * paper)
+    return not unit
+
+
 def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verdict:
     n = len(measurements.per_seed)
     base = measurements.baseline_per_seed
@@ -125,6 +154,14 @@ def decide(claim: Claim, measurements: Measurements, cfg: VerdictConfig) -> Verd
         ):
             kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP
             tolerance["method_mean"] = own
+        elif full and (paper_b := _paper_baseline(claim)) is not None:
+            ours_b = math.fsum(base or []) / n  # the baseline's own value, as measured
+            if _below_paper(ours_b, paper_b, sign, claim, cfg):  # judged as at reduced scale
+                tolerance["baseline_mean"], tolerance["baseline_paper"] = ours_b, paper_b
+                if kind is VerdictKind.REPRODUCED:
+                    kind = VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+                elif kind is VerdictKind.NOT_REPRODUCED:
+                    kind, reason = VerdictKind.INCONCLUSIVE, ReasonCode.BASELINE_MISMATCH
 
     # Report numbers in the claim's original direction.
     lo, hi = (ci_low, ci_high) if sign > 0 else (-ci_high, -ci_low)

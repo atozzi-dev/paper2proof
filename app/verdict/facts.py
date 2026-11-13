@@ -175,6 +175,17 @@ def _relative_paper(claim: Claim, verdict: Verdict) -> list[str]:
     own, reported = verdict.tolerance.get("method_mean"), claim.reported_value
     if verdict.reason is ReasonCode.IMPLAUSIBLE_GAP and own is not None and reported is not None:
         lines.append(_method_gap(own, reported))
+    ours_b, paper_b = (
+        verdict.tolerance.get("baseline_mean"),
+        verdict.tolerance.get("baseline_paper"),
+    )
+    if ours_b is not None and paper_b is not None:  # the calibration fired (engine.py)
+        lines.append(
+            f"The paper's baseline is {paper_b:g} (its value for the method minus the claimed "
+            f"difference); the experiment measured {_fmt(ours_b)[0]} for the baseline on "
+            "average, which is worse. The run is not at the paper's level, so the verdict code "
+            "compares the direction only."
+        )
     return lines
 
 

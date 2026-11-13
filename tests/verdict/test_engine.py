@@ -255,7 +255,9 @@ def test_reported_std_widens_the_absolute_tolerance() -> None:
     assert verdict.tolerance["w"] == pytest.approx(0.1)
 
 
-NO_GAP_RULE = VerdictConfig(implausible_ratio=None)  # what the verdict was before the rule
+NO_GAP_RULE = VerdictConfig(
+    implausible_ratio=None, calibration_factor=None
+)  # what the verdict was before the rule
 PLANTED = [  # the canary set's falsified claims (production eval, 2026-10-29): wrong, not broken
     (absolute(0.990), [0.894, 0.895, 0.896]),
     (absolute(0.920), [0.845, 0.846, 0.847]),
@@ -456,3 +458,82 @@ def test_a_claim_with_a_non_finite_number_is_underspecified(field: str, bad: flo
     verdict = decide(claim, measured, CFG)
     assert verdict.kind is VerdictKind.INCONCLUSIVE
     assert verdict.reason is ReasonCode.UNDERSPECIFIED_CLAIM
+
+
+# --- baseline calibration (spec: Baseline calibration, cases 19-24) -----------------------
+
+
+def relative_valued(delta: float, reported: float, *, hib: bool = True) -> Claim:
+    """A RELATIVE claim whose paper also gives the method's own value: its baseline is known."""
+    return relative(delta).model_copy(update={"reported_value": reported, "higher_is_better": hib})
+
+
+PAPER = relative_valued(0.017, 0.941)  # the paper's baseline: 0.924, band 2 * 0.02 * 0.924
+LOW_BASE = [0.80, 0.801, 0.802]
+NO_CALIBRATION = VerdictConfig(calibration_factor=None)
+
+
+def test_19_a_baseline_below_the_paper_s_is_judged_at_reduced_scale() -> None:
+    verdict = decide(PAPER, m(Scale.FULL, [0.82, 0.821, 0.819], LOW_BASE), CFG)
+    assert (verdict.kind, verdict.reason) == (VerdictKind.REPRODUCED_AT_REDUCED_SCALE, None)
+    assert verdict.tolerance["baseline_paper"] == pytest.approx(0.924)
+    assert verdict.tolerance["baseline_mean"] == pytest.approx(0.801)
+
+
+def test_20_a_baseline_below_the_paper_s_never_accuses() -> None:
+    verdict = decide(PAPER, m(Scale.FULL, [b - 0.01 for b in LOW_BASE], LOW_BASE), CFG)
+    assert (verdict.kind, verdict.reason) == (
+        VerdictKind.INCONCLUSIVE,
+        ReasonCode.BASELINE_MISMATCH,
+    )
+
+
+def test_21_a_baseline_above_the_paper_s_changes_nothing() -> None:
+    base = [0.95, 0.951, 0.952]
+    verdict = decide(PAPER, m(Scale.FULL, [b - 0.01 for b in base], base), CFG)
+    assert verdict.kind is VerdictKind.NOT_REPRODUCED
+    assert "baseline_mean" not in verdict.tolerance
+
+
+def test_22_a_baseline_inside_the_band_is_full_scale() -> None:
+    verdict = decide(PAPER, m(Scale.FULL, [0.94, 0.941, 0.939], [0.92, 0.921, 0.922]), CFG)
+    assert verdict.kind is VerdictKind.REPRODUCED
+    assert "baseline_mean" not in verdict.tolerance
+
+
+def test_23_a_fraction_against_a_percent_is_not_a_baseline_mismatch() -> None:
+    claim = relative_valued(1.7, 94.1)
+    verdict = decide(claim, m(Scale.FULL, [0.941, 0.942, 0.940], [0.924, 0.925, 0.923]), CFG)
+    assert "baseline_mean" not in verdict.tolerance
+
+
+def test_24_the_calibration_can_be_disabled() -> None:
+    low = m(Scale.FULL, [b - 0.01 for b in LOW_BASE], LOW_BASE)
+    assert decide(PAPER, low, NO_CALIBRATION).kind is VerdictKind.NOT_REPRODUCED
+
+
+def test_calibration_follows_the_metric_direction() -> None:
+    """The KAN run of 2026-10-30 (RMSE, lower is better): the MLP baseline at 0.020 against the
+    paper's 0.000648. The method gap rule comes first; without it the direction alone would
+    have been a full REPRODUCED."""
+    claim = relative_valued(-0.000515, 0.000133, hib=False)
+    meas = m(Scale.FULL, [0.0054, 0.0060, 0.0051], [0.021, 0.020, 0.020])
+    assert decide(claim, meas, CFG).reason is ReasonCode.IMPLAUSIBLE_GAP
+    verdict = decide(claim, meas, VerdictConfig(implausible_ratio=None))
+    assert verdict.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    assert verdict.tolerance["baseline_paper"] == pytest.approx(0.000648)
+
+
+def test_calibration_needs_the_paper_s_method_value_and_its_delta() -> None:
+    low = m(Scale.FULL, [b - 0.01 for b in LOW_BASE], LOW_BASE)
+    assert decide(relative(0.017), low, CFG).kind is VerdictKind.NOT_REPRODUCED  # no value
+    no_delta = PAPER.model_copy(update={"claimed_delta": None})
+    assert decide(no_delta, low, CFG).kind is VerdictKind.NOT_REPRODUCED
+
+
+def test_calibration_leaves_a_reduced_run_and_high_variance_alone() -> None:
+    reduced = decide(PAPER, m(Scale.REDUCED, [0.82, 0.821, 0.819], LOW_BASE), CFG)
+    assert reduced.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    assert "baseline_mean" not in reduced.tolerance
+    noisy = decide(PAPER, m(Scale.FULL, [0.70, 0.90, 0.80], LOW_BASE), CFG)
+    assert noisy.reason is ReasonCode.HIGH_VARIANCE

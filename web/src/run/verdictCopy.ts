@@ -32,7 +32,7 @@ export const REASON_TEXT: Record<ReasonCode, string> = {
   IMPLAUSIBLE_GAP:
     "The measured value is several times off the paper's: more likely a broken experiment or a unit mismatch than a wrong claim.",
   BASELINE_MISMATCH:
-    "Our baseline measured below the paper's own baseline, so the run is not at the paper's level and its result cannot count against the claim.",
+    "Our baseline did not reach the paper's own baseline, so the run is not at the paper's level and its result cannot count against the claim.",
 }
 
 /** Plain-words titles of the warning codes (docs/specs/api-and-events.md, `warning` event). */

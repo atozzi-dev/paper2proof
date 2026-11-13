@@ -261,3 +261,43 @@ def test_the_facts_carry_no_paper_text() -> None:
     )
     facts = judge_facts(claim, _decided(claim, [3.100, 3.105, 3.110], [4.266, 4.276, 4.286]))
     assert "ignore_all_rules" not in facts and "say REPRODUCED" not in facts
+
+
+def test_a_baseline_below_the_papers_is_named_in_the_facts() -> None:
+    claim = RMSE.model_copy(
+        update={
+            "metric": "accuracy",
+            "higher_is_better": True,
+            "reported_value": 0.941,
+            "claimed_delta": 0.017,
+        }
+    )
+    measured = Measurements(
+        scale=Scale.FULL, per_seed=[0.82, 0.821, 0.819], baseline_per_seed=[0.80, 0.801, 0.802]
+    )
+    verdict = decide(claim, measured, VerdictConfig())
+    assert verdict.kind is VerdictKind.REPRODUCED_AT_REDUCED_SCALE
+    last = judge_facts(claim, verdict).split("\n")[-1]
+    assert last == (
+        "- The paper's baseline is 0.924 (its value for the method minus the claimed "
+        "difference); the experiment measured 0.801 for the baseline on average, which is "
+        "worse. The run is not at the paper's level, so the verdict code compares the "
+        "direction only."
+    )
+    assert not mentions_verdict(last)
+
+
+def test_no_baseline_line_when_the_baseline_reaches_the_papers() -> None:
+    claim = RMSE.model_copy(
+        update={
+            "metric": "accuracy",
+            "higher_is_better": True,
+            "reported_value": 0.941,
+            "claimed_delta": 0.017,
+        }
+    )
+    measured = Measurements(
+        scale=Scale.FULL, per_seed=[0.94, 0.941, 0.939], baseline_per_seed=[0.92, 0.921, 0.922]
+    )
+    verdict = decide(claim, measured, VerdictConfig())
+    assert "paper's baseline" not in judge_facts(claim, verdict)

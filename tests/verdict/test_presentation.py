@@ -285,3 +285,10 @@ def test_a_stand_in_the_coder_had_to_remove_is_a_limitation() -> None:
         stand_in_flags=["workspace/train.py:64"],
     )
     assert "workspace/train.py:64" in text and "stand-in" in text and "Proof Bundle" in text
+
+
+def test_the_baseline_mismatch_template_says_what_it_means() -> None:
+    text = template_explanation(
+        _verdict(VerdictKind.INCONCLUSIVE, ReasonCode.BASELINE_MISMATCH), CLAIM
+    )
+    assert text.startswith("Inconclusive (baseline mismatch). Our baseline did not reach")

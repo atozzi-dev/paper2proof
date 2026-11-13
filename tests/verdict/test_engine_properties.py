@@ -1,4 +1,4 @@
-"""Properties P1-P9 from docs/specs/verdict-engine.md (Hypothesis, 500 examples each)."""
+"""Properties P1-P11 from docs/specs/verdict-engine.md (Hypothesis, 500 examples each)."""
 
 import math
 
@@ -17,7 +17,10 @@ from app.domain.models import (
 from app.verdict.engine import decide
 
 CFG = VerdictConfig()
-NO_GAP_RULE = VerdictConfig(implausible_ratio=None)  # the verdict before the gap rule
+NO_GAP_RULE = VerdictConfig(implausible_ratio=None, calibration_factor=None)
+GAP_ONLY = VerdictConfig(
+    calibration_factor=None
+)  # P8 isolates the gap rule  # the verdict before the gap rule
 K = CFG.implausible_ratio
 EXAMPLES = settings(max_examples=500, deadline=None)
 
@@ -197,7 +200,7 @@ def test_p8_the_gap_rule_only_replaces_an_accusation_or_high_variance(
     case: tuple[Claim, Measurements],
 ) -> None:
     claim, meas = case
-    before, after = decide(claim, meas, NO_GAP_RULE), decide(claim, meas, CFG)
+    before, after = decide(claim, meas, NO_GAP_RULE), decide(claim, meas, GAP_ONLY)
     if after == before:
         return
     assert meas.scale is Scale.FULL and _far_off(claim, meas)
@@ -242,3 +245,61 @@ def test_p9_a_relative_method_k_times_off_is_an_implausible_gap(
     verdict = decide(claim, meas, CFG)
     assume(verdict.reason is not ReasonCode.RUNTIME_ERROR)
     assert (verdict.kind, verdict.reason) == (VerdictKind.INCONCLUSIVE, ReasonCode.IMPLAUSIBLE_GAP)
+
+
+NO_CALIBRATION = VerdictConfig(calibration_factor=None)  # the verdict before the calibration
+
+
+@st.composite
+def anchored_cases(draw: st.DrawFn) -> tuple[Claim, Measurements]:
+    """A RELATIVE claim at full scale whose paper gives the method's value and the delta."""
+    claim = draw(claims(ClaimType.RELATIVE)).model_copy(
+        update={"reported_value": draw(value), "claimed_delta": draw(value)}
+    )
+    k = draw(st.integers(min_value=3, max_value=8))
+    return claim, Measurements(
+        scale=Scale.FULL,
+        per_seed=draw(st.lists(value, min_size=k, max_size=k)),
+        baseline_per_seed=draw(st.lists(value, min_size=k, max_size=k)),
+    )
+
+
+def _anchor(claim: Claim, meas: Measurements) -> tuple[float, float, float]:
+    """(sign, our baseline mean, the paper's baseline), computed as decide() does."""
+    assert claim.reported_value is not None and claim.claimed_delta is not None
+    assert meas.baseline_per_seed is not None
+    sign = 1.0 if claim.higher_is_better else -1.0
+    ours = math.fsum(meas.baseline_per_seed) / len(meas.baseline_per_seed)
+    return sign, ours, claim.reported_value - claim.claimed_delta
+
+
+def _band(claim: Claim, v: float) -> float:
+    assert CFG.calibration_factor is not None
+    return CFG.calibration_factor * max(
+        CFG.tol_rel * abs(v), CFG.tol_abs.get(claim.metric, CFG.default_tol_abs)
+    )
+
+
+@EXAMPLES
+@given(anchored_cases())
+def test_p10_a_baseline_below_the_papers_gives_no_full_verdict(
+    case: tuple[Claim, Measurements],
+) -> None:
+    claim, meas = case
+    sign, ours, paper = _anchor(claim, meas)
+    assume(sign * ours < sign * paper - _band(claim, paper))
+    assume(abs(100 * ours - paper) > _band(claim, paper))  # not a fraction against a percent
+    assume(abs(ours - 100 * paper) > _band(claim, 100 * paper))
+    kind = decide(claim, meas, CFG).kind
+    assert kind not in (VerdictKind.REPRODUCED, VerdictKind.NOT_REPRODUCED)
+
+
+@EXAMPLES
+@given(anchored_cases())
+def test_p11_a_baseline_at_or_above_the_papers_changes_nothing(
+    case: tuple[Claim, Measurements],
+) -> None:
+    claim, meas = case
+    sign, ours, paper = _anchor(claim, meas)
+    assume(sign * ours >= sign * paper)
+    assert decide(claim, meas, CFG) == decide(claim, meas, NO_CALIBRATION)

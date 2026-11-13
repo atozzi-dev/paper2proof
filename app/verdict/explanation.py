@@ -12,6 +12,10 @@ _REASON_NOTES: dict[ReasonCode | None, str] = {  # reasons their name alone does
         "The measured value is several times off the paper's: more likely a broken experiment "
         "or a unit mismatch than a wrong claim."
     ),
+    ReasonCode.BASELINE_MISMATCH: (
+        "Our baseline did not reach the paper's own baseline, so the run is not at the paper's "
+        "level and its result cannot count against the claim."
+    ),
 }
 _SEP = r"[\s_-]+"
 _MENTIONS = [  # longest first: each match is removed before the shorter patterns run
