@@ -5,6 +5,8 @@ interface Figure {
   label: string
   value: string
   kind?: 'paper' | 'ours'
+  /** Small words under the number (the baseline a gain is against). */
+  note?: string
 }
 
 const signed = (x: number) => (x > 0 ? `+${fmtNum(x)}` : fmtNum(x))
@@ -22,7 +24,11 @@ function verdictFigures(claim: Claim | null, v: Verdict): Figure[] {
     const base = claim?.baseline_name ?? 'baseline'
     const just = claim !== null && (claim.claimed_delta === null || claim.claimed_delta === undefined)
     // "just better" reaches the engine as a delta of 0: never show it as a claimed gain of 0
-    out.push({ label: 'The paper', value: just ? `better than ${base}` : `${signed(delta)} vs ${base}`, kind: 'paper' })
+    out.push(
+      just
+        ? { label: 'The paper', value: 'better', note: `than ${base}`, kind: 'paper' }
+        : { label: 'The paper', value: signed(delta), note: `vs ${base}`, kind: 'paper' },
+    )
   }
   if (v.mean !== null) out.push({ label: 'We measured', value: fmtNum(v.mean), kind: 'ours' })
   if (v.ci_low !== null && v.ci_high !== null) {
@@ -50,6 +56,7 @@ export function VerdictFigures({ claim, verdict, size = 'lg' }: { claim: Claim |
           <dt className="kicker">{f.label}</dt>
           <dd className={f.kind === 'ours' ? 'figure-ours' : undefined}>
             {f.kind === 'paper' ? <span className="mark">{f.value}</span> : f.value}
+            {f.note && <span className="figure-note"> {f.note}</span>}
           </dd>
         </div>
       ))}

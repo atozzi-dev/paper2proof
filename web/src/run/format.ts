@@ -10,6 +10,7 @@ export function fmtDate(iso: string): string {
 export function fmtDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return ''
   const s = ms / 1000
+  if (s < 0.05) return '< 0.1 s'
   if (s < 9.95) return `${s.toFixed(1)} s`
   const total = Math.round(s)
   if (total < 60) return `${total} s`

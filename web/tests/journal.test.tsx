@@ -168,14 +168,23 @@ describe('CiBandChart', () => {
     const err = { ...claimAbs, metric: 'error', higher_is_better: false, reported_value: 0.059 }
     const v = { ...notReproduced, mean: 0.088, ci_low: 0.083, ci_high: 0.093, tolerance: { w: 0.01, v: 0.059 } }
     const { container } = render(<CiBandChart claim={err} verdict={v} />)
-    expect(container.querySelector('svg')).toHaveTextContent('≤ 0.069 counts as reproduced')
+    expect(container.querySelector('figure')).toHaveTextContent('≤ 0.069 counts as reproduced')
   })
 
   it('shows the claimed gain and the gain needed for a relative claim', () => {
     const { container } = render(<CiBandChart claim={claimRel} verdict={reproduced} />)
     const svg = container.querySelector('svg') as SVGElement
     expect(svg).toHaveTextContent('paper +0.017')
-    expect(svg).toHaveTextContent('≥ 0.0085 needed')
+    expect(container.querySelector('figcaption')).toHaveTextContent('green: ≥ 0.0085 needed')
+  })
+
+  it('leaves the zone label out of the drawing when it would sit on the paper line', () => {
+    // the 13 Nov run: needed +0.01, paper +0.02, both near the right edge of the chart
+    const claim = { ...claimRel, claimed_delta: 0.02 }
+    const v = { ...reproduced, kind: 'NOT_REPRODUCED' as const, mean: -0.027, ci_low: -0.035, ci_high: -0.019, tolerance: { rho: 0.5, delta: 0.02 } }
+    const { container } = render(<CiBandChart claim={claim} verdict={v} />)
+    expect(container.querySelector('svg')).not.toHaveTextContent('needed')
+    expect(container.querySelector('figcaption')).toHaveTextContent('green: ≥ 0.01 needed')
   })
 
   it('points the needed zone down when lower is better', () => {
@@ -217,6 +226,7 @@ describe('fmtDuration', () => {
     expect(fmtDuration(52_700)).toBe('53 s')
     expect(fmtDuration(9_960)).toBe('10 s')
     expect(fmtDuration(2_600)).toBe('2.6 s')
+    expect(fmtDuration(10)).toBe('< 0.1 s') // never "0.0 s"
     expect(fmtDuration(119_000)).toBe('1 min 59 s')
   })
 })

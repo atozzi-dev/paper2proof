@@ -456,7 +456,8 @@ describe('Run page', () => {
     const urls: string[] = []
     mockFetch((url) => {
       urls.push(url)
-      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED', listed: true }))
+      if (url === `/api/runs/${RUN_ID}`)
+        return json(runView({ status: 'COMPLETED', listed: true, finished_at: '2026-10-16T12:02:00Z' }))
       if (url.startsWith(`/api/runs/${RUN_ID}/events`)) return new Response(sse(fullRun().slice(0, 11)), { status: 200 })
       return undefined
     })
@@ -467,6 +468,7 @@ describe('Run page', () => {
     // the replay has not reached a verdict yet: nothing from the finished run shows early
     expect(screen.getByRole('heading', { name: /^Step \d+ of 10$/ })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'In short' })).toBeNull()
+    expect(screen.queryByText(/Re-run in/)).toBeNull() // its duration and cost belong to the end
     expect(urls).toContain(`/api/runs/${RUN_ID}/events?replay=1&speed=10`)
   })
 

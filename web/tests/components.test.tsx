@@ -60,6 +60,8 @@ describe('VerdictCard', () => {
     render(<VerdictCard claim={claimRel} verdict={reproduced} explanationMd="" {...conditions} />)
     expect(screen.getByRole('article')).toHaveTextContent('+0.017 vs ResNet-18')
     expect(screen.getByRole('article')).toHaveTextContent('≥ 0.0085')
+    // the baseline is a note under the number, not part of the big figure
+    expect(screen.getByText('+0.017')).toHaveClass('mark')
   })
 
   it('says "better than" for a claim with no stated gain, never a gain of 0', () => {

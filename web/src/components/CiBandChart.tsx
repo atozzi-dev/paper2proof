@@ -1,4 +1,4 @@
-import { chartSpec, ticks } from '../run/chart'
+import { chartSpec, ticks, type Zone } from '../run/chart'
 import { fmtNum } from '../run/verdictCopy'
 import type { Claim, Verdict } from '../types/api'
 
@@ -7,6 +7,19 @@ const H = 108
 const PAD = 22
 const AXIS_Y = 72
 const CI_Y = 48
+
+/** Where the zone's label fits inside it, away from the paper's line; null when nowhere. */
+function zoneLabel(zone: Zone, from: number, to: number, paper: number | null) {
+  const width = zone.text.length * 6 + 8 // 11px text
+  const options = [
+    { x: to - 8, anchor: 'end' as const, left: to - 8 - width, right: to - 4 },
+    { x: from + 8, anchor: 'start' as const, left: from + 4, right: from + 8 + width },
+  ]
+  return (
+    options.find((o) => o.left >= from && o.right <= to && (paper === null || paper < o.left - 6 || paper > o.right + 6)) ??
+    null
+  )
+}
 
 /** Our 95% interval (blue) against the zone the rule compares it with (green), with the
  * paper's own value marked in yellow. Drawn from the verdict's numbers only. */
@@ -37,20 +50,20 @@ export function CiBandChart({ claim, verdict }: { claim: Claim | null; verdict: 
   const paperW = spec.paper ? spec.paper.text.length * 6.4 + 12 : 0
   const paperLeft = Math.min(Math.max(paperX - paperW / 2, 0), W - paperW)
   const sign = spec.zero ? (t: number) => (t > 0 ? `+${fmtNum(t)}` : fmtNum(t)) : fmtNum
+  // The zone's label goes inside the drawing only where it fits without crossing the paper's
+  // line; the caption always states it.
+  const zoneText = zone ? zoneLabel(zone, zoneFrom, zoneTo, spec.paper ? paperX : null) : null
   return (
     <figure className="chart">
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={spec.label} preserveAspectRatio="xMidYMid meet">
         {zone && (
           <g>
             <rect className="chart-zone" x={zoneFrom} y={22} width={Math.max(zoneTo - zoneFrom, 1)} height={AXIS_Y - 22} rx={6} />
-            <text
-              className="chart-zone-text"
-              x={zone.to === null ? zoneTo - 8 : zone.from === null ? zoneFrom + 8 : (zoneFrom + zoneTo) / 2}
-              y={AXIS_Y - 8}
-              textAnchor={zone.to === null ? 'end' : zone.from === null ? 'start' : 'middle'}
-            >
-              {zone.text}
-            </text>
+            {zoneText && (
+              <text className="chart-zone-text" x={zoneText.x} y={AXIS_Y - 8} textAnchor={zoneText.anchor}>
+                {zone.text}
+              </text>
+            )}
           </g>
         )}
         <line className="chart-axis" x1={PAD} x2={W - PAD} y1={AXIS_Y} y2={AXIS_Y} />
@@ -85,8 +98,8 @@ export function CiBandChart({ claim, verdict }: { claim: Claim | null; verdict: 
         </text>
       </svg>
       <figcaption>
-        <strong>Our 95% interval</strong> in blue, the mean as a dot; the paper&rsquo;s value in yellow; green:{' '}
-        {spec.zero ? 'the gain the rule needs' : 'where our mean counts as reproduced'}.
+        <strong>Our 95% interval</strong> in blue, the mean as a dot; the paper&rsquo;s value in yellow
+        {zone && <>; green: {zone.text}</>}.
       </figcaption>
     </figure>
   )

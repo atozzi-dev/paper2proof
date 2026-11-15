@@ -144,7 +144,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
           <h1 className="run-title">{run ? (run.title ?? `arXiv ${run.arxiv_id}`) : 'arXiv …'}</h1>
           {headline && <p className="run-subtitle">{headline}</p>}
           <p className="run-meta">
-            {Number.isFinite(took) && took >= 0 && `Re-run in ${fmtDuration(took)}${receipt.cloudReported ? ` for ${formatUsd(receipt.totalUsd)}` : ''} · `}
+            {finished && Number.isFinite(took) && took >= 0 && `Re-run in ${fmtDuration(took)}${receipt.cloudReported ? ` for ${formatUsd(receipt.totalUsd)}` : ''} · `}
             run <span className="mono">{id}</span>
             {run?.listed && ' · in the public gallery'}
           </p>
