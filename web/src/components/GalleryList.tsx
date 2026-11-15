@@ -16,10 +16,16 @@ export function GalleryList({ cards }: { cards: readonly RunCard[] }) {
         return (
           <li key={card.id} className="report-card">
             <p className="report-card-meta">
+              {card.title && (
+                <>
+                  arXiv <span className="mono">{card.arxiv_id}</span> ·{' '}
+                </>
+              )}
               Report of <time dateTime={card.created_at}>{fmtDate(card.created_at)}</time>
             </p>
             <h3>
-              <a href={href.run(card.id)}>arXiv {card.arxiv_id}</a>
+              {/* the paper's title is untrusted text: React renders it as text, never markup */}
+              <a href={href.run(card.id)}>{card.title ?? `arXiv ${card.arxiv_id}`}</a>
             </h3>
             <p className="report-card-verdicts">
               {counts.length === 0 && <span className="muted">No verdict recorded</span>}

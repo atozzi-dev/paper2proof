@@ -235,7 +235,7 @@ function LatestReport({ run }: { run: RunView }) {
         </p>
         <a href={href.gallery}>All reports →</a>
       </div>
-      <h2 className="latest-title">arXiv {run.arxiv_id}</h2>
+      <h2 className="latest-title">{run.title ?? `arXiv ${run.arxiv_id}`}</h2>
       <div className="report-columns">
         <article className="report-main" aria-labelledby="latest-verdict">
           <div className="verdict-line">

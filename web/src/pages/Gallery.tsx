@@ -23,9 +23,13 @@ export function GalleryPage() {
 
   const kindsOf = (card: RunCard) => new Set(parseSummary(card.verdict_summary).counts.map((c) => c.kind))
   const q = query.trim().toLowerCase()
-  const shown = (cards ?? []).filter(
-    (c) => (kind === null || kindsOf(c).has(kind)) && (q === '' || c.arxiv_id.toLowerCase().includes(q)),
-  )
+  const words = q.split(/\s+/).filter(Boolean)
+  // an arXiv ID, or words of the title in any order
+  const matches = (c: RunCard) =>
+    q === '' ||
+    c.arxiv_id.toLowerCase().includes(q) ||
+    (c.title != null && words.every((w) => c.title?.toLowerCase().includes(w)))
+  const shown = (cards ?? []).filter((c) => (kind === null || kindsOf(c).has(kind)) && matches(c))
 
   return (
     <>
@@ -42,7 +46,7 @@ export function GalleryPage() {
           <input
             id={searchId}
             type="search"
-            placeholder="arXiv ID"
+            placeholder="arXiv ID or words from the title"
             autoComplete="off"
             spellCheck={false}
             value={query}

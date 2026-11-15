@@ -447,6 +447,15 @@ describe('GalleryList', () => {
     expect(within(item).getByText('+2 more')).toHaveClass('pill-more')
   })
 
+  it("heads a card with the paper's title, the arXiv ID under it", () => {
+    const title = 'Do Kernel Machines Need Feature Scaling? <b>Evidence</b>'
+    render(<GalleryList cards={[{ ...card, verdict_summary: '1 REPRODUCED', title }]} />)
+    const item = screen.getByRole('listitem')
+    expect(within(item).getByRole('heading', { level: 3 })).toHaveTextContent(title) // as text, not markup
+    expect(item.querySelector('b')).toBeNull()
+    expect(item).toHaveTextContent('arXiv 2106.09685')
+  })
+
   it('links to the report and to its replay, named after the paper', () => {
     render(<GalleryList cards={[{ ...card, verdict_summary: null }]} />)
     const item = screen.getByRole('listitem')

@@ -131,12 +131,13 @@ describe('Home onboarding', () => {
     mockFetch((url) => {
       if (url === '/api/gallery') return json([card])
       if (url === `/api/runs/${RUN_ID}`)
-        return json(runView({ status: 'COMPLETED', claims: [{ claim: claimAbs, selected: true }], verdicts: [{ claim_id: claimAbs.id, verdict: notReproduced }] }))
+        return json(runView({ status: 'COMPLETED', title: 'Deep Residual Learning', claims: [{ claim: claimAbs, selected: true }], verdicts: [{ claim_id: claimAbs.id, verdict: notReproduced }] }))
       return undefined
     })
     window.location.hash = '#/'
     render(<App />)
     const latest = await screen.findByRole('region', { name: 'Latest report' })
+    expect(within(latest).getByRole('heading', { level: 2 })).toHaveTextContent('Deep Residual Learning')
     expect(within(latest).getByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()
     expect(within(latest).getByRole('img')).toHaveAccessibleName(/tolerance/)
     expect(within(latest).getByRole('list', { name: 'Conditions' })).toHaveTextContent('Seeds')
@@ -164,7 +165,11 @@ describe('Gallery', () => {
     status: 'COMPLETED' as const,
     verdict_summary,
   })
-  const cards = [card(1, '1 REPRODUCED'), card(2, '1 REPRODUCED · 1 NOT_REPRODUCED'), card(3, '1 INCONCLUSIVE')]
+  const cards = [
+    card(1, '1 REPRODUCED'),
+    { ...card(2, '1 REPRODUCED · 1 NOT_REPRODUCED'), title: 'Do Kernel Machines Need Feature Scaling?' },
+    card(3, '1 INCONCLUSIVE'),
+  ]
 
   it('filters the reports by verdict and by arXiv ID', async () => {
     mockFetch((url) => (url === '/api/gallery' ? json(cards) : undefined))
@@ -184,11 +189,14 @@ describe('Gallery', () => {
 
     fireEvent.click(within(filters).getByRole('button', { name: 'Not reproduced under our conditions · 1' }))
     expect(within(filters).getByRole('button', { name: 'Not reproduced under our conditions · 1' })).toHaveAttribute('aria-pressed', 'true')
-    expect(shown()).toEqual(['arXiv 0000.00002'])
+    expect(shown()).toEqual(['Do Kernel Machines Need Feature Scaling?'])
 
     fireEvent.click(within(filters).getByRole('button', { name: 'All 3 papers' }))
     fireEvent.change(screen.getByRole('searchbox', { name: 'Find a paper' }), { target: { value: '00003' } })
     expect(shown()).toEqual(['arXiv 0000.00003'])
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find a paper' }), { target: { value: 'kernel scaling' } })
+    expect(shown()).toEqual(['Do Kernel Machines Need Feature Scaling?']) // words of the title, in any order
 
     fireEvent.change(screen.getByRole('searchbox', { name: 'Find a paper' }), { target: { value: '9999' } })
     expect(screen.getByText('No report matches.')).toBeInTheDocument()
@@ -261,6 +269,18 @@ describe('Run page', () => {
     )
     tab('E · Cost')
     expect(screen.getByRole('table', { name: 'Cost receipt' })).toHaveTextContent('Total$0.41')
+  })
+
+  it("heads the report with the paper's title, the arXiv ID above it", async () => {
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED', title: 'LoRA: Low-Rank Adaptation' }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun()), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    expect(await screen.findByRole('heading', { level: 1, name: 'LoRA: Low-Rank Adaptation' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '2106.09685' })).toHaveAttribute('href', 'https://arxiv.org/abs/2106.09685')
   })
 
   it('says in short what the verdicts were, the most cautionary first', async () => {
