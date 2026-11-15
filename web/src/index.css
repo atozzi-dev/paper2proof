@@ -180,14 +180,6 @@ code,
   z-index: 10;
 }
 
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 
 /* --- masthead and footer ------------------------------------------------------------------- */
 
@@ -379,12 +371,6 @@ button:disabled,
   cursor: progress;
 }
 
-.link-arrow {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  font-weight: 500;
-}
 
 label {
   font-weight: 600;
