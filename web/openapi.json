@@ -808,6 +808,17 @@
           "status": {
             "$ref": "#/components/schemas/RunStatus"
           },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
           "verdict_summary": {
             "anyOf": [
               {
@@ -1030,6 +1041,17 @@
             },
             "title": "Steps",
             "type": "array"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
           },
           "verdicts": {
             "items": {

@@ -203,6 +203,17 @@ async def test_claims_and_verdicts_round_trip(store: Store) -> None:
     assert await store.get_verdict(RUN, "c1") == verdict
 
 
+async def test_a_run_keeps_the_title_of_its_paper(store: Store) -> None:
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    run = await store.get_run(RUN)
+    assert run is not None and run.title is None
+    await store.set_title(RUN, "LoRA: Low-Rank Adaptation of Large Language Models")
+    run = await store.get_run(RUN)
+    assert run is not None and run.title == "LoRA: Low-Rank Adaptation of Large Language Models"
+    await store.set_listed(RUN, True)
+    assert [r.title for r in await store.list_gallery()] == [run.title]
+
+
 def test_migrations_upgrade_and_downgrade_on_an_empty_db(tmp_path: Path) -> None:
     db_path = tmp_path / "fresh.db"
     cfg = _alembic(db_path)

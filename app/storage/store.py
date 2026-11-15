@@ -63,6 +63,7 @@ class RunRecord(_Record):
     paper_sha256: str | None
     created_at: datetime
     finished_at: datetime | None
+    title: str | None = None  # the paper's, cleaned at ingestion (app/ingestion/title.py)
 
 
 def _run_record(row: Run) -> RunRecord:
@@ -80,6 +81,7 @@ def _run_record(row: Run) -> RunRecord:
         paper_sha256=row.paper_sha256,
         created_at=row.created_at,
         finished_at=row.finished_at,
+        title=row.title,
     )
 
 
@@ -854,6 +856,11 @@ class Store:
     async def set_paper_sha256(self, run_id: str, sha256: str) -> None:
         async with self._session() as s, s.begin():
             await s.execute(update(Run).where(Run.id == run_id).values(paper_sha256=sha256))
+
+    async def set_title(self, run_id: str, title: str | None) -> None:
+        """The paper's title, already cleaned (app/ingestion/title.py::display_title)."""
+        async with self._session() as s, s.begin():
+            await s.execute(update(Run).where(Run.id == run_id).values(title=title))
 
     # --- discovery cache (A-17) ---------------------------------------------------------
 

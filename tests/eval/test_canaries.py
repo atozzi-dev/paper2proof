@@ -189,7 +189,7 @@ def test_stored_gzip_handles_large_and_empty_inputs() -> None:
 def test_ingesting_hashes_the_same_bytes_and_finds_the_results_table() -> None:
     allowlisted = load_canaries(build.ALLOWLIST)
     for canary in CANARIES:
-        paper, pdf = _parse(build.source_bytes(canary), canary.truth.arxiv_id, None)
+        paper, pdf, _title = _parse(build.source_bytes(canary), canary.truth.arxiv_id, None)
         assert pdf is None
         assert paper.sha256 == build.source_sha256(canary)
         assert paper.sha256 in allowlisted, f"{canary.name} is not in the allowlist"

@@ -492,6 +492,8 @@ export interface components {
             /** Id */
             id: string;
             status: components["schemas"]["RunStatus"];
+            /** Title */
+            title?: string | null;
             /** Verdict Summary */
             verdict_summary: string | null;
         };
@@ -554,6 +556,8 @@ export interface components {
             status: components["schemas"]["RunStatus"];
             /** Steps */
             steps: components["schemas"]["StepView"][];
+            /** Title */
+            title?: string | null;
             /** Verdicts */
             verdicts: components["schemas"]["VerdictView"][];
         };

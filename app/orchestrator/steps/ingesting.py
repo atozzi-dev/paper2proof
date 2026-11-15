@@ -12,6 +12,7 @@ from app.ingestion.arxiv import ArxivMetadata
 from app.ingestion.latex import parse_latex
 from app.ingestion.pdf import pages_with_tables_or_figures, parse_pdf
 from app.ingestion.raster import RenderedPage, rasterize_pages
+from app.ingestion.title import display_title
 from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
 from app.storage.artifacts import ArtifactStore
@@ -22,14 +23,22 @@ class PaperSource(Protocol):
     async def source(self, arxiv_id: str) -> bytes: ...
 
 
-def _parse(data: bytes, arxiv_id: str, title: str | None) -> tuple[IngestedPaper, bytes | None]:
-    """Module-level so it can run in a ProcessPoolExecutor."""
+def _parse(
+    data: bytes, arxiv_id: str, title: str | None
+) -> tuple[IngestedPaper, bytes | None, str | None]:
+    """Module-level so it can run in a ProcessPoolExecutor. Also returns the title to show:
+    the arXiv one, else the source's, cleaned of markup (it is paper text: untrusted)."""
     source = extract_source(data)
+    sha = hashlib.sha256(data).hexdigest()
     if source.kind == "pdf" and source.pdf is not None:
         paper = parse_pdf(source.pdf, arxiv_id=arxiv_id, title=title)
-        return paper.model_copy(update={"sha256": hashlib.sha256(data).hexdigest()}), source.pdf
+        return (
+            paper.model_copy(update={"sha256": sha}),
+            source.pdf,
+            display_title(title, paper.title),
+        )
     paper = parse_latex(source.files, arxiv_id=arxiv_id, title=title)
-    return paper.model_copy(update={"sha256": hashlib.sha256(data).hexdigest()}), None
+    return paper.model_copy(update={"sha256": sha}), None, display_title(title, paper.title)
 
 
 def _render(pdf: bytes) -> list[RenderedPage]:
@@ -59,7 +68,7 @@ class IngestingStep:
         except Exception as err:
             raise P2PError(ErrorCode.INGEST_FAILED, "could not download the paper") from err
         try:
-            paper, pdf = await ctx.run_cpu(
+            paper, pdf, shown_title = await ctx.run_cpu(
                 _parse, data, run.arxiv_id, meta.title, timeout_s=self._parse_timeout
             )
         except TimeoutError:
@@ -78,4 +87,5 @@ class IngestingStep:
         key = f"{prefix}/ingested.json"
         await asyncio.to_thread(self._artifacts.put_json, key, paper.model_dump(mode="json"))
         await ctx.store.set_paper_sha256(ctx.run_id, paper.sha256)
+        await ctx.store.set_title(ctx.run_id, shown_title)
         return StepResult(next=StepName.EXTRACTING_CLAIMS, output_ref=key)

@@ -110,6 +110,21 @@ async def test_gallery_runs_are_public(
     assert (await other_client.get(f"/api/runs/{run_id}")).status_code == 200
     gallery = (await other_client.get("/api/gallery")).json()
     assert [card["id"] for card in gallery] == [run_id]
+    assert gallery[0]["title"] is None  # not ingested yet
+
+
+async def test_the_run_and_its_card_carry_the_paper_title(
+    client: httpx.AsyncClient, other_client: httpx.AsyncClient, store: Store
+) -> None:
+    await login(client)
+    run_id = (await _create(client)).json()["run_id"]
+    await store.set_title(run_id, "LoRA: Low-Rank Adaptation of Large Language Models")
+    assert (await client.get(f"/api/runs/{run_id}")).json()["title"] == (
+        "LoRA: Low-Rank Adaptation of Large Language Models"
+    )
+    await store.set_listed(run_id, True)
+    gallery = (await other_client.get("/api/gallery")).json()
+    assert gallery[0]["title"] == "LoRA: Low-Rank Adaptation of Large Language Models"
 
 
 async def test_cancel(client: httpx.AsyncClient, store: Store) -> None:

@@ -76,6 +76,7 @@ class RunView(BaseModel):
     claims: list[ClaimView]
     verdicts: list[VerdictView]
     conditions: RunConditions | None  # what the verdicts were reached under (invariant 10)
+    title: str | None = None  # the paper's, cleaned at ingestion; untrusted: show as text only
 
 
 class EventsPage(BaseModel):
@@ -129,6 +130,7 @@ async def get_run(run_id: str, request: Request) -> RunView:
         claims=[ClaimView(claim=c, selected=s) for c, s in await store.get_claims(run_id)],
         verdicts=[VerdictView(claim_id=c, verdict=v) for c, v in await store.list_verdicts(run_id)],
         conditions=await run_conditions(store, state.artifacts, run_id),
+        title=run.title,
     )
 
 

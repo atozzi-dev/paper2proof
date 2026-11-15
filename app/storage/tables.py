@@ -55,6 +55,7 @@ class Run(Base):
     id: Mapped[str] = mapped_column(String(28), primary_key=True)
     arxiv_id: Mapped[str] = mapped_column(String(20), index=True)
     paper_sha256: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str | None] = mapped_column(String(300))  # cleaned paper title (A-44)
     status: Mapped[str] = mapped_column(String(24), index=True)
     error_code: Mapped[str | None] = mapped_column(String(32))
     created_by: Mapped[str | None] = mapped_column(String(64))  # sha256 of the invite code

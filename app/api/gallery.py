@@ -17,6 +17,7 @@ class RunCard(BaseModel):
     status: RunStatus
     verdict_summary: str | None
     created_at: datetime
+    title: str | None = None  # the paper's, cleaned at ingestion; untrusted: show as text only
 
 
 class Stats(BaseModel):
@@ -33,6 +34,7 @@ async def gallery(request: Request) -> list[RunCard]:
             status=r.status,
             verdict_summary=r.verdict_summary,
             created_at=r.created_at,
+            title=r.title,
         )
         for r in runs
     ]

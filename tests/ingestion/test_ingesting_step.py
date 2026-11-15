@@ -71,6 +71,22 @@ async def test_latex_paper_is_ingested_off_the_event_loop(
     assert paper.title == "Logistic Regression on Digits Is Enough"
     run = await store.get_run(RUN)
     assert run is not None and run.paper_sha256 == paper.sha256
+    assert run.title == "From metadata"  # shown on the report pages
+
+
+async def test_the_title_comes_from_the_source_without_metadata(
+    store: Store, tmp_path: Path
+) -> None:
+    class NoMetadata(FakeArxiv):
+        async def metadata(self, arxiv_id: str) -> ArxivMetadata:
+            raise OSError("arXiv API down")
+
+    with ThreadPoolExecutor(1) as pool:
+        await IngestingStep(NoMetadata(canary_tar()), LocalArtifactStore(tmp_path)).run(
+            await _ctx(store, pool)
+        )
+    run = await store.get_run(RUN)
+    assert run is not None and run.title == "Logistic Regression on Digits Is Enough"
 
 
 async def test_pdf_paper_gets_page_images(store: Store, tmp_path: Path) -> None:
