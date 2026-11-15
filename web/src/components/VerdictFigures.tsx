@@ -19,17 +19,23 @@ function verdictFigures(claim: Claim | null, v: Verdict): Figure[] {
     const std = claim?.reported_std
     out.push({ label: 'The paper', value: `${fmtNum(reported)}${std ? ` ± ${fmtNum(std)}` : ''}`, kind: 'paper' })
   } else if (delta !== undefined) {
-    out.push({ label: 'The paper', value: `${signed(delta)} vs ${claim?.baseline_name ?? 'baseline'}`, kind: 'paper' })
+    const base = claim?.baseline_name ?? 'baseline'
+    const just = claim !== null && (claim.claimed_delta === null || claim.claimed_delta === undefined)
+    // "just better" reaches the engine as a delta of 0: never show it as a claimed gain of 0
+    out.push({ label: 'The paper', value: just ? `better than ${base}` : `${signed(delta)} vs ${base}`, kind: 'paper' })
   }
   if (v.mean !== null) out.push({ label: 'We measured', value: fmtNum(v.mean), kind: 'ours' })
   if (v.ci_low !== null && v.ci_high !== null) {
     out.push({ label: '95% interval', value: `${fmtNum(v.ci_low)} to ${fmtNum(v.ci_high)}` })
   }
+  // When a reason decided the verdict (reduced scale, implausible gap...), the comparison is
+  // only a threshold: never call it what was needed.
+  const overridden = v.reason !== null && v.reason !== undefined
   if (w !== undefined && reported !== undefined) {
     // one-sided: a mean at most w short of the reported value counts
-    out.push({ label: 'Needed', value: lower ? `≤ ${fmtNum(reported + w)}` : `≥ ${fmtNum(reported - w)}` })
+    out.push({ label: overridden ? 'Threshold' : 'Needed', value: lower ? `≤ ${fmtNum(reported + w)}` : `≥ ${fmtNum(reported - w)}` })
   } else if (rho !== undefined && delta !== undefined) {
-    out.push({ label: 'Gain needed', value: `${lower ? '≤' : '≥'} ${fmtNum(rho * delta)}` })
+    out.push({ label: overridden ? 'Threshold' : 'Gain needed', value: `${lower ? '≤' : '≥'} ${fmtNum(rho * delta)}` })
   }
   return out
 }

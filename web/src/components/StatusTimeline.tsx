@@ -55,13 +55,17 @@ export function StatusTimeline({
   status,
   mode,
   replay,
+  level = 2,
 }: {
   steps: readonly StepEntry[]
   status: RunStatus | null
   mode: StreamMode
   replay: boolean
+  /** 3 inside the appendix, under its own h2. */
+  level?: 2 | 3
 }) {
   const headingId = useId()
+  const Heading = level === 3 ? 'h3' : 'h2'
   const finished = status !== null && TERMINAL.has(status)
   // The step the run is on: the last one it reached, or the next once that one is done.
   const last = PIPELINE.reduce((n, p, i) => (steps.some((s) => s.step === p.step) ? i : n), -1)
@@ -69,7 +73,7 @@ export function StatusTimeline({
   const current = Math.min(last + (lastDone ? 2 : 1), PIPELINE.length) || 1
   return (
     <section className="timeline-section" aria-labelledby={headingId}>
-      <h2 id={headingId}>{finished ? `${STATUS_TEXT[status]} · ${PIPELINE.length} steps` : `Step ${current} of ${PIPELINE.length}`}</h2>
+      <Heading id={headingId}>{finished ? `${STATUS_TEXT[status]} · ${PIPELINE.length} steps` : `Step ${current} of ${PIPELINE.length}`}</Heading>
       <p className="run-status">
         <span className={`status-badge status-${(status ?? 'QUEUED').toLowerCase()}`}>{STATUS_TEXT[status ?? 'QUEUED']}</span>
         <span className="muted" role="status">

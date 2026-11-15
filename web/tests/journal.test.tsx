@@ -4,6 +4,8 @@ import { CiBandChart } from '../src/components/CiBandChart'
 import { ClaimQuote } from '../src/components/ClaimQuote'
 import { VerdictPill } from '../src/components/VerdictPill'
 import { splitHighlight } from '../src/run/highlight'
+import { chartSpec, ticks } from '../src/run/chart'
+import { fmtDuration } from '../src/run/format'
 import { conditionChips, inShort, parseSummary, pillText } from '../src/run/summary'
 import type { PlanReady, RunConditions } from '../src/types/api'
 import { claimAbs, claimRel, notReproduced, plan, reproduced, runConditions } from './fixtures'
@@ -21,6 +23,14 @@ describe('splitHighlight', () => {
   it('marks a claimed gain written with more digits than the value', () => {
     const claim = { ...claimRel, text: 'Raw features beat the standardized SVM by 0.020 ROC AUC.', claimed_delta: 0.02 }
     expect(marked(splitHighlight(claim.text, claim))).toEqual(['0.020'])
+  })
+
+  it('never marks a number inside a name, and prefers the one with a unit', () => {
+    const claim = { ...claimAbs, text: 'On CIFAR-10 the error is 10%.', reported_value: 0.1 }
+    const parts = splitHighlight(claim.text, claim)
+    expect(marked(parts)).toEqual(['10%'])
+    const one = { ...claimRel, text: 'It beats the baseline by 1 point.', claimed_delta: 0.01 }
+    expect(marked(splitHighlight(one.text, one))).toEqual(['1 point'])
   })
 
   it('marks a value written as a percentage or in points', () => {
@@ -172,7 +182,52 @@ describe('CiBandChart', () => {
     const lower = { ...claimRel, higher_is_better: false, claimed_delta: -0.017 }
     const v = { ...reproduced, mean: -0.02, ci_low: -0.022, ci_high: -0.018, tolerance: { rho: 0.5, delta: -0.017 } }
     const { container } = render(<CiBandChart claim={lower} verdict={v} />)
-    expect(container.querySelector('svg')).toHaveTextContent('≤ -0.0085 needed')
+    const svg = container.querySelector('svg') as SVGElement
+    expect(svg).toHaveTextContent('≤ -0.0085 needed')
+    expect(svg).toHaveAccessibleName(/a mean change of at most -0\.0085, with the whole interval below 0/)
+  })
+
+  it('never shades a gain the rule cannot accept: the whole interval must clear zero', () => {
+    // a lower-is-better claim whose gain came out with the wrong sign: +0.5, so rho x delta = +0.25
+    const lower = { ...claimRel, higher_is_better: false, claimed_delta: 0.5 }
+    const v = { ...reproduced, kind: 'NOT_REPRODUCED' as const, mean: 0.1, ci_low: 0.08, ci_high: 0.12, tolerance: { rho: 0.5, delta: 0.5 } }
+    const spec = chartSpec(lower, v)
+    expect(spec?.zone?.to).toBe(0)
+  })
+
+  it('says threshold, not "counts as reproduced", when a reason overrides the comparison', () => {
+    const reduced = { ...notReproduced, kind: 'INCONCLUSIVE' as const, reason: 'REDUCED_SCALE_ABSOLUTE' as const, mean: 0.95, ci_low: 0.95, ci_high: 0.95 }
+    const { container } = render(<CiBandChart claim={claimAbs} verdict={reduced} />)
+    const svg = container.querySelector('svg') as SVGElement
+    expect(svg).not.toHaveTextContent('counts as reproduced')
+    expect(svg).toHaveTextContent('≥ 0.9222 would count at full scale')
+  })
+
+  it('draws no paper value for a claim that only says "better than"', () => {
+    const vague = { ...claimRel, claimed_delta: null }
+    const v = { ...reproduced, tolerance: { rho: 0.5, delta: 0 } }
+    const { container } = render(<CiBandChart claim={vague} verdict={v} />)
+    expect(container.querySelector('svg')).not.toHaveTextContent('paper')
+  })
+})
+
+describe('fmtDuration', () => {
+  it('rolls 59.6 s over to a minute', () => {
+    expect(fmtDuration(59_600)).toBe('1 min 0 s')
+    expect(fmtDuration(52_700)).toBe('53 s')
+    expect(fmtDuration(9_960)).toBe('10 s')
+    expect(fmtDuration(2_600)).toBe('2.6 s')
+    expect(fmtDuration(119_000)).toBe('1 min 59 s')
+  })
+})
+
+describe('ticks', () => {
+  it('ends even when the step is below the precision of the values', () => {
+    expect(ticks(1e9, 1e9 + 1e-7).length).toBeLessThanOrEqual(50)
+  })
+
+  it('gives round values over the range', () => {
+    expect(ticks(-0.04, 0.03)).toEqual([-0.04, -0.02, 0, 0.02])
   })
 })
 

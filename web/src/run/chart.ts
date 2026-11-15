@@ -9,9 +9,10 @@ export interface Zone {
 }
 
 export interface ChartSpec {
-  /** The zone the rule compares the interval with: the tolerance band, or the gain needed. */
+  /** The zone the rule compares our mean with: from the paper's value minus the tolerance,
+   * or from the gain needed. */
   zone: Zone | null
-  /** The paper's own value: the reported value, or the claimed gain. */
+  /** The paper's own value: the reported value, or the claimed gain (none for "just better"). */
   paper: { at: number; text: string } | null
   /** A relative claim is a difference: zero is where the method stops winning. */
   zero: boolean
@@ -20,38 +21,44 @@ export interface ChartSpec {
 
 const signed = (x: number) => (x > 0 ? `+${fmtNum(x)}` : fmtNum(x))
 
-/** What to draw: ABSOLUTE claims compare the CI with the band around the reported value,
- * RELATIVE claims compare the CI of the per-seed difference with 0 and ρ·Δ. */
+/** What to draw, as docs/specs/verdict-engine.md decides (numbers in the metric's own direction):
+ * ABSOLUTE compares our mean with the reported value minus the tolerance (one-sided);
+ * RELATIVE needs the whole interval of the per-seed difference past 0 and a mean of ρ·Δ or more.
+ * When the verdict carries a reason, the reason decided it: the zone is only a threshold then. */
 export function chartSpec(claim: Claim | null, v: Verdict): ChartSpec | null {
   if (v.ci_low === null || v.ci_high === null || v.mean === null) return null
   const ci = `95% CI ${fmtNum(v.ci_low)} to ${fmtNum(v.ci_high)} (mean ${fmtNum(v.mean)})`
   const { w, v: reported, rho, delta } = v.tolerance
+  const lower = claim?.higher_is_better === false
+  const at = lower ? '≤' : '≥'
+  const overridden = v.reason !== null && v.reason !== undefined
+  const counts = v.reason === 'REDUCED_SCALE_ABSOLUTE' ? 'would count at full scale' : overridden ? 'is the threshold' : null
   if (w !== undefined && reported !== undefined) {
-    // One-sided (docs/specs/verdict-engine.md, ABSOLUTE): a mean at most w short of the
-    // reported value counts, and so does any better one.
-    const lower = claim?.higher_is_better === false
     const edge = lower ? reported + w : reported - w
-    const at = lower ? '≤' : '≥'
     const metric = claim ? ` ${claim.metric}` : ''
     return {
-      zone: { from: lower ? null : edge, to: lower ? edge : null, text: `${at} ${fmtNum(edge)} counts as reproduced` },
+      zone: { from: lower ? null : edge, to: lower ? edge : null, text: `${at} ${fmtNum(edge)} ${counts ?? 'counts as reproduced'}` },
       paper: { at: reported, text: `paper ${fmtNum(reported)}` },
       zero: false,
-      label: `${ci}; the paper reports ${fmtNum(reported)}${metric}, with a tolerance of ${fmtNum(w)}: a mean of ${fmtNum(edge)} or ${lower ? 'less' : 'more'} counts as reproduced`,
+      label: `${ci}; the paper reports ${fmtNum(reported)}${metric}, with a tolerance of ${fmtNum(w)}: a mean of ${fmtNum(edge)} or ${lower ? 'less' : 'more'} counts as reproduced at full scale`,
     }
   }
   if (rho !== undefined && delta !== undefined) {
     const needed = rho * delta
-    const lower = claim?.higher_is_better === false // lower is better: at most rho × delta
+    // The whole interval must clear zero too, so the zone never starts on the wrong side of it.
+    const edge = lower ? Math.min(0, needed) : Math.max(0, needed)
+    const just = claim !== null && (claim.claimed_delta === null || claim.claimed_delta === undefined)
+    const base = claim?.baseline_name ?? 'the baseline'
     return {
-      zone: {
-        from: lower ? null : needed,
-        to: lower ? needed : null,
-        text: `${lower ? '≤' : '≥'} ${fmtNum(needed)} needed`,
-      },
-      paper: { at: delta, text: `paper ${signed(delta)}` },
+      zone: { from: lower ? null : edge, to: lower ? edge : null, text: `${at} ${fmtNum(needed)} ${overridden ? 'was the threshold' : 'needed'}` },
+      paper: just ? null : { at: delta, text: `paper ${signed(delta)}` },
       zero: true,
-      label: `${ci} of the per-seed difference vs ${claim?.baseline_name ?? 'the baseline'}; needs a gain of at least ${fmtNum(needed)} (ρ ${fmtNum(rho)} × claimed ${fmtNum(delta)})`,
+      label:
+        `${ci} of the per-seed difference vs ${base}; ` +
+        (lower
+          ? `needs a mean change of at most ${fmtNum(needed)}, with the whole interval below 0`
+          : `needs a mean gain of at least ${fmtNum(needed)}, with the whole interval above 0`) +
+        (just ? ' (the paper claims only that it is better)' : ` (ρ ${fmtNum(rho)} × claimed ${fmtNum(delta)})`),
     }
   }
   return { zone: null, paper: null, zero: false, label: ci }
@@ -64,9 +71,14 @@ export function ticks(min: number, max: number, count = 6): number[] {
   const raw = span / count
   const pow = 10 ** Math.floor(Math.log10(raw))
   const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw) ?? 10 * pow
+  const first = Math.ceil(min / step)
   const out: number[] = []
-  for (let t = Math.ceil(min / step) * step; t <= max + step * 1e-9; t += step) {
-    out.push(Number(t.toPrecision(12)))
+  // by index, never by adding the step to a running total: a step below the precision of
+  // the values would never move it (and stop at 50 whatever happens)
+  for (let i = 0; i < 50; i++) {
+    const t = Number(((first + i) * step).toPrecision(12))
+    if (t > max + step * 1e-9) break
+    if (out.length === 0 || t !== out[out.length - 1]) out.push(t)
   }
   return out
 }

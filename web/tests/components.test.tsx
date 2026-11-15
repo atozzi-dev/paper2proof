@@ -62,6 +62,13 @@ describe('VerdictCard', () => {
     expect(screen.getByRole('article')).toHaveTextContent('≥ 0.0085')
   })
 
+  it('says "better than" for a claim with no stated gain, never a gain of 0', () => {
+    const vague: Claim = { ...claimRel, claimed_delta: null }
+    render(<VerdictCard claim={vague} verdict={{ ...reproduced, tolerance: { rho: 0.5, delta: 0 } }} explanationMd="" {...conditions} />)
+    expect(screen.getByRole('article')).toHaveTextContent('better than ResNet-18')
+    expect(screen.getByRole('article')).not.toHaveTextContent('0 vs ResNet-18')
+  })
+
   it('shows reduced-scale reproduction with its scale', () => {
     const v: Verdict = { ...reproduced, kind: 'REPRODUCED_AT_REDUCED_SCALE' }
     const reduced = { ...conditions, plan: { ...conditions.plan, plan: { ...plan, scale: 'REDUCED' as const } } }
@@ -430,6 +437,14 @@ describe('GalleryList', () => {
     const item = screen.getByRole('listitem')
     expect(item).toHaveTextContent(/1 not reproduced under our conditions.*2 reproduced.*\+1 more/)
     expect(within(item).getByRole('link', { name: /Conditions/ })).toBeInTheDocument()
+  })
+
+  it('keeps the conditions link when the server folded verdicts into "+n more"', () => {
+    // app/verdict/summary.py folds the tail: a NOT_REPRODUCED may be hidden in it
+    render(<GalleryList cards={[{ ...card, verdict_summary: '1 REPRODUCED · 1 REPRODUCED_AT_REDUCED_SCALE · +2 more' }]} />)
+    const item = screen.getByRole('listitem')
+    expect(within(item).getByRole('link', { name: /Conditions/ })).toBeInTheDocument()
+    expect(within(item).getByText('+2 more')).toHaveClass('pill-more')
   })
 
   it('links to the report and to its replay, named after the paper', () => {

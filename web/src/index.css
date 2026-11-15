@@ -460,6 +460,13 @@ textarea {
   color: var(--ink-2);
 }
 
+/* Claims the server folded into "+n more": no verdict of their own to colour. */
+.pill-more {
+  background: var(--page);
+  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+
 /* --- blocks ----------------------------------------------------------------------------------- */
 
 .band {
@@ -1561,7 +1568,8 @@ tr.differs {
 
 /* --- plan, cost, logs, jobs (appendix parts) --------------------------------------------------- */
 
-.card h2 {
+.card h2,
+.card h3 {
   font-size: 1.4rem;
   margin-bottom: 12px;
 }

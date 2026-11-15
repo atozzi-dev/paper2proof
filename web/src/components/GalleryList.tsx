@@ -10,7 +10,9 @@ export function GalleryList({ cards }: { cards: readonly RunCard[] }) {
     <ul className="report-cards">
       {cards.map((card) => {
         const { counts, more } = parseSummary(card.verdict_summary)
-        const notReproduced = counts.some((c) => c.kind === 'NOT_REPRODUCED')
+        // The server folds the tail of a long summary into "+n more" (app/verdict/summary.py): a
+        // NOT_REPRODUCED may be in it, so the conditions link stays whenever something is folded.
+        const notReproduced = counts.some((c) => c.kind === 'NOT_REPRODUCED') || more > 0
         return (
           <li key={card.id} className="report-card">
             <p className="report-card-meta">
@@ -24,7 +26,7 @@ export function GalleryList({ cards }: { cards: readonly RunCard[] }) {
               {counts.map((c) => (
                 <VerdictPill key={c.kind} kind={c.kind} count={c.count} size="sm" />
               ))}
-              {more > 0 && <span className="pill pill-sm pill-inconclusive">+{more} more</span>}
+              {more > 0 && <span className="pill pill-sm pill-more">+{more} more</span>}
             </p>
             {notReproduced && (
               // Invariant 10: "not reproduced" always comes with the conditions it was reached under.

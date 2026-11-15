@@ -24,7 +24,7 @@ export function VerdictCard({ claim, claimId, verdict, explanationMd, ...inputs 
   return (
     <article className="verdict-article" aria-labelledby={headingId}>
       <div className="section-head verdict-head">
-        <p className="verdict-claim-no">Claim {id}</p>
+        <h2 className="verdict-claim-no">Claim {id}</h2>
         {claim && (
           <p className="muted small">
             {claim.claim_type === 'ABSOLUTE' ? 'absolute' : 'relative'} · {claim.metric} · {claim.source_ref}

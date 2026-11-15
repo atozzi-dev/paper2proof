@@ -219,7 +219,8 @@ describe('About', () => {
     expect(results).toHaveTextContent('0 false accusations')
     expect(results).toHaveTextContent('30 Oct 2026')
     const rule = screen.getByRole('region', { name: 'How the rule decides' })
-    expect(rule).toHaveTextContent('at least the paper’s value minus the tolerance')
+    expect(rule).toHaveTextContent('within the tolerance of the paper’s value, or better')
+    expect(rule).toHaveTextContent('can confirm a claimed gain, never accuse')
     expect(rule).not.toHaveTextContent('whole interval lies inside') // not the rule (verdict-engine.md, ABSOLUTE)
     const stats = await screen.findByRole('table', { name: 'Verdicts across all runs' })
     expect(within(stats).getByRole('row', { name: /Not reproduced under our conditions/ })).toHaveTextContent('2')
@@ -279,6 +280,9 @@ describe('Run page', () => {
     expect(within(short).getByRole('list', { name: 'Conditions of this run' })).toHaveTextContent('full scale')
     const verdicts = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)
     expect(verdicts.slice(0, 2)).toEqual(['Not reproduced under our conditions', 'Reproduced'])
+    // each verdict sits under its claim's own h2, and the appendix parts under the Appendix h2
+    expect(screen.getByRole('heading', { level: 2, name: 'Claim c1' })).toBeInTheDocument()
+    expect(within(screen.getByRole('tabpanel')).queryAllByRole('heading', { level: 2 })).toHaveLength(0)
   })
 
   it('lists the setup the run used against the paper', async () => {
@@ -330,6 +334,7 @@ describe('Run page', () => {
     render(<App />)
     fireEvent.click(await screen.findByRole('button', { name: 'Proof Bundle' }))
     expect(screen.getByRole('tab', { name: 'G · Proof Bundle' })).toHaveAttribute('aria-selected', 'true')
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'G · Proof Bundle' })))
   })
 
   it('shows the progress and the spend while the run is going', async () => {
@@ -420,6 +425,8 @@ describe('Run page', () => {
     render(<App />)
     const approve = await screen.findByRole('button', { name: 'Approve' })
     expect(approve.closest('[role="tabpanel"]')).toBeNull() // never hidden behind a tab
+    fireEvent.click(screen.getByRole('tab', { name: 'D · Plan' }))
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1) // one decision, one place
     fireEvent.click(approve)
     expect(await screen.findByText('Plan approved.')).toBeInTheDocument()
     expect(approvals).toEqual([`/api/runs/${RUN_ID}/approve`])
@@ -437,6 +444,9 @@ describe('Run page', () => {
     render(<App />)
     expect(await screen.findByRole('heading', { name: 'Plan' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+    // the replay has not reached a verdict yet: nothing from the finished run shows early
+    expect(screen.getByRole('heading', { name: /^Step \d+ of 10$/ })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'In short' })).toBeNull()
     expect(urls).toContain(`/api/runs/${RUN_ID}/events?replay=1&speed=10`)
   })
 

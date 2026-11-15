@@ -53,6 +53,7 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
   const [run, setRun] = useState<RunView | null>(null)
   const [loadError, setLoadError] = useState<ApiError | null>(null)
   const [tab, setTab] = useState<AppendixTab>('setup')
+  const focusPart = useRef(false)
   const appendixRef = useRef<HTMLElement>(null)
   const { state, mode } = useRunStream(id, replay, run !== null && TERMINAL_STATUSES.has(run.status))
 
@@ -76,16 +77,26 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
     if (terminal || verdictCount > 0) api.getRun(id).then(loaded, () => undefined)
   }, [id, terminal, verdictCount])
 
+  // The header's Proof Bundle button moves focus to the part it opened, not only the view.
+  useEffect(() => {
+    if (!focusPart.current) return
+    focusPart.current = false
+    focusSelectedTab()
+  }, [tab])
+
   if (loadError?.status === 404 || mode === 'not_found') return <NotFound />
 
-  const status = state.status ?? run?.status ?? null
+  // A replay shows the run as the stream reaches it: nothing from its end shows early.
+  const status = state.status ?? (replay ? null : (run?.status ?? null))
   const finished = status !== null && TERMINAL_STATUSES.has(status)
   const claims = state.claims.length ? state.claims : (run?.claims.map((c) => c.claim) ?? [])
   const tested = new Set(state.plan?.plan.claim_ids ?? run?.claims.filter((c) => c.selected).map((c) => c.claim.id))
   const verdicts = (
     Object.keys(state.verdicts).length
       ? Object.entries(state.verdicts).map(([claimId, v]) => ({ claimId, ...v }))
-      : (run?.verdicts.map((v) => ({ claimId: v.claim_id, verdict: v.verdict, explanation_md: '' })) ?? [])
+      : replay
+        ? []
+        : (run?.verdicts.map((v) => ({ claimId: v.claim_id, verdict: v.verdict, explanation_md: '' })) ?? [])
   ).sort((a, b) => CAUTION_ORDER.indexOf(a.verdict.kind) - CAUTION_ORDER.indexOf(b.verdict.kind))
   const claimById = new Map(claims.map((c) => [c.id, c]))
   // The tested claim in words, under the title: what this run is about.
@@ -96,9 +107,15 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
   const pendingPlan = state.plan !== null && state.approval?.pending === true
   const conditions = run?.conditions ?? null
 
+  function focusSelectedTab() {
+    appendixRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus()
+  }
+
   function openPart(part: AppendixTab) {
-    setTab(part)
     appendixRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    if (part === tab) return focusSelectedTab()
+    focusPart.current = true
+    setTab(part)
   }
 
   return (
@@ -257,13 +274,13 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
                 written in the code the run used; a choice is taken as the Coder declares it.
               </p>
               <SetupTable setup={conditions?.setup ?? []} />
-              <p className="hand">one difference from the paper and the run drops to reduced scale: it can then confirm, never accuse</p>
+              <p className="hand">one difference from the paper and the run drops to reduced scale: it can then confirm a gain, never accuse</p>
             </div>
           )}
           {tab === 'steps' && (
             <div className="part">
               {finished ? (
-                <StatusTimeline steps={state.steps} status={status} mode={mode} replay={replay} />
+                <StatusTimeline steps={state.steps} status={status} mode={mode} replay={replay} level={3} />
               ) : (
                 <p className="part-intro">The steps are listed at the top of the page while the run is going.</p>
               )}
@@ -272,8 +289,11 @@ function RunPageInner({ id, replay }: { id: string; replay: boolean }) {
             </div>
           )}
           {tab === 'plan' &&
-            (state.plan ? (
-              <PlanCard runId={id} plan={state.plan} approval={state.approval} readOnly={replay} />
+            (pendingPlan ? (
+              // one decision, in one place: the pending plan stays above, outside the tabs
+              <p className="part-intro">The plan is shown above, waiting for approval.</p>
+            ) : state.plan ? (
+              <PlanCard runId={id} plan={state.plan} approval={state.approval} readOnly={replay} level={3} />
             ) : (
               <p className="muted">No plan yet.</p>
             ))}

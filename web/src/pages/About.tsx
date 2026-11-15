@@ -18,19 +18,19 @@ const ROLES: { role: string; family: string; job: string }[] = [
 const RULES: { kind: VerdictKind; text: string }[] = [
   {
     kind: 'REPRODUCED',
-    text: "An absolute claim: our mean is at least the paper’s value minus the tolerance (a better result counts too). A claim that A beats B: the whole 95% interval of the per-seed gain is above zero, and the mean gain is at least half the claimed one.",
+    text: "At full scale. An absolute claim: our mean is within the tolerance of the paper’s value, or better. A claim that A beats B: the whole 95% interval of the per-seed difference is on A’s side of zero, and the mean gain is at least half the claimed one.",
   },
   {
     kind: 'NOT_REPRODUCED',
-    text: "An absolute claim: the whole 95% interval falls short of the paper’s value by more than the tolerance. A claim that A beats B: the whole interval is at or below zero. Only at full scale, on the paper’s setup, and only when our baseline reaches the paper’s own.",
+    text: "Only at full scale, on the paper’s setup. An absolute claim: the whole 95% interval falls short of the paper’s value by more than the tolerance. A claim that A beats B: the whole interval is on B’s side of zero (or at it), and our baseline reached the paper’s own.",
   },
   {
     kind: 'INCONCLUSIVE',
-    text: "The interval straddles the threshold, fewer than 3 seeds gave a value, or our value is more than twice off the paper’s: that points to a broken run rather than a wrong paper.",
+    text: "The interval straddles the threshold; fewer than 3 seeds gave a value; the experiment failed or the claim states nothing testable; an absolute value was measured at reduced scale; our baseline fell short of the paper’s; or a shortfall is so large (more than twice off) that it points to a broken run rather than a wrong paper.",
   },
   {
     kind: 'REPRODUCED_AT_REDUCED_SCALE',
-    text: "The run had to be smaller than the paper, or differ from the setup it states. At reduced scale a run can confirm a claimed gain, never accuse a paper.",
+    text: "The run had to be smaller than the paper, or differ from the setup it states. At reduced scale a run can confirm a claimed gain, never accuse a paper; an absolute value stays inconclusive.",
   },
 ]
 
@@ -107,7 +107,7 @@ export function AboutPage() {
             </li>
           ))}
         </ul>
-        <p className="hand">a smaller run can confirm, never accuse</p>
+        <p className="hand">a smaller run can confirm a gain, never accuse</p>
       </section>
 
       <section className="about-section" aria-labelledby="inside-h">
@@ -231,7 +231,7 @@ export function AboutPage() {
             <summary>Why only CPU, and only 30 minutes?</summary>
             <p>
               Experiments run in Nebius Token Factory Sandboxes, on CPU. Deep networks train far less than in the paper,
-              so most real papers run at reduced scale, which can confirm a claim but never accuse it.
+              so most real papers run at reduced scale, which can confirm a claimed gain but never accuse a paper.
             </p>
           </details>
           <details>

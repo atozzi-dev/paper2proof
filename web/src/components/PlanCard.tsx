@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { formatUsd } from '../run/cost'
 import type { PlanReady } from '../types/api'
@@ -9,9 +9,13 @@ interface Props {
   approval: { expires_at: string; pending: boolean } | null
   /** Replays are read-only: no decision buttons. */
   readOnly: boolean
+  /** 3 inside the appendix, under its own h2. */
+  level?: 2 | 3
 }
 
-export function PlanCard({ runId, plan: ready, approval, readOnly }: Props) {
+export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: Props) {
+  const headingId = useId()
+  const Heading = level === 3 ? 'h3' : 'h2'
   const p = ready.plan
   const packages = p.packages ?? []
   const datasets = p.datasets ?? []
@@ -35,8 +39,8 @@ export function PlanCard({ runId, plan: ready, approval, readOnly }: Props) {
 
   const awaiting = approval?.pending && !decided && !readOnly
   return (
-    <section className="card" aria-labelledby="plan-h">
-      <h2 id="plan-h">Plan</h2>
+    <section className="card" aria-labelledby={headingId}>
+      <Heading id={headingId}>Plan</Heading>
       <dl className="facts">
         <dt>Approach</dt>
         <dd>{p.mode === 'REPO_FIRST' ? "Adapt the authors' repository" : 'Implement from the paper'}</dd>
