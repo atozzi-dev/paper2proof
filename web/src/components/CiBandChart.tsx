@@ -1,50 +1,82 @@
-import { chartSpec } from '../run/chart'
+import { chartSpec, ticks } from '../run/chart'
+import { fmtNum } from '../run/verdictCopy'
 import type { Claim, Verdict } from '../types/api'
 
-const W = 640
-const H = 96
-const PAD = 24
-const AXIS_Y = 74
+const W = 600
+const H = 108
+const PAD = 22
+const AXIS_Y = 72
+const CI_Y = 48
 
+/** Our 95% interval (blue) against the zone the rule compares it with (green), with the
+ * paper's own value marked in yellow. Drawn from the verdict's numbers only. */
 export function CiBandChart({ claim, verdict }: { claim: Claim | null; verdict: Verdict }) {
   const spec = chartSpec(claim, verdict)
   if (!spec || verdict.ci_low === null || verdict.ci_high === null || verdict.mean === null) return null
   const lo = verdict.ci_low
   const hi = verdict.ci_high
-  const values = [lo, hi, verdict.mean, ...spec.markers.map((m) => m.at), ...(spec.band ?? [])]
+  const mean = verdict.mean
+  const zone = spec.zone
+  const values = [
+    lo,
+    hi,
+    mean,
+    ...(spec.paper ? [spec.paper.at] : []),
+    ...(spec.zero ? [0] : []),
+    ...(zone ? [zone.from, zone.to].filter((z): z is number => z !== null) : []),
+  ]
   let min = Math.min(...values)
   let max = Math.max(...values)
   const span = max - min || Math.abs(max) || 1
-  min -= span * 0.1
-  max += span * 0.1
+  min -= span * 0.12
+  max += span * 0.12
   const x = (value: number) => PAD + ((value - min) / (max - min)) * (W - 2 * PAD)
+  const zoneFrom = zone ? x(zone.from ?? min) : 0
+  const zoneTo = zone ? x(zone.to ?? max) : 0
+  const paperX = spec.paper ? x(spec.paper.at) : 0
+  const paperW = spec.paper ? spec.paper.text.length * 6.4 + 12 : 0
+  const paperLeft = Math.min(Math.max(paperX - paperW / 2, 0), W - paperW)
+  const sign = spec.zero ? (t: number) => (t > 0 ? `+${fmtNum(t)}` : fmtNum(t)) : fmtNum
   return (
     <figure className="chart">
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={spec.label} preserveAspectRatio="xMidYMid meet">
-        {spec.band && (
-          <rect
-            className="chart-band"
-            x={x(spec.band[0])}
-            y={14}
-            width={Math.max(x(spec.band[1]) - x(spec.band[0]), 1)}
-            height={AXIS_Y - 14}
-          />
+        {zone && (
+          <g>
+            <rect className="chart-zone" x={zoneFrom} y={22} width={Math.max(zoneTo - zoneFrom, 1)} height={AXIS_Y - 22} rx={6} />
+            <text className="chart-zone-text" x={(zoneFrom + zoneTo) / 2} y={AXIS_Y - 8} textAnchor="middle">
+              {zone.text}
+            </text>
+          </g>
         )}
         <line className="chart-axis" x1={PAD} x2={W - PAD} y1={AXIS_Y} y2={AXIS_Y} />
-        {spec.markers.map((m) => (
-          <g key={m.label}>
-            <line className="chart-marker" x1={x(m.at)} x2={x(m.at)} y1={10} y2={AXIS_Y} />
-            <text className="chart-text" x={x(m.at)} y={AXIS_Y + 16} textAnchor="middle">
-              {m.label}
+        {ticks(min, max).map((t) => (
+          <g key={t}>
+            <line className="chart-axis" x1={x(t)} x2={x(t)} y1={AXIS_Y} y2={AXIS_Y + 5} />
+            <text className="chart-tick" x={x(t)} y={AXIS_Y + 22} textAnchor="middle">
+              {sign(t)}
             </text>
           </g>
         ))}
-        <line className="chart-ci" x1={x(lo)} x2={x(hi)} y1={44} y2={44} />
-        <line className="chart-ci" x1={x(lo)} x2={x(lo)} y1={36} y2={52} />
-        <line className="chart-ci" x1={x(hi)} x2={x(hi)} y1={36} y2={52} />
-        <circle className="chart-mean" cx={x(verdict.mean)} cy={44} r={6} />
+        {spec.zero && <line className="chart-zero" x1={x(0)} x2={x(0)} y1={20} y2={AXIS_Y} />}
+        {spec.paper && (
+          <g>
+            <rect className="chart-paper-chip" x={paperLeft} y={2} width={paperW} height={17} rx={3} />
+            <text className="chart-paper-text" x={paperLeft + paperW / 2} y={14.5} textAnchor="middle">
+              {spec.paper.text}
+            </text>
+            <line className="chart-paper" x1={paperX} x2={paperX} y1={19} y2={AXIS_Y} />
+          </g>
+        )}
+        <line className="chart-ci" x1={x(lo)} x2={x(hi)} y1={CI_Y} y2={CI_Y} />
+        <circle className="chart-mean" cx={x(mean)} cy={CI_Y} r={6} />
+        <text className="chart-us" x={x(mean)} y={CI_Y - 13} textAnchor="middle">
+          us, {verdict.n_seeds} seed{verdict.n_seeds === 1 ? '' : 's'}
+        </text>
       </svg>
-      <figcaption aria-hidden="true">{spec.label}</figcaption>
+      <figcaption>
+        <strong>Our 95% interval</strong> in blue, the mean as a dot; the paper&rsquo;s value in yellow; green:{' '}
+        {spec.zero ? 'the gain the rule needs' : 'the band where it counts as reproduced'}.
+      </figcaption>
     </figure>
   )
 }

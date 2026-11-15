@@ -206,10 +206,10 @@ describe('VerdictCard', () => {
     )
   })
 
-  it('draws the confidence interval against the tolerance band', () => {
+  it('draws the confidence interval against the threshold the rule uses', () => {
     render(<VerdictCard claim={claimAbs} verdict={notReproduced} explanationMd="" {...conditions} />)
     const chart = screen.getByRole('img', { name: /95% CI/ })
-    expect(chart.getAttribute('aria-label')).toMatch(/0\.907.*0\.917.*0\.9222.*0\.9598/)
+    expect(chart.getAttribute('aria-label')).toMatch(/0\.907.*0\.917.*0\.9222/)
   })
 })
 

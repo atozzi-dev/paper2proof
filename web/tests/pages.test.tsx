@@ -115,7 +115,7 @@ describe('Home onboarding', () => {
     window.location.hash = '#/'
     render(<App />)
     const latest = await screen.findByRole('complementary', { name: 'Not reproduced under our conditions' })
-    expect(within(latest).getByRole('img')).toHaveAccessibleName(/tolerance band/)
+    expect(within(latest).getByRole('img')).toHaveAccessibleName(/tolerance/)
     expect(within(latest).getByRole('link', { name: /Open this run/ })).toHaveAttribute('href', `#/runs/${RUN_ID}`)
   })
 
