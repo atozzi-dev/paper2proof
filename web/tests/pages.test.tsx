@@ -156,6 +156,45 @@ describe('Home onboarding', () => {
   })
 })
 
+describe('Gallery', () => {
+  const card = (n: number, verdict_summary: string) => ({
+    id: 'r_' + String(n).repeat(26),
+    arxiv_id: `0000.0000${n}`,
+    created_at: '2026-11-13T20:00:00Z',
+    status: 'COMPLETED' as const,
+    verdict_summary,
+  })
+  const cards = [card(1, '1 REPRODUCED'), card(2, '1 REPRODUCED · 1 NOT_REPRODUCED'), card(3, '1 INCONCLUSIVE')]
+
+  it('filters the reports by verdict and by arXiv ID', async () => {
+    mockFetch((url) => (url === '/api/gallery' ? json(cards) : undefined))
+    window.location.hash = '#/gallery'
+    render(<App />)
+    const filters = await screen.findByRole('group', { name: 'Show reports' })
+    const shown = () => screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)
+    expect(within(filters).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'All 3 papers',
+      'Not reproduced under our conditions · 1',
+      'Inconclusive · 1',
+      'Reduced scale · 0',
+      'Reproduced · 2',
+    ])
+    expect(within(filters).getByRole('button', { name: 'All 3 papers' })).toHaveAttribute('aria-pressed', 'true')
+    expect(shown()).toHaveLength(3)
+
+    fireEvent.click(within(filters).getByRole('button', { name: 'Not reproduced under our conditions · 1' }))
+    expect(within(filters).getByRole('button', { name: 'Not reproduced under our conditions · 1' })).toHaveAttribute('aria-pressed', 'true')
+    expect(shown()).toEqual(['arXiv 0000.00002'])
+
+    fireEvent.click(within(filters).getByRole('button', { name: 'All 3 papers' }))
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find a paper' }), { target: { value: '00003' } })
+    expect(shown()).toEqual(['arXiv 0000.00003'])
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find a paper' }), { target: { value: '9999' } })
+    expect(screen.getByText('No report matches.')).toBeInTheDocument()
+  })
+})
+
 describe('About', () => {
   it('names the models the roles really use', async () => {
     mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: {} }) : undefined))

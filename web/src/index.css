@@ -1104,3 +1104,62 @@ details > summary {
 .strong {
   font-weight: 600;
 }
+
+/* --- page headers, filters (gallery, about) --------------------------------------------------- */
+
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 20px 48px;
+}
+
+.page-header-main {
+  flex: 1 1 560px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.page-title {
+  font-size: clamp(2.6rem, 6vw, 3.8rem);
+  line-height: 1;
+}
+
+.search-field {
+  flex: 0 1 340px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.search-field input {
+  min-height: 48px;
+  border-radius: 999px;
+  border-color: var(--ink);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: -12px;
+}
+
+.filters button,
+.tab {
+  min-height: 44px;
+  padding: 0 18px;
+  border-color: #d3c9bb;
+  font-size: 0.88rem;
+}
+
+.filters button[aria-pressed='true'],
+.tab[aria-selected='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
