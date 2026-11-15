@@ -1700,3 +1700,248 @@ tr.differs {
 .claims-table td:first-child {
   min-width: 260px;
 }
+
+/* --- about ------------------------------------------------------------------------------------ */
+
+.about {
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+}
+
+.about-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px 48px;
+}
+
+.about-motto {
+  flex: 0 1 340px;
+  font-family: var(--font-serif);
+  font-size: clamp(1.6rem, 3.2vw, 2.1rem);
+  line-height: 1.2;
+  border-left: 3px solid var(--accent);
+  padding-left: 18px;
+}
+
+.about-motto em {
+  color: var(--accent);
+}
+
+.about-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  border-top: 3px solid var(--ink);
+  padding-top: 14px;
+}
+
+.about-section h2 {
+  font-size: clamp(1.7rem, 3.4vw, 2.2rem);
+}
+
+.about-section h3 {
+  font-size: 1.35rem;
+  margin-top: 8px;
+}
+
+.about-text {
+  max-width: 72ch;
+  color: var(--ink-2);
+}
+
+.about-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px 48px;
+  align-items: flex-start;
+}
+
+.about-columns .about-text {
+  flex: 1 1 520px;
+  min-width: 0;
+}
+
+.about-facts {
+  flex: 1 1 300px;
+  min-width: 0;
+  grid-template-columns: 1fr;
+  background: var(--sand);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  gap: 6px;
+}
+
+.about-facts dd + dt {
+  margin-top: 8px;
+}
+
+.rules {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 20px;
+}
+
+.rules li {
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  color: var(--ink-2);
+  font-size: 0.95rem;
+}
+
+.inside-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 14px 32px;
+}
+
+.inside-steps li {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  color: var(--ink-2);
+}
+
+.inside-steps strong {
+  color: var(--ink);
+}
+
+.inside-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1.5px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-serif);
+  font-size: 1.15rem;
+}
+
+.arch {
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.arch svg {
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+}
+
+.arch figcaption {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.arch-box {
+  fill: var(--page);
+  stroke: var(--ink);
+  stroke-width: 1.2;
+}
+
+.arch-title {
+  fill: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 15px;
+}
+
+.arch-sub {
+  fill: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.arch-zone {
+  fill: var(--sand);
+  stroke: var(--rule);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 5;
+}
+
+.arch-zone-text {
+  fill: var(--accent);
+  font-family: var(--font-hand);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.arch-arrow {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+}
+
+.arch-head {
+  fill: var(--accent);
+}
+
+.results {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 18px;
+}
+
+.results div {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
+}
+
+.results dd {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: clamp(2rem, 4vw, 2.6rem);
+  line-height: 1;
+  color: var(--accent);
+}
+
+.results dt {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.stats-table {
+  max-width: 520px;
+}
+
+.faq {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.faq details {
+  border-bottom: 1px solid var(--rule-soft);
+}
+
+.faq summary {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  font-family: var(--font-serif);
+  font-size: 1.2rem;
+}
+
+.faq details p {
+  max-width: 72ch;
+  padding: 0 0 16px;
+  color: var(--ink-2);
+}

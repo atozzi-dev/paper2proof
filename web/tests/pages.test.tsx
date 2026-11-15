@@ -209,6 +209,22 @@ describe('About', () => {
     expect(within(roles).getByRole('row', { name: /Coder/ })).not.toHaveTextContent('Sandboxes')
   })
 
+  it('states the Set A results with their date, and the rule as the engine applies it', async () => {
+    mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: { REPRODUCED: 3, NOT_REPRODUCED: 2 } }) : undefined))
+    window.location.hash = '#/about'
+    render(<App />)
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('How we check a paper')
+    const results = screen.getByRole('region', { name: 'How well it works' })
+    expect(results).toHaveTextContent('16/16')
+    expect(results).toHaveTextContent('0 false accusations')
+    expect(results).toHaveTextContent('30 Oct 2026')
+    const rule = screen.getByRole('region', { name: 'How the rule decides' })
+    expect(rule).toHaveTextContent('at least the paper’s value minus the tolerance')
+    expect(rule).not.toHaveTextContent('whole interval lies inside') // not the rule (verdict-engine.md, ABSOLUTE)
+    const stats = await screen.findByRole('table', { name: 'Verdicts across all runs' })
+    expect(within(stats).getByRole('row', { name: /Not reproduced under our conditions/ })).toHaveTextContent('2')
+  })
+
   it('credits the bundled typefaces and links their licenses', async () => {
     mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: {} }) : undefined))
     window.location.hash = '#/about'
