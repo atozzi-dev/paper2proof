@@ -704,3 +704,403 @@ details > summary {
   font-size: 19px;
   font-weight: 600;
 }
+
+/* --- report layout, shared by Home and Run -------------------------------------------------- */
+
+.section-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px 16px;
+}
+
+.section-head a,
+.section-row a {
+  font-weight: 500;
+  padding: 6px 0;
+}
+
+.report-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 32px 56px;
+  align-items: flex-start;
+}
+
+.report-main {
+  flex: 999 1 600px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.report-aside {
+  flex: 1 1 270px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 0.9rem;
+  color: var(--ink-2);
+}
+
+.report-aside > .kicker {
+  border-top: 1px solid var(--ink);
+  padding-top: 12px;
+}
+
+.report-aside .button {
+  align-self: flex-start;
+}
+
+.verdict-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.conditions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.conditions strong {
+  color: var(--ink);
+}
+
+.figures {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 16px;
+}
+
+.figures dd {
+  margin: 2px 0 0;
+  font-family: var(--font-serif);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.figures-lg dd {
+  font-size: clamp(1.6rem, 3.4vw, 2.3rem);
+}
+
+.figures-md dd {
+  font-size: 1.6rem;
+}
+
+.figure-ours {
+  color: var(--accent);
+}
+
+.other-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--rule-soft);
+}
+
+.other-verdict .claim-quote {
+  flex: 1 1 320px;
+  min-width: 0;
+  font-style: normal;
+}
+
+/* --- home ------------------------------------------------------------------------------------- */
+
+.hero {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 48px;
+  align-items: center;
+  padding: 20px 0 32px;
+}
+
+.hero-main {
+  flex: 1 1 560px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.hero-title {
+  font-size: clamp(2.8rem, 7vw, 4.6rem);
+  line-height: 1;
+  letter-spacing: -0.025em;
+}
+
+.hero-accent {
+  position: relative;
+  white-space: nowrap;
+  font-style: italic;
+  color: var(--accent);
+}
+
+.hero-accent svg {
+  position: absolute;
+  left: 0;
+  bottom: -0.18em;
+  width: 100%;
+  height: 0.24em;
+}
+
+.hero-lead {
+  font-size: 1.2rem;
+}
+
+.hero-ticks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 0.9rem;
+  color: var(--ink-2);
+}
+
+.hero-ticks li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hero-ticks svg {
+  color: var(--accent);
+  flex: none;
+}
+
+.hero-side {
+  flex: 1 1 380px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.start-form {
+  background: var(--sand);
+  border-radius: var(--radius);
+  padding: 26px 26px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+@media (max-width: 480px) {
+  .start-form {
+    padding: 20px 18px;
+  }
+}
+
+.start-form h2 {
+  font-size: 1.65rem;
+  margin-bottom: 4px;
+}
+
+.start-form input {
+  border-color: var(--faint);
+}
+
+.arxiv-input {
+  min-height: 54px;
+  font-family: var(--font-mono);
+  font-size: 1.3rem;
+  border-color: var(--ink) !important;
+}
+
+.hint-disclosure summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.hint-disclosure label {
+  display: block;
+  margin: 2px 0 6px;
+  font-weight: 500;
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.start-button {
+  margin-top: 4px;
+  min-height: 54px;
+  font-size: 1.05rem;
+}
+
+.form-note {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #4a433b;
+}
+
+.hero-note {
+  margin-left: 26px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.latest {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.latest-title {
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  line-height: 1.1;
+}
+
+/* A sand band from edge to edge, without a horizontal scrollbar. */
+.how-band {
+  background: var(--sand);
+  box-shadow: 0 0 0 100vmax var(--sand);
+  clip-path: inset(0 -100vmax);
+  padding: 56px 0 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.how-band h2 {
+  font-size: clamp(1.8rem, 3.6vw, 2.35rem);
+}
+
+.how-figures {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 24px;
+}
+
+.how-figures li {
+  background: var(--page);
+  border-radius: var(--radius);
+  padding: 24px 24px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.how-figure {
+  width: 100%;
+  height: 120px;
+}
+
+.how-figure-hand {
+  fill: var(--accent);
+  font-family: var(--font-hand);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.how-figures h3 {
+  font-size: 1.45rem;
+}
+
+.fig-label {
+  font-style: italic;
+  color: var(--muted);
+}
+
+.muted-2 {
+  color: var(--ink-2);
+}
+
+.how-chip {
+  margin-top: auto;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.recent {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* --- report cards (gallery, home) ------------------------------------------------------------- */
+
+.report-cards {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 20px;
+}
+
+.report-card {
+  border: 1px solid var(--rule-soft);
+  border-radius: 16px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.report-card-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.report-card h3 {
+  font-size: 1.35rem;
+}
+
+.report-card h3 a {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.report-card h3 a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.report-card-verdicts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.report-card-actions {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule-faint);
+  display: flex;
+  justify-content: flex-end;
+  gap: 18px;
+  font-size: 0.92rem;
+}
+
+.report-card-actions a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.strong {
+  font-weight: 600;
+}

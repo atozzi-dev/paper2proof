@@ -1,50 +1,43 @@
 import { href } from '../router'
-import { verdictSummaryText } from '../run/verdictCopy'
-import type { RunCard, VerdictKind } from '../types/api'
-import { VerdictIcon } from './VerdictIcon'
+import { fmtDate } from '../run/format'
+import { parseSummary } from '../run/summary'
+import type { RunCard } from '../types/api'
+import { VerdictPill } from './VerdictPill'
 
-/** The card's badge: the most cautionary verdict in the summary ("1 REPRODUCED, 1 NOT_REPRODUCED"). */
-function badgeKind(summary: string | null): VerdictKind | null {
-  if (!summary) return null
-  const order: VerdictKind[] = ['NOT_REPRODUCED', 'INCONCLUSIVE', 'REPRODUCED_AT_REDUCED_SCALE', 'REPRODUCED']
-  return order.find((k) => new RegExp(`\\b${k}\\b`).test(summary)) ?? null
-}
-
+/** Report cards: the paper, its verdicts (most cautionary first), a replay and the report. */
 export function GalleryList({ cards }: { cards: readonly RunCard[] }) {
   return (
-    <ul className="gallery">
+    <ul className="report-cards">
       {cards.map((card) => {
-        const kind = badgeKind(card.verdict_summary)
+        const { counts, more } = parseSummary(card.verdict_summary)
+        const notReproduced = counts.some((c) => c.kind === 'NOT_REPRODUCED')
         return (
-          <li key={card.id} className="card gallery-card">
-            <div className="gallery-card-head">
-              {kind && (
-                <span className={`verdict-badge verdict-badge-${kind.toLowerCase()}`} aria-hidden="true">
-                  <VerdictIcon kind={kind} />
-                </span>
-              )}
-              <h3>
-                arXiv <span className="mono">{card.arxiv_id}</span>
-              </h3>
-            </div>
-            <p className="gallery-summary">
-              {card.verdict_summary ? verdictSummaryText(card.verdict_summary) : 'No verdict recorded'}
+          <li key={card.id} className="report-card">
+            <p className="report-card-meta">
+              Report of <time dateTime={card.created_at}>{fmtDate(card.created_at)}</time>
             </p>
-            {card.verdict_summary?.includes('NOT_REPRODUCED') && (
+            <h3>
+              <a href={href.run(card.id)}>arXiv {card.arxiv_id}</a>
+            </h3>
+            <p className="report-card-verdicts">
+              {counts.length === 0 && <span className="muted">No verdict recorded</span>}
+              {counts.map((c) => (
+                <VerdictPill key={c.kind} kind={c.kind} count={c.count} size="sm" />
+              ))}
+              {more > 0 && <span className="pill pill-sm pill-inconclusive">+{more} more</span>}
+            </p>
+            {notReproduced && (
               // Invariant 10: "not reproduced" always comes with the conditions it was reached under.
-              <p className="muted small">
+              <p className="small">
                 <a href={href.run(card.id)}>Conditions: scale, seeds and hardware</a>
               </p>
             )}
-            <p className="muted small">
-              <time dateTime={card.created_at}>{new Date(card.created_at).toLocaleDateString()}</time>
-            </p>
-            <p className="actions">
-              <a className="button dark" href={href.run(card.id, true)} aria-label={`Replay the run on arXiv ${card.arxiv_id}`}>
+            <p className="report-card-actions">
+              <a href={href.run(card.id, true)} aria-label={`Replay the run on arXiv ${card.arxiv_id}`}>
                 ▶ Replay
               </a>
-              <a className="button ghost" href={href.run(card.id)} aria-label={`Open the run on arXiv ${card.arxiv_id}`}>
-                Open
+              <a href={href.run(card.id)} aria-label={`Read the report on arXiv ${card.arxiv_id}`} className="strong">
+                Read
               </a>
             </p>
           </li>

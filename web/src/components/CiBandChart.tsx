@@ -43,7 +43,12 @@ export function CiBandChart({ claim, verdict }: { claim: Claim | null; verdict: 
         {zone && (
           <g>
             <rect className="chart-zone" x={zoneFrom} y={22} width={Math.max(zoneTo - zoneFrom, 1)} height={AXIS_Y - 22} rx={6} />
-            <text className="chart-zone-text" x={(zoneFrom + zoneTo) / 2} y={AXIS_Y - 8} textAnchor="middle">
+            <text
+              className="chart-zone-text"
+              x={zone.to === null ? zoneTo - 8 : zone.from === null ? zoneFrom + 8 : (zoneFrom + zoneTo) / 2}
+              y={AXIS_Y - 8}
+              textAnchor={zone.to === null ? 'end' : zone.from === null ? 'start' : 'middle'}
+            >
               {zone.text}
             </text>
           </g>
@@ -69,13 +74,19 @@ export function CiBandChart({ claim, verdict }: { claim: Claim | null; verdict: 
         )}
         <line className="chart-ci" x1={x(lo)} x2={x(hi)} y1={CI_Y} y2={CI_Y} />
         <circle className="chart-mean" cx={x(mean)} cy={CI_Y} r={6} />
-        <text className="chart-us" x={x(mean)} y={CI_Y - 13} textAnchor="middle">
+        {/* beside the interval, on the side with room, so it never sits on the paper's line */}
+        <text
+          className="chart-us"
+          x={x(hi) < W - 110 ? x(hi) + 12 : x(lo) - 12}
+          y={CI_Y + 6}
+          textAnchor={x(hi) < W - 110 ? 'start' : 'end'}
+        >
           us, {verdict.n_seeds} seed{verdict.n_seeds === 1 ? '' : 's'}
         </text>
       </svg>
       <figcaption>
         <strong>Our 95% interval</strong> in blue, the mean as a dot; the paper&rsquo;s value in yellow; green:{' '}
-        {spec.zero ? 'the gain the rule needs' : 'the band where it counts as reproduced'}.
+        {spec.zero ? 'the gain the rule needs' : 'where our mean counts as reproduced'}.
       </figcaption>
     </figure>
   )

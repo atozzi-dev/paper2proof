@@ -84,6 +84,28 @@ describe('Home', () => {
       '/api/runs {"arxiv_id":"2106.09685v2","claim_hint":null}',
     ])
   })
+
+  it('keeps the claim hint behind a disclosure and still sends it', async () => {
+    const posted: string[] = []
+    mockFetch((url, init) => {
+      if (url === '/api/gallery') return json([])
+      if (init?.method === 'POST' && url === '/api/runs') {
+        posted.push(String(init.body))
+        return json({ run_id: RUN_ID, events_url: `/api/runs/${RUN_ID}/events` }, 202)
+      }
+      if (url === `/api/runs/${RUN_ID}`) return json(runView())
+      if (url.startsWith(`/api/runs/${RUN_ID}/events`)) return new Response(sse([]), { status: 200 })
+      return undefined
+    })
+    window.location.hash = '#/'
+    render(<App />)
+    const hint = screen.getByLabelText('Claim to focus on (optional)')
+    expect(hint.closest('details')).not.toBeNull()
+    fireEvent.change(screen.getByLabelText('arXiv ID'), { target: { value: '2106.09685' } })
+    fireEvent.change(hint, { target: { value: 'the LoRA rank ablation' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start the run' }))
+    await waitFor(() => expect(posted).toEqual(['{"arxiv_id":"2106.09685","claim_hint":"the LoRA rank ablation"}']))
+  })
 })
 
 describe('Home onboarding', () => {
@@ -105,7 +127,7 @@ describe('Home onboarding', () => {
     expect(steps).not.toHaveTextContent(/Super(?! VL)|Nano/) // retired on 2026-11-09
   })
 
-  it('shows the newest gallery verdict next to the form, with its chart', async () => {
+  it('shows the newest gallery report under the form, verdict first, with its chart and conditions', async () => {
     mockFetch((url) => {
       if (url === '/api/gallery') return json([card])
       if (url === `/api/runs/${RUN_ID}`)
@@ -114,9 +136,12 @@ describe('Home onboarding', () => {
     })
     window.location.hash = '#/'
     render(<App />)
-    const latest = await screen.findByRole('complementary', { name: 'Not reproduced under our conditions' })
+    const latest = await screen.findByRole('region', { name: 'Latest report' })
+    expect(within(latest).getByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()
     expect(within(latest).getByRole('img')).toHaveAccessibleName(/tolerance/)
-    expect(within(latest).getByRole('link', { name: /Open this run/ })).toHaveAttribute('href', `#/runs/${RUN_ID}`)
+    expect(within(latest).getByRole('list', { name: 'Conditions' })).toHaveTextContent('Seeds')
+    expect(within(latest).getByText('94.1%').tagName).toBe('MARK') // the paper's value, highlighted
+    expect(within(latest).getByRole('link', { name: /Read the full report/ })).toHaveAttribute('href', `#/runs/${RUN_ID}`)
   })
 
   it('never puts a replay button above the form: replays start from a run card', async () => {

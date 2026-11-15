@@ -412,7 +412,7 @@ describe('GalleryList', () => {
   it('points a "not reproduced" card at the conditions it was reached under', () => {
     render(<GalleryList cards={[{ ...card, verdict_summary: '1 NOT_REPRODUCED' }]} />)
     const item = screen.getByRole('listitem')
-    expect(item).toHaveTextContent('1 Not reproduced under our conditions')
+    expect(item).toHaveTextContent('1 not reproduced under our conditions')
     expect(item).not.toHaveTextContent('NOT_REPRODUCED')
     expect(within(item).getByRole('link', { name: 'Conditions: scale, seeds and hardware' })).toHaveAttribute(
       'href',
@@ -423,6 +423,24 @@ describe('GalleryList', () => {
   it('adds no conditions link to a card that has no such verdict', () => {
     render(<GalleryList cards={[{ ...card, verdict_summary: '1 REPRODUCED' }]} />)
     expect(screen.queryByRole('link', { name: /Conditions/ })).toBeNull()
+  })
+
+  it('shows one pill per verdict, the most cautionary first, and the conditions link', () => {
+    render(<GalleryList cards={[{ ...card, verdict_summary: '2 REPRODUCED · 1 NOT_REPRODUCED · +1 more' }]} />)
+    const item = screen.getByRole('listitem')
+    expect(item).toHaveTextContent(/1 not reproduced under our conditions.*2 reproduced.*\+1 more/)
+    expect(within(item).getByRole('link', { name: /Conditions/ })).toBeInTheDocument()
+  })
+
+  it('links to the report and to its replay, named after the paper', () => {
+    render(<GalleryList cards={[{ ...card, verdict_summary: null }]} />)
+    const item = screen.getByRole('listitem')
+    expect(item).toHaveTextContent('No verdict recorded')
+    expect(within(item).getByRole('link', { name: 'Read the report on arXiv 2106.09685' })).toHaveAttribute('href', `#/runs/${card.id}`)
+    expect(within(item).getByRole('link', { name: 'Replay the run on arXiv 2106.09685' })).toHaveAttribute(
+      'href',
+      `#/runs/${card.id}?replay=1`,
+    )
   })
 })
 
