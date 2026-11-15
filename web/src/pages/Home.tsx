@@ -111,31 +111,37 @@ export function HomePage() {
         <div className="hero-side">
           <form className="start-form" onSubmit={submit} noValidate aria-labelledby="start-h" aria-describedby={error ? ids.error : undefined}>
             <h2 id="start-h">Start a run</h2>
-            <label htmlFor={ids.arxiv}>arXiv ID</label>
-            <input
-              id={ids.arxiv}
-              className="arxiv-input"
-              name="arxiv_id"
-              inputMode="decimal"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="2106.09685"
-              maxLength={32}
-              value={arxivId}
-              onChange={(e) => setArxivId(e.target.value)}
-              aria-describedby={ids.help}
-              aria-invalid={error !== null && !ARXIV_ID.test(arxivId.trim())}
-              required
-            />
-            <label htmlFor={ids.invite}>Invite code</label>
-            <input
-              id={ids.invite}
-              name="invite_code"
-              type="password"
-              autoComplete="off"
-              value={invite}
-              onChange={(e) => setInvite(e.target.value)}
-            />
+            <div className="form-row">
+              <div className="field field-wide">
+                <label htmlFor={ids.arxiv}>arXiv ID</label>
+                <input
+                  id={ids.arxiv}
+                  className="arxiv-input"
+                  name="arxiv_id"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="2106.09685"
+                  maxLength={32}
+                  value={arxivId}
+                  onChange={(e) => setArxivId(e.target.value)}
+                  aria-describedby={ids.help}
+                  aria-invalid={error !== null && !ARXIV_ID.test(arxivId.trim())}
+                  required
+                />
+              </div>
+              <div className="field">
+                <label htmlFor={ids.invite}>Invite code</label>
+                <input
+                  id={ids.invite}
+                  name="invite_code"
+                  type="password"
+                  autoComplete="off"
+                  value={invite}
+                  onChange={(e) => setInvite(e.target.value)}
+                />
+              </div>
+            </div>
             <details className="hint-disclosure">
               <summary>Focus on one claim</summary>
               <label htmlFor={ids.hint}>Claim to focus on (optional)</label>
@@ -158,10 +164,9 @@ export function HomePage() {
               </p>
             )}
             <p id={ids.help} className="form-note">
-              arXiv IDs only, such as 2106.09685 or 2106.09685v2: no URLs, no PDF uploads. Live runs use real compute,
-              so they need an invite code, once per browser session. Replays in the gallery are free.
+              arXiv IDs only (such as 2106.09685v2), no URLs or PDFs. Live runs need an invite code, once per browser
+              session; replays in the gallery are free. Your runs stay private; the gallery is picked by hand.
             </p>
-            <p className="form-note">Runs are private to your browser session. The public gallery is curated by hand.</p>
           </form>
           <p className="hand hero-note">
             <svg width="34" height="26" viewBox="0 0 34 26" aria-hidden="true">

@@ -902,10 +902,10 @@ details > summary {
 .start-form {
   background: var(--sand);
   border-radius: var(--radius);
-  padding: 22px 22px 18px;
+  padding: 20px 20px 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 @media (max-width: 480px) {
@@ -915,8 +915,27 @@ details > summary {
 }
 
 .start-form h2 {
-  font-size: 1.65rem;
-  margin-bottom: 4px;
+  font-size: 1.5rem;
+  margin-bottom: 2px;
+}
+
+/* arXiv ID and invite code side by side; one under the other when the card is narrow. */
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.field {
+  flex: 2 1 130px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-wide {
+  flex: 3 1 170px;
 }
 
 .start-form input {
@@ -924,9 +943,9 @@ details > summary {
 }
 
 .arxiv-input {
-  min-height: 50px;
+  min-height: 46px;
   font-family: var(--font-mono);
-  font-size: 1.3rem;
+  font-size: 1.15rem;
   border-color: var(--ink) !important;
 }
 
@@ -948,9 +967,9 @@ details > summary {
 }
 
 .start-button {
-  margin-top: 4px;
-  min-height: 50px;
-  font-size: 1.05rem;
+  margin-top: 2px;
+  min-height: 46px;
+  font-size: 1rem;
 }
 
 .form-note {
