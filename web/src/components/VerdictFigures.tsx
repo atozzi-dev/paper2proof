@@ -11,7 +11,7 @@ const signed = (x: number) => (x > 0 ? `+${fmtNum(x)}` : fmtNum(x))
 
 /** The numbers the verdict compares, side by side: the paper's value (or claimed gain), our
  * mean, our 95% interval, and what the rule needs (docs/specs/verdict-engine.md). */
-export function verdictFigures(claim: Claim | null, v: Verdict): Figure[] {
+function verdictFigures(claim: Claim | null, v: Verdict): Figure[] {
   const out: Figure[] = []
   const { w, v: reported, rho, delta } = v.tolerance
   const lower = claim?.higher_is_better === false

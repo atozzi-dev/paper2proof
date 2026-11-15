@@ -74,7 +74,10 @@ export function conditionChips(c: RunConditions | null, ready: PlanReady | null)
   if (seeds) out.push(`${seeds.length} seed${seeds.length === 1 ? '' : 's'}`)
   const hw = c?.hardware
   if (hw?.platform === SANDBOX_PLATFORM) out.push('CPU sandbox, no network')
-  else if (hw?.platform) out.push(hw.gpu ? `${hw.platform}, ${hw.gpu}` : hw.platform)
+  else if (hw?.platform) {
+    const gpu = hw.gpu ? (['cpu', 'unknown'].includes(hw.gpu.toLowerCase()) ? 'CPU only' : hw.gpu) : null // as hardwareText
+    out.push(gpu ? `${hw.platform}, ${gpu}` : hw.platform)
+  }
   const mode = c?.code ?? p?.mode
   if (mode) out.push(mode === 'REPO_FIRST' ? "code adapted from the authors' repository" : 'code written from the paper')
   return out

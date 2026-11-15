@@ -116,6 +116,11 @@ describe('conditionChips', () => {
     expect(conditionChips(null, ready)).toEqual(['full scale', '3 seeds', "code adapted from the authors' repository"])
   })
 
+  it('says CPU only when the job reported no GPU', () => {
+    const cpu = { ...runConditions, hardware: { ...runConditions.hardware, gpu: 'cpu' } }
+    expect(conditionChips(cpu, null)).toContain('gpu-l40s-a, CPU only')
+  })
+
   it('names a GPU run by its platform and GPU', () => {
     expect(conditionChips(runConditions, null)).toEqual([
       'reduced scale',

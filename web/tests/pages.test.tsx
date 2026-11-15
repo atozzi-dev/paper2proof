@@ -230,14 +230,105 @@ describe('Run page', () => {
     render(<App />)
     expect(await screen.findByRole('heading', { name: 'Not reproduced under our conditions' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Reproduced' })).toBeInTheDocument()
+    const tab = (name: string) => fireEvent.click(screen.getByRole('tab', { name }))
+    tab('A · Claims')
     expect(screen.getByRole('table', { name: 'Claims extracted from the paper' })).toHaveTextContent('Table 2')
+    tab('F · Logs')
     expect(screen.getByText('<b>epoch 1</b>')).toBeInTheDocument()
+    tab('C · Steps')
     expect(screen.getByRole('list', { name: 'Cloud jobs' })).toHaveTextContent('Experiment (exec job)')
+    tab('G · Proof Bundle')
     expect(screen.getByRole('link', { name: 'Download the Proof Bundle' })).toHaveAttribute(
       'href',
       `/api/runs/${RUN_ID}/bundle`,
     )
+    tab('E · Cost')
     expect(screen.getByRole('table', { name: 'Cost receipt' })).toHaveTextContent('Total$0.41')
+  })
+
+  it('says in short what the verdicts were, the most cautionary first', async () => {
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED', listed: true }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun()), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const short = await screen.findByRole('region', { name: 'In short' })
+    await waitFor(() =>
+      expect(short).toHaveTextContent(
+        'Of the 2 claims tested, 1 was not reproduced under our conditions and 1 was reproduced.',
+      ),
+    )
+    expect(within(short).getByRole('list', { name: 'Conditions of this run' })).toHaveTextContent('full scale')
+    const verdicts = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)
+    expect(verdicts.slice(0, 2)).toEqual(['Not reproduced under our conditions', 'Reproduced'])
+  })
+
+  it('lists the setup the run used against the paper', async () => {
+    const setup = [
+      { id: 's1', kind: 'NUMBER' as const, name: 'Test split fraction', paper: '0.3', planned: '0.3', used: '0.3', matches_paper: true, where: 'workspace/train.py' },
+      { id: 's2', kind: 'CHOICE' as const, name: 'Kernel', paper: 'rbf', planned: 'rbf', used: 'linear', matches_paper: false, where: '' },
+    ]
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED', conditions: { ...runConditions, setup } }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun()), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    expect(await screen.findByRole('tab', { name: 'B · The paper’s setup' })).toHaveAttribute('aria-selected', 'true')
+    const table = await screen.findByRole('table', { name: 'The paper’s setup' })
+    expect(within(table).getByRole('row', { name: /Test split fraction/ })).toHaveTextContent('found in workspace/train.py')
+    expect(within(table).getByRole('row', { name: /Kernel/ })).toHaveTextContent(/rbf.*linear.*differs.*declared by the Coder/)
+  })
+
+  it('moves between appendix tabs with the arrow keys', async () => {
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED' }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun()), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    const setupTab = await screen.findByRole('tab', { name: 'B · The paper’s setup' })
+    expect(setupTab).toHaveAttribute('tabindex', '0')
+    expect(screen.getByRole('tab', { name: 'C · Steps' })).toHaveAttribute('tabindex', '-1')
+    fireEvent.keyDown(setupTab, { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'C · Steps' })).toHaveAttribute('aria-selected', 'true')
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'C · Steps' }))
+    expect(screen.getByRole('tabpanel', { name: 'C · Steps' })).toBeInTheDocument()
+    fireEvent.keyDown(document.activeElement as Element, { key: 'End' })
+    expect(screen.getByRole('tab', { name: 'G · Proof Bundle' })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(document.activeElement as Element, { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'A · Claims' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('opens the Proof Bundle part from the button in the header', async () => {
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView({ status: 'COMPLETED' }))
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun()), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Proof Bundle' }))
+    expect(screen.getByRole('tab', { name: 'G · Proof Bundle' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('shows the progress and the spend while the run is going', async () => {
+    mockFetch((url) => {
+      if (url === `/api/runs/${RUN_ID}`) return json(runView())
+      if (url === `/api/runs/${RUN_ID}/events`) return new Response(sse(fullRun().slice(0, 8)), { status: 200 })
+      return undefined
+    })
+    window.location.hash = `#/runs/${RUN_ID}`
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: 'Step 3 of 10' })).toBeInTheDocument()
+    const spend = screen.getByRole('region', { name: 'Spent so far' })
+    await waitFor(() => expect(spend).toHaveTextContent('$0.01'))
+    expect(spend).toHaveTextContent('1 model call')
+    expect(screen.queryByRole('region', { name: 'In short' })).toBeNull()
   })
 
   it('shows the conditions the server recorded next to the verdict, as soon as it is out', async () => {
@@ -273,9 +364,10 @@ describe('Run page', () => {
     })
     window.location.hash = `#/runs/${RUN_ID}`
     render(<App />)
-    const section = (await screen.findByRole('heading', { name: 'Proof Bundle' })).closest('section') as HTMLElement
-    expect(within(section).getByRole('note')).toHaveTextContent('This Proof Bundle is not signed')
-    expect(within(section).getByRole('link', { name: 'Download the Proof Bundle' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('tab', { name: 'G · Proof Bundle' }))
+    const panel = screen.getByRole('tabpanel', { name: 'G · Proof Bundle' })
+    await waitFor(() => expect(within(panel).getByRole('note')).toHaveTextContent('This Proof Bundle is not signed'))
+    expect(within(panel).getByRole('link', { name: 'Download the Proof Bundle' })).toBeInTheDocument()
   })
 
   it('says in plain words that no GPU was available', async () => {
@@ -310,7 +402,9 @@ describe('Run page', () => {
     })
     window.location.hash = `#/runs/${RUN_ID}`
     render(<App />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    const approve = await screen.findByRole('button', { name: 'Approve' })
+    expect(approve.closest('[role="tabpanel"]')).toBeNull() // never hidden behind a tab
+    fireEvent.click(approve)
     expect(await screen.findByText('Plan approved.')).toBeInTheDocument()
     expect(approvals).toEqual([`/api/runs/${RUN_ID}/approve`])
   })
