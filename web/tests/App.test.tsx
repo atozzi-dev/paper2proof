@@ -1,9 +1,8 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App'
 
 afterEach(() => {
-  delete document.documentElement.dataset.theme
   window.localStorage.clear()
   vi.restoreAllMocks()
 })
@@ -15,31 +14,31 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Paper2Proof home' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Do the numbers in this paper hold up?')
   })
-})
 
-describe('Theme switch', () => {
-  it('follows the system by default and overrides it on request, remembered', () => {
+  it('shows the masthead: name, tagline and the two sections', () => {
+    window.location.hash = '#/gallery'
     render(<App />)
-    const group = screen.getByRole('group', { name: 'Theme' })
-    expect(within(group).getByRole('button', { name: 'System' })).toHaveAttribute('aria-pressed', 'true')
-    expect(document.documentElement.dataset.theme).toBeUndefined()
-
-    fireEvent.click(within(group).getByRole('button', { name: 'Dark' }))
-    expect(document.documentElement.dataset.theme).toBe('dark')
-    expect(window.localStorage.getItem('p2p-theme')).toBe('dark')
-    expect(within(group).getByRole('button', { name: 'Dark' })).toHaveAttribute('aria-pressed', 'true')
-
-    fireEvent.click(within(group).getByRole('button', { name: 'System' }))
-    expect(document.documentElement.dataset.theme).toBeUndefined()
-    expect(window.localStorage.getItem('p2p-theme')).toBeNull()
+    expect(screen.getByRole('link', { name: 'Paper2Proof home' })).toHaveTextContent(
+      'Reproducibility reports for ML papers',
+    )
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(nav).getAllByRole('link').map((a) => a.textContent)).toEqual(['Gallery', 'About'])
+    expect(within(nav).getByRole('link', { name: 'Gallery' })).toHaveAttribute('aria-current', 'page')
   })
 
-  it('still switches when the browser blocks storage', () => {
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new DOMException('blocked', 'SecurityError')
-    })
+  it('keeps Gallery current on a run page', () => {
+    window.location.hash = `#/runs/r_${'a'.repeat(26)}`
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}))
     render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Light' }))
-    expect(document.documentElement.dataset.theme).toBe('light')
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(nav).getByRole('link', { name: 'Gallery' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('has a single light theme: no theme switch', () => {
+    window.localStorage.setItem('p2p-theme', 'dark') // a choice saved by an earlier version
+    window.location.hash = '#/'
+    render(<App />)
+    expect(screen.queryByRole('group', { name: 'Theme' })).toBeNull()
+    expect(document.documentElement.dataset.theme).toBeUndefined()
   })
 })

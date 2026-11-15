@@ -1,5 +1,4 @@
 import { useEffect } from 'react'
-import { ThemeSwitch } from './components/ThemeSwitch'
 import { AboutPage } from './pages/About'
 import { GalleryPage } from './pages/Gallery'
 import { HomePage } from './pages/Home'
@@ -17,7 +16,7 @@ const TITLES: Record<Route['page'], string> = {
 /** Brackets around a check mark: a claim, checked. */
 function Logo() {
   return (
-    <svg className="logo" width="30" height="30" viewBox="0 0 30 30" fill="none" aria-hidden="true">
+    <svg className="logo" width="34" height="34" viewBox="0 0 30 30" fill="none" aria-hidden="true">
       <path className="logo-brackets" d="M9 4H5v22h4M21 4h4v22h-4" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
       <path className="logo-check" d="M10 15.5l3.5 3.5L20.5 11" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
@@ -43,12 +42,12 @@ function App() {
         <div className="container site-header-inner">
           <a className="brand" href={href.home} aria-label="Paper2Proof home">
             <Logo />
-            <span>Paper2Proof</span>
+            <span className="brand-text">
+              <span className="brand-name">Paper2Proof</span>
+              <span className="brand-tagline">Reproducibility reports for ML papers</span>
+            </span>
           </a>
-          <nav aria-label="Main">
-            <a href={href.home} aria-current={current('home')}>
-              Home
-            </a>
+          <nav aria-label="Main" className="site-nav">
             <a href={href.gallery} aria-current={current('gallery')}>
               Gallery
             </a>
@@ -56,10 +55,9 @@ function App() {
               About
             </a>
           </nav>
-          <ThemeSwitch />
         </div>
       </header>
-      <main id="main" className="container" tabIndex={-1}>
+      <main id="main" className="container site-main" tabIndex={-1}>
         {route.page === 'home' && <HomePage />}
         {route.page === 'run' && <RunPage id={route.id} replay={route.replay} />}
         {route.page === 'gallery' && <GalleryPage />}

@@ -151,7 +151,7 @@ describe('About', () => {
     render(<App />)
     const link = await screen.findByRole('link', { name: 'SIL Open Font License 1.1' })
     expect(link).toHaveAttribute('href', '/fonts/LICENSES.txt')
-    expect(link.closest('p')).toHaveTextContent('Inter, Space Grotesk and JetBrains Mono')
+    expect(link.closest('p')).toHaveTextContent('Newsreader, Instrument Sans, Caveat and IBM Plex Mono')
   })
 })
 

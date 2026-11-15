@@ -113,7 +113,7 @@ export function AboutPage() {
       </section>
 
       <p className="muted small">
-        Typefaces: Inter, Space Grotesk and JetBrains Mono, served from this site under the{' '}
+        Typefaces: Newsreader, Instrument Sans, Caveat and IBM Plex Mono, served from this site under the{' '}
         <a href="/fonts/LICENSES.txt">SIL Open Font License 1.1</a>.
       </p>
     </>
