@@ -8,6 +8,22 @@ const PAD = 22
 const AXIS_Y = 72
 const CI_Y = 48
 
+const US_WIDTH = 84 // "us, 3 seeds" in the hand font at 19px, with a margin
+
+/** Where "us, N seeds" goes: right of the interval, else left of it, else above it, beside
+ * the paper's line rather than across it. */
+function usLabel(lo: number, hi: number, mean: number, paper: number | null) {
+  if (hi + 12 + US_WIDTH <= W) return { x: hi + 12, y: CI_Y + 6, textAnchor: 'start' as const }
+  if (lo - 12 - US_WIDTH >= 0) return { x: lo - 12, y: CI_Y + 6, textAnchor: 'end' as const }
+  const y = CI_Y - 14
+  if (paper !== null && Math.abs(paper - mean) < US_WIDTH / 2 + 6) {
+    return paper + 8 + US_WIDTH <= W
+      ? { x: paper + 8, y, textAnchor: 'start' as const }
+      : { x: paper - 8, y, textAnchor: 'end' as const }
+  }
+  return { x: Math.min(Math.max(mean, US_WIDTH / 2), W - US_WIDTH / 2), y, textAnchor: 'middle' as const }
+}
+
 /** Where the zone's label fits inside it, away from the paper's line; null when nowhere. */
 function zoneLabel(zone: Zone, from: number, to: number, paper: number | null) {
   const width = zone.text.length * 6 + 8 // 11px text
@@ -87,13 +103,8 @@ export function CiBandChart({ claim, verdict }: { claim: Claim | null; verdict: 
         )}
         <line className="chart-ci" x1={x(lo)} x2={x(hi)} y1={CI_Y} y2={CI_Y} />
         <circle className="chart-mean" cx={x(mean)} cy={CI_Y} r={6} />
-        {/* beside the interval, on the side with room, so it never sits on the paper's line */}
-        <text
-          className="chart-us"
-          x={x(hi) < W - 110 ? x(hi) + 12 : x(lo) - 12}
-          y={CI_Y + 6}
-          textAnchor={x(hi) < W - 110 ? 'start' : 'end'}
-        >
+        {/* beside the interval, on the side with room; above it when neither side has room */}
+        <text className="chart-us" {...usLabel(x(lo), x(hi), x(mean), spec.paper ? paperX : null)}>
           us, {verdict.n_seeds} seed{verdict.n_seeds === 1 ? '' : 's'}
         </text>
       </svg>

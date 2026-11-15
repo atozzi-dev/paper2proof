@@ -187,6 +187,20 @@ describe('CiBandChart', () => {
     expect(container.querySelector('figcaption')).toHaveTextContent('green: ≥ 0.01 needed')
   })
 
+  it('keeps the seeds label inside the drawing when the interval is wide', () => {
+    // 0000.00005 on 13 Nov: 0.916 to 1.022 around a paper value of 0.969
+    const wine = { ...claimAbs, reported_value: 0.969, reported_std: 0.021 }
+    const v = { ...notReproduced, kind: 'REPRODUCED' as const, mean: 0.9691, ci_low: 0.916, ci_high: 1.022, tolerance: { w: 0.042, v: 0.969 } }
+    const { container } = render(<CiBandChart claim={wine} verdict={v} />)
+    const label = container.querySelector('.chart-us') as SVGTextElement
+    const x = Number(label.getAttribute('x'))
+    const width = 80 // "us, 3 seeds" in the hand font
+    const anchor = label.getAttribute('text-anchor')
+    const [left, right] = anchor === 'end' ? [x - width, x] : anchor === 'start' ? [x, x + width] : [x - width / 2, x + width / 2]
+    expect(left).toBeGreaterThanOrEqual(0)
+    expect(right).toBeLessThanOrEqual(600)
+  })
+
   it('points the needed zone down when lower is better', () => {
     const lower = { ...claimRel, higher_is_better: false, claimed_delta: -0.017 }
     const v = { ...reproduced, mean: -0.02, ci_low: -0.022, ci_high: -0.018, tolerance: { rho: 0.5, delta: -0.017 } }
