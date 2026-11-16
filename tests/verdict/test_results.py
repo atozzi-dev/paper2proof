@@ -176,13 +176,15 @@ def test_the_gpu_name_is_shown_only_when_plain(gpu: str, shown: str) -> None:
 # --- seeds the time rule left out (A-46) ---------------------------------------------------
 
 
-def _timed(ran: int = 7, not_started: list[int] | None = None) -> tuple[bytes, ExecManifest]:
+def _timed(
+    ran: int = 7, not_started: list[int] | None = None, **changes: Any
+) -> tuple[bytes, ExecManifest]:
     """A manifest of ten seeds with the time rule, and results where the first `ran` ran."""
     raw = json.loads((FIXTURES / "manifest_valid.json").read_text(encoding="utf-8"))
     manifest = ExecManifest.model_validate(
         {**raw, "seeds": list(range(10)), "min_seeds": 3, "target_seconds": 600}
     )
-    data = _results(exit_reason="completed")
+    data = _results(**{"exit_reason": "completed", "wall_clock_s": 300.0, **changes})
     for claim in data["claims"]:
         claim["per_seed"] = [{"seed": s, "value": 0.9, "ok": True} for s in range(ran)]
         if claim["baseline"] is not None:
@@ -213,6 +215,35 @@ def test_failed_seeds_cannot_pass_as_seeds_not_started(ran: int, not_started: li
     raw, manifest = _timed(ran, not_started)
     analysis = analyze_results(raw, manifest)
     assert analysis.exit_reason == "contract_error" and analysis.claims == {}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"exit_reason": "budget_timeout"},  # the runner lists none when the budget stopped it
+        {"exit_reason": "contract_error"},
+        {"wall_clock_s": 1.0},  # the rule cannot have stopped a job this short
+        {"wall_clock_s": 262.0},  # below (600 - 10) / 2.25: longest seed <= elapsed
+    ],
+    ids=["budget-timeout", "contract-error", "too-short", "just-too-short"],
+)
+def test_seeds_not_started_need_a_job_the_time_rule_could_have_stopped(
+    changes: dict[str, Any],
+) -> None:
+    """A forged results.json (the script runs as the runner's user) could relabel failed
+    seeds as not started; the rule only fires on a job that ran long enough, and ended."""
+    raw, manifest = _timed(3, **changes)
+    analysis = analyze_results(raw, manifest)
+    assert analysis.exit_reason == "contract_error" and analysis.claims == {}
+
+
+@pytest.mark.parametrize("changes", [{"wall_clock_s": 263.0}, {"exit_reason": "experiment_error"}])
+def test_a_job_the_time_rule_could_have_stopped_keeps_its_seeds_not_started(
+    changes: dict[str, Any],
+) -> None:
+    raw, manifest = _timed(3, **changes)
+    analysis = analyze_results(raw, manifest)
+    assert analysis.seeds_not_started == list(range(3, 10))
 
 
 def test_without_a_time_target_no_seed_can_be_not_started() -> None:

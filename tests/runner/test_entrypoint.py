@@ -891,3 +891,28 @@ def test_replay_seeds_are_parsed_strictly() -> None:
     for text in ("", "0,,1", "a", "-1", "0, 1", "1" * 30, ",".join(["1"] * 21)):
         with pytest.raises(entrypoint.ContractError):
             entrypoint.parse_seeds(text)
+
+
+def test_the_control_plane_checks_the_same_time_rule() -> None:
+    """ANALYZING bounds a forged seeds_not_started with the runner's own constants."""
+    from app.verdict import results
+
+    assert (results.SEED_TIME_FACTOR, results.SEED_START_MARGIN_S) == (
+        entrypoint.SEED_TIME_FACTOR,
+        entrypoint.SEED_START_MARGIN_S,
+    )
+
+
+def test_the_bundles_replay_flag_is_one_the_runner_accepts() -> None:
+    """Round trip: reproduce.sh's --seeds, with the largest seed a plan can hold."""
+    from app.bundle.build import render_reproduce
+    from app.domain.contracts import ExecManifest
+
+    seeds = [2**31 - 1, *range(9)]
+    manifest = ExecManifest.model_validate(
+        {**_fixture("manifest_valid.json"), "seeds": seeds, "min_seeds": 3, "target_seconds": 600}
+    )
+    runner = "cr.example/p2p-runner@sha256:" + "0" * 64
+    script = render_reproduce(manifest, runner, run_id=manifest.run_id, seeds=seeds[:7]).decode()
+    line = next(x for x in script.splitlines() if x.startswith('  "$RUNNER_IMAGE" --seeds '))
+    assert entrypoint.parse_seeds(line.split()[-1]) == seeds[:7]

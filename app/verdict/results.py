@@ -20,6 +20,10 @@ from app.domain.contracts import ClaimSpec, ExecManifest
 from app.domain.models import ClaimType, Measurements, Scale
 
 MAX_RESULTS_BYTES = 256 * 1024
+# images/runner/entrypoint.py: the next seed starts only if elapsed + 1.25 * longest + 10 s
+# fits the limit (tests/runner pins the two copies equal)
+SEED_TIME_FACTOR = 1.25
+SEED_START_MARGIN_S = 10.0
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "results.schema.json"
 _GPU = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()/+-]{0,63}")  # shown as hardware: plain text only
 # `capacity` never comes from results.json: EXECUTING found no GPU to run the job on.
@@ -70,17 +74,27 @@ def _seeds_ok(entries: list[dict[str, Any]], allowed: set[int]) -> bool:
     return len(seeds) == len(set(seeds)) and set(seeds) <= allowed
 
 
-def _not_started_problem(seeds: list[int], manifest: ExecManifest) -> str | None:
-    """Only the time rule leaves seeds out, and only the manifest's tail after the minimum: a
-    job cannot pass failed seeds off as seeds it never started."""
+def _not_started_problem(data: dict[str, Any], manifest: ExecManifest) -> str | None:
+    """Only the time rule leaves seeds out: the manifest's tail after the minimum, in a job
+    that ended and ran long enough for the rule to fire. The script runs as the runner's user
+    and could rewrite the file, so this bounds what a forgery can claim; the verdict itself
+    never reads the list (decide() sees per-seed values only)."""
+    seeds: list[int] = data.get("seeds_not_started", [])
     if not seeds:
         return None
-    if manifest.min_seeds is None:
+    if manifest.min_seeds is None or manifest.target_seconds is None:
         return "results.json lists seeds not started without a time target"
     if len(seeds) > len(manifest.seeds) - manifest.min_seeds:
         return "results.json lists more seeds not started than the time rule allows"
     if seeds != manifest.seeds[-len(seeds) :]:
         return "results.json seeds not started are not the tail of the manifest's seeds"
+    if data["exit_reason"] not in ("completed", "experiment_error"):
+        return "results.json lists seeds not started in a job that did not end"
+    # At the stop, elapsed + 1.25 * longest + 10 > limit, and the longest seed is part of
+    # the elapsed time: a shorter job cannot have been stopped by the rule.
+    limit = min(manifest.target_seconds, manifest.budget_seconds)
+    if data["wall_clock_s"] * (1 + SEED_TIME_FACTOR) + SEED_START_MARGIN_S <= limit:
+        return "results.json lists seeds not started in a job too short for the time rule"
     return None
 
 
@@ -103,7 +117,7 @@ def analyze_results(raw: bytes, manifest: ExecManifest) -> Analysis:
     if [c["claim_ref"] for c in data["claims"]] != [c.claim_ref for c in manifest.claims]:
         return _contract("results.json claims do not match the manifest")
     not_started: list[int] = data.get("seeds_not_started", [])
-    problem = _not_started_problem(not_started, manifest)
+    problem = _not_started_problem(data, manifest)
     if problem is not None:
         return _contract(problem)
     allowed = set(manifest.seeds) - set(not_started)  # a seed never started has no value
