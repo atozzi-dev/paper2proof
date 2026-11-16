@@ -204,6 +204,15 @@ describe('Gallery', () => {
 })
 
 describe('About', () => {
+  it('says the seed count depends on time, never on the values', async () => {
+    mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: {} }) : undefined))
+    window.location.hash = '#/about'
+    render(<App />)
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('How we check a paper')
+    expect(document.body).toHaveTextContent('up to ten when the experiment is quick')
+    expect(document.body).toHaveTextContent('never on the values')
+  })
+
   it('names the models the roles really use', async () => {
     mockFetch((url) => (url === '/api/stats' ? json({ runs_by_verdict: {} }) : undefined))
     window.location.hash = '#/about'

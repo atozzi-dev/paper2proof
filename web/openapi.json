@@ -881,6 +881,14 @@
           "scale": {
             "$ref": "#/components/schemas/ScaleView"
           },
+          "seeds_not_started": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Seeds Not Started",
+            "type": "array"
+          },
           "seeds_planned": {
             "items": {
               "type": "integer"

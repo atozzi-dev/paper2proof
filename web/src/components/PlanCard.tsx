@@ -13,6 +13,15 @@ interface Props {
   level?: 2 | 3
 }
 
+const MIN_SEEDS = 3 // config/verdict.yaml min_seeds
+
+/** Past the minimum, the planned seeds are a ceiling: the runner starts each one only while it
+ * fits the time target (A-46). */
+function seedsText(seeds: number[]): string {
+  const list = seeds.join(', ')
+  return seeds.length > MIN_SEEDS ? `${list} (at least ${MIN_SEEDS}; the rest while time allows)` : list
+}
+
 export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: Props) {
   const headingId = useId()
   const Heading = level === 3 ? 'h3' : 'h2'
@@ -47,7 +56,7 @@ export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: 
         <dt>Scale</dt>
         <dd>{p.scale === 'FULL' ? 'Full, as in the paper' : 'Reduced (smaller than the paper)'}</dd>
         <dt>Seeds</dt>
-        <dd>{p.seeds.join(', ')}</dd>
+        <dd>{seedsText(p.seeds)}</dd>
         <dt>Claims tested</dt>
         <dd>{p.claim_ids.join(', ')}</dd>
         <dt>Estimated compute time</dt>

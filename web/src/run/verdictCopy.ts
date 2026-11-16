@@ -150,8 +150,14 @@ export function verdictConditions(
   out.push({ label: 'Scale', value: scale ? scaleText(scale, c?.scale ?? null) : 'not reported yet' })
   const used = (claimId !== undefined ? c?.seeds_used_by_claim[claimId] : undefined) ?? c?.seeds_used ?? p?.seeds
   const planned = c?.seeds_planned ?? p?.seeds
+  // seeds the time target left out never ran: "of the planned" would read them as failures
+  const notStarted = c?.seeds_not_started ?? []
   let seeds = ''
-  if (used && planned && used.join() !== planned.join()) {
+  if (used && planned && notStarted.length) {
+    const ran = planned.filter((s) => !notStarted.includes(s))
+    const of = used.join() !== ran.join() ? ` of the ${ran.length} that ran` : ''
+    seeds = ` (seeds ${used.join(', ')}${of}; time target reached: ${notStarted.length} more not started)`
+  } else if (used && planned && used.join() !== planned.join()) {
     seeds = ` (seeds ${used.join(', ')} of the planned ${planned.join(', ')})`
   } else if (used) seeds = ` (seeds ${used.join(', ')})`
   out.push({ label: 'Seeds', value: `${verdict.n_seeds} seeds${seeds}` })

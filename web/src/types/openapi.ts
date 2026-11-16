@@ -511,6 +511,11 @@ export interface components {
             exit_reason: "completed" | "experiment_error" | "budget_timeout" | "contract_error" | "capacity";
             hardware: components["schemas"]["HardwareView"];
             scale: components["schemas"]["ScaleView"];
+            /**
+             * Seeds Not Started
+             * @default []
+             */
+            seeds_not_started: number[];
             /** Seeds Planned */
             seeds_planned: number[];
             /** Seeds Used */
