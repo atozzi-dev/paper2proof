@@ -758,3 +758,128 @@ def test_the_scan_stops_after_its_distribution_cap(
         _dist_info(tmp_path, f"p{i}-1.0.dist-info", f"Name: p{i}\nVersion: 1.0\n".encode())
     packages, truncated = entrypoint.installed_packages([tmp_path])
     assert len(packages) == 2 and truncated
+
+
+# --- seeds from time (A-46) --------------------------------------------------------------
+
+TEN = list(range(10))
+TARGET = {"seeds": TEN, "min_seeds": 3, "target_seconds": 600}
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "longest", "target", "budget", "fits"),
+    [
+        (60.0, 20.0, 600.0, 1500.0, True),  # 20 s seeds: 60 + 25 + 10 = 95
+        (400.0, 100.0, 600.0, 1500.0, True),  # 400 + 125 + 10 = 535
+        (465.0, 100.0, 600.0, 1500.0, True),  # exactly 600
+        (466.0, 100.0, 600.0, 1500.0, False),
+        (500.0, 100.0, 600.0, 1500.0, False),  # 635: five 100 s seeds, then stop
+        (1200.0, 400.0, 600.0, 1500.0, False),  # the minimum alone was over the target
+        (60.0, 20.0, 600.0, 90.0, False),  # the budget is the tighter limit
+    ],
+)
+def test_the_next_seed_starts_only_if_it_should_end_in_time(
+    elapsed: float, longest: float, target: float, budget: float, fits: bool
+) -> None:
+    assert entrypoint.may_start_next(elapsed, longest, target, budget) is fits
+
+
+def _ran(data: dict[str, Any]) -> list[list[int]]:
+    """The seeds in every per_seed list (claims and baselines)."""
+    out = []
+    for claim in data["claims"]:
+        out.append([s["seed"] for s in claim["per_seed"]])
+        if claim["baseline"] is not None:
+            out.append([s["seed"] for s in claim["baseline"]["per_seed"]])
+    return out
+
+
+def test_the_stdlib_validator_accepts_a_time_target() -> None:
+    entrypoint.validate({**_fixture("manifest_valid.json"), **TARGET})
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"min_seeds": 3},
+        {"target_seconds": 600},
+        {"min_seeds": 4, "target_seconds": 600},
+        {"min_seeds": 0, "target_seconds": 600},
+        {"min_seeds": True, "target_seconds": 600},
+        {"min_seeds": 3, "target_seconds": 59},
+        {"min_seeds": 3, "target_seconds": 1801},
+        {"min_seeds": 3, "target_seconds": 600.0},
+    ],
+)
+def test_an_invalid_time_target_is_a_contract_error(tmp_path: Path, extra: dict[str, Any]) -> None:
+    manifest, _ = _setup(tmp_path, **extra)  # three seeds
+    assert _run(manifest, tmp_path) == 30
+
+
+def test_without_a_time_target_every_seed_runs_as_before(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, seeds=[0, 1, 2, 3])
+    assert _run(manifest, tmp_path, target_override_s=0.001) == 0  # no rule to apply
+    data = _results(results)
+    assert _ran(data) == [[0, 1, 2, 3]] * 2
+    assert data["exit_reason"] == "completed" and data["seeds_not_started"] == []
+
+
+def test_quick_seeds_all_run_within_the_time_target(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, **TARGET)
+    assert _run(manifest, tmp_path) == 0
+    data = _results(results)
+    assert _ran(data) == [TEN] * 2
+    assert data["exit_reason"] == "completed" and data["seeds_not_started"] == []
+
+
+def test_past_the_time_target_the_minimum_runs_and_the_job_completes(tmp_path: Path) -> None:
+    """Seeds the rule leaves out never ran: they are not in per_seed (not failed seeds) but
+    in seeds_not_started, and the job is complete, not a budget timeout."""
+    manifest, results = _setup(tmp_path, **TARGET)
+    assert _run(manifest, tmp_path, target_override_s=0.001) == 0
+    data = _results(results)
+    assert _ran(data) == [[0, 1, 2]] * 2
+    assert data["seeds_not_started"] == list(range(3, 10))
+    assert data["exit_reason"] == "completed"
+    assert (results / "stdout.log").read_text().count("training seed") == 3
+
+
+def test_the_values_never_decide_how_many_seeds_run(tmp_path: Path) -> None:
+    """Same clock, other values (good, a failed seed, non-finite): the same seeds run."""
+    seen = []
+    for mode in ("ok", "fail", "nan"):
+        manifest, results = _setup(tmp_path / mode, mode=mode, **TARGET)
+        _run(manifest, tmp_path / mode, target_override_s=0.001)
+        data = _results(results)
+        seen.append(([s["seed"] for s in data["claims"][0]["per_seed"]], data["seeds_not_started"]))
+    assert seen == [([0, 1, 2], list(range(3, 10)))] * 3
+
+
+def test_the_minimum_still_answers_to_the_budget(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, mode="slow", budget=60, **TARGET)
+    assert _run(manifest, tmp_path, budget_override_s=1.0, kill_grace_s=0.5) == 20
+    data = _results(results)
+    assert data["exit_reason"] == "budget_timeout" and data["seeds_not_started"] == []
+
+
+def test_a_replay_runs_exactly_the_seeds_that_ran(tmp_path: Path) -> None:
+    manifest, results = _setup(tmp_path, **TARGET)
+    code = _run(manifest, tmp_path, only_seeds=[0, 1, 2, 3], target_override_s=0.001)
+    assert code == 0
+    data = _results(results)
+    assert _ran(data) == [[0, 1, 2, 3]] * 2  # four, the time rule off
+    assert data["seeds_not_started"] == list(range(4, 10))
+    assert data["exit_reason"] == "completed"
+
+
+@pytest.mark.parametrize("only", [[], [1], [0, 0], [0, 2], [0, 99], [*TEN, 10]])
+def test_replay_seeds_must_start_the_manifest_seeds(tmp_path: Path, only: list[int]) -> None:
+    manifest, _ = _setup(tmp_path, **TARGET)
+    assert _run(manifest, tmp_path, only_seeds=only) == 30
+
+
+def test_replay_seeds_are_parsed_strictly() -> None:
+    assert entrypoint.parse_seeds("0,1,2") == [0, 1, 2]
+    for text in ("", "0,,1", "a", "-1", "0, 1", "1" * 30, ",".join(["1"] * 21)):
+        with pytest.raises(entrypoint.ContractError):
+            entrypoint.parse_seeds(text)

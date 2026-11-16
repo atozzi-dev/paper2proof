@@ -6,7 +6,10 @@
    else on the shared bucket is run or imported.
 3. Run the experiment script once per seed, in its own process group, within the remaining
    budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); whatever the seed left
-   behind is killed before the next one starts.
+   behind is killed before the next one starts. With `min_seeds` and `target_seconds`, a seed
+   after the minimum starts only if it should end in time (`may_start_next`: the clock only,
+   never a measured value); the rest are `seeds_not_started`. `--seeds` (a replay) runs
+   exactly those seeds, a prefix of the manifest's, without that rule.
 4. Rewrite results.json atomically after every seed; mirror the last 200 output lines to
    live.log every 10 s. SIGTERM to the runner writes partial results (budget_timeout).
 Exit codes: 0 completed, 10 experiment error, 20 budget timeout, 30 contract error.
@@ -59,6 +62,12 @@ MANIFEST_KEYS = {
     "schema", "run_id", "attempt", "image_digest", "entrypoint", "args", "seeds", "budget_seconds",
     "paths", "claims", "scale", "archives", "workspace_sha256",
 }  # fmt: skip
+TIME_KEYS = {"min_seeds", "target_seconds"}  # optional, both or neither (A-46)
+# The next seed may run a little longer than the longest so far; the margin covers starting
+# the process, reading its metrics and writing results.json.
+SEED_TIME_FACTOR = 1.25
+SEED_START_MARGIN_S = 10.0
+SEEDS_ARG = re.compile(r"[0-9]{1,9}(?:,[0-9]{1,9}){0,19}")
 CLAIM_KEYS = {
     "claim_ref", "claim_type", "metric", "higher_is_better", "metric_key", "baseline_name",
     "baseline_key",
@@ -80,6 +89,20 @@ class ContractError(Exception):
 
 class Terminated(BaseException):
     """SIGTERM from the platform (watchdog or cancel): stop and write what we have."""
+
+
+def may_start_next(elapsed_s: float, longest_s: float, target_s: float, budget_s: float) -> bool:
+    """Whether a seed after the minimum should end in time. Elapsed time only: no measured
+    value ever decides how many seeds run (verdict-engine.md, "How many seeds")."""
+    expected_end = elapsed_s + SEED_TIME_FACTOR * longest_s + SEED_START_MARGIN_S
+    return expected_end <= min(target_s, budget_s)
+
+
+def parse_seeds(text: str) -> list[int]:
+    """`--seeds 0,1,2` (reproduce.sh): at most 20 plain integers, nothing else."""
+    if not SEEDS_ARG.fullmatch(text):
+        raise ContractError("invalid --seeds")
+    return [int(s) for s in text.split(",")]
 
 
 def validate(manifest: Any) -> dict[str, Any]:
@@ -113,7 +136,10 @@ def _validate(manifest: Any) -> dict[str, Any]:
         if not ok:
             raise ContractError(f"invalid manifest: {what}")
 
-    need(isinstance(manifest, dict) and set(manifest) == MANIFEST_KEYS, "keys")
+    need(
+        isinstance(manifest, dict) and MANIFEST_KEYS <= set(manifest) <= MANIFEST_KEYS | TIME_KEYS,
+        "keys",
+    )
     m: dict[str, Any] = manifest
     need(m["schema"] == "p2p.manifest/v2", "schema")
     need(isinstance(m["run_id"], str) and bool(RUN_ID.fullmatch(m["run_id"])), "run_id")
@@ -141,6 +167,14 @@ def _validate(manifest: Any) -> dict[str, Any]:
         "seeds",
     )  # fmt: skip
     need(type(m["budget_seconds"]) is int and 60 <= m["budget_seconds"] <= 1800, "budget_seconds")
+    timed = TIME_KEYS & set(m)
+    need(timed in (set(), TIME_KEYS), "min_seeds and target_seconds go together")
+    if timed:
+        need(type(m["min_seeds"]) is int and 1 <= m["min_seeds"] <= len(seeds), "min_seeds")
+        need(
+            type(m["target_seconds"]) is int and 60 <= m["target_seconds"] <= 1800,
+            "target_seconds",
+        )
     paths = m["paths"]
     need(isinstance(paths, dict) and set(paths) == PATH_KEYS, "paths")
     need(all(isinstance(paths[k], str) for k in PATH_KEYS - {"repo"}), "paths")
@@ -579,12 +613,20 @@ def run(
     on_flush: Callable[[str], None] | None = None,
     on_seed: Callable[[int], None] | None = None,
     budget_override_s: float | None = None,
+    target_override_s: float | None = None,
+    only_seeds: list[int] | None = None,
     kill_grace_s: float = 30.0,
     log_cap_chars: int = LOG_CAP_CHARS,
 ) -> int:
+    """`only_seeds` (a replay, `--seeds`): exactly those seeds, a prefix of the manifest's,
+    without the time rule."""
     started = time.monotonic()
     try:
         manifest = validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+        if only_seeds is not None and (
+            not only_seeds or only_seeds != manifest["seeds"][: len(only_seeds)]
+        ):
+            raise ContractError("--seeds must be a prefix of the manifest's seeds")
     except (OSError, ValueError, RecursionError, ContractError) as err:
         print(f"CONTRACT ERROR: {err}", file=sys.stderr)
         return EXIT_CONTRACT
@@ -592,6 +634,9 @@ def run(
     results = Path(paths["results"])
     results.mkdir(parents=True, exist_ok=True)
     claims = manifest["claims"]
+    to_run: list[int] = manifest["seeds"] if only_seeds is None else only_seeds
+    # Seeds never started: a replay's tail now, the time rule's tail once it stops the loop.
+    not_started: list[int] = manifest["seeds"][len(to_run) :]
     seeds_done: list[int] = []
     values: dict[str, list[dict[str, Any]]] = {c["claim_ref"]: [] for c in claims}
     baselines: dict[str, list[dict[str, Any]]] = {c["claim_ref"]: [] for c in claims}
@@ -600,7 +645,7 @@ def run(
     def padded(entries: list[dict[str, Any]], empty: dict[str, Any]) -> list[dict[str, Any]]:
         """Each list padded from its own seeds: a SIGTERM between two claims of one seed
         leaves the lists uneven, and a seed must never appear twice."""
-        done = {e["seed"] for e in entries}
+        done = {e["seed"] for e in entries} | set(not_started)  # never run, so never failed
         return entries + [{"seed": s, **empty} for s in manifest["seeds"] if s not in done]
 
     def claim_results(claim: dict[str, Any]) -> dict[str, Any]:
@@ -633,6 +678,7 @@ def run(
             "wall_clock_s": round(time.monotonic() - started, 3),
             "gpu": gpu,
             "exit_reason": REASONS[status],
+            "seeds_not_started": list(not_started),
         }
         tmp = results / "results.json.tmp"
         tmp.write_text(json.dumps(report, indent=1), encoding="utf-8")
@@ -678,6 +724,13 @@ def run(
     budget = float(
         budget_override_s if budget_override_s is not None else manifest["budget_seconds"]
     )
+    timed = only_seeds is None and "min_seeds" in manifest
+    if timed:
+        minimum = manifest["min_seeds"]
+        target = float(
+            target_override_s if target_override_s is not None else manifest["target_seconds"]
+        )
+    longest = 0.0  # the longest seed so far, in seconds: the time rule's only input
     status = EXIT_OK
     # Logs go to local disk while running (the mount is slow) and are copied at the end.
     with (
@@ -687,9 +740,17 @@ def run(
     ):
         out, err = CappedLog(out_file, log_cap_chars), CappedLog(err_file, log_cap_chars)
         try:
-            for seed in manifest["seeds"]:
-                remaining = budget - (time.monotonic() - started)
+            for index, seed in enumerate(to_run):
+                elapsed = time.monotonic() - started
+                remaining = budget - elapsed
                 seed_dir = results / "seeds" / str(seed)
+                if (
+                    timed
+                    and index >= minimum
+                    and not may_start_next(elapsed, longest, target, budget)
+                ):
+                    not_started[:0] = to_run[index:]  # before a replay's tail (none here)
+                    break
                 if remaining <= 0:
                     status = EXIT_BUDGET
                     break
@@ -698,10 +759,12 @@ def run(
                     sys.executable, str(script), "--seed", str(seed), "--out", str(seed_dir),
                     *manifest["args"],
                 ]  # fmt: skip
+                seed_started = time.monotonic()
                 code, timed_out = run_seed(
                     argv, env=env, cwd=run_dir, budget_s=remaining, kill_grace_s=kill_grace_s,
                     stdout=out, stderr=err, live=live,
                 )  # fmt: skip
+                longest = max(longest, time.monotonic() - seed_started)
                 metrics = _read_metrics(seed_dir / "metrics.json") if code == 0 else None
                 measured = False
                 for claim in claims:
@@ -727,8 +790,8 @@ def run(
         except Terminated:
             status = EXIT_BUDGET
             print("TERMINATED: writing partial results", file=sys.stderr)
-    if status == EXIT_OK and len(seeds_done) < len(manifest["seeds"]):
-        status = EXIT_BUDGET
+    if status == EXIT_OK and len(seeds_done) + len(not_started) < len(manifest["seeds"]):
+        status = EXIT_BUDGET  # a seed the budget never reached (or cut): not the time rule
     write_results(status)
     for name in ("stdout.log", "stderr.log"):
         shutil.copyfile(logs / name, results / name)
@@ -758,6 +821,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - exerci
     parser.add_argument("--manifest", default="/etc/p2p/manifest.json")
     parser.add_argument("--work", default="/work")
     parser.add_argument("--smoke-manifest", default="/etc/p2p/smoke.json")
+    parser.add_argument("--seeds", default=None, help="a replay: exactly these seeds")
     args = parser.parse_args(argv)
     signal.signal(signal.SIGTERM, _on_sigterm)
     if Path(args.smoke_manifest).is_file():  # CPU smoke job (same image, execution-contracts §8)
@@ -765,7 +829,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - exerci
         import smoke
 
         return smoke.run(Path(args.smoke_manifest), mnt=Path("/mnt/run"), work=Path(args.work))
-    return run(Path(args.manifest), work=Path(args.work))
+    try:
+        only = parse_seeds(args.seeds) if args.seeds is not None else None
+    except ContractError as err:
+        print(f"CONTRACT ERROR: {err}", file=sys.stderr)
+        return EXIT_CONTRACT
+    return run(Path(args.manifest), work=Path(args.work), only_seeds=only)
 
 
 if __name__ == "__main__":  # pragma: no cover
