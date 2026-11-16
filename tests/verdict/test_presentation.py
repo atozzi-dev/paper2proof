@@ -71,6 +71,33 @@ def test_full_scale_limitations_are_short() -> None:
 
 
 @pytest.mark.parametrize(
+    ("not_started", "line"),
+    [
+        (
+            [7, 8, 9],
+            "6 of the 7 seeds that ran produced usable values; 3 more were not started: the "
+            "time target was reached (the seed count depends on run time only, never on the "
+            "values).",
+        ),
+        (
+            [9],
+            "6 of the 9 seeds that ran produced usable values; 1 more was not started: the "
+            "time target was reached (the seed count depends on run time only, never on the "
+            "values).",
+        ),
+    ],
+)
+def test_seeds_not_started_are_not_failed_seeds(not_started: list[int], line: str) -> None:
+    """A-46: "6 of 10 planned seeds" would read as four failures."""
+    text = limitations(
+        scale=ScaleSpec(full=True), planned_seeds=list(range(10)), used_seeds=list(range(6)),
+        gpu="cpu", exit_reason="completed", deviations=[], not_started=not_started,
+    )  # fmt: skip
+    assert f"- {line}" in text.splitlines()
+    assert "planned seeds" not in text
+
+
+@pytest.mark.parametrize(
     ("kind", "text", "bad"),
     [
         (VerdictKind.NOT_REPRODUCED, "The claim was REPRODUCED in our run.", True),

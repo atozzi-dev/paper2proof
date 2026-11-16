@@ -25,6 +25,19 @@ _EXIT = {
 SANDBOX_PLATFORM = "sandbox"  # app/execution/sandbox_jobs.py (Token Factory Sandboxes)
 
 
+def _seeds_line(used: int, planned: int, not_started: int) -> str:
+    """Seeds the time rule left out are not failures (A-46): "6 of 10 planned seeds" would read
+    as four of them."""
+    if not not_started:
+        return f"{used} of {planned} planned seeds produced usable values."
+    more = "1 more was" if not_started == 1 else f"{not_started} more were"
+    return (
+        f"{used} of the {planned - not_started} seeds that ran produced usable values; {more} "
+        "not started: the time target was reached (the seed count depends on run time only, "
+        "never on the values)."
+    )
+
+
 def limitations(
     *,
     scale: ScaleSpec,
@@ -40,6 +53,7 @@ def limitations(
     measurements: Measurements | None = None,
     stand_in_flags: list[str] | None = None,
     setup: Sequence[SetupRecord] = (),
+    not_started: Sequence[int] = (),
 ) -> str:
     """`gpu` is what the job reported (results.json: "cpu" without a GPU); `platform` and
     `preset` are where EXECUTING submitted it (None for runs recorded before they were kept).
@@ -67,7 +81,7 @@ def limitations(
             "Not measured: the experiment does not measure this claim"
             + (f" (the Coder's reason, model text: {why})." if why else ".")
         )
-    lines.append(f"{len(used_seeds)} of {len(planned_seeds)} planned seeds produced usable values.")
+    lines.append(_seeds_line(len(used_seeds), len(planned_seeds), len(not_started)))
     same = _same_on_every_seed(measurements)
     if same:
         lines.append(same)

@@ -10,7 +10,7 @@ import pytest
 
 from app.domain.contracts import ExecManifest
 from app.domain.models import Scale
-from app.verdict.results import MAX_RESULTS_BYTES, analyze_results, no_results
+from app.verdict.results import MAX_RESULTS_BYTES, Analysis, analyze_results, no_results
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
 
@@ -171,3 +171,57 @@ def test_no_results_means_no_seeds_for_any_claim_with_the_reported_ending() -> N
 def test_the_gpu_name_is_shown_only_when_plain(gpu: str, shown: str) -> None:
     analysis = analyze_results(_raw(_results(gpu=gpu)), _manifest())
     assert analysis.gpu == shown
+
+
+# --- seeds the time rule left out (A-46) ---------------------------------------------------
+
+
+def _timed(ran: int = 7, not_started: list[int] | None = None) -> tuple[bytes, ExecManifest]:
+    """A manifest of ten seeds with the time rule, and results where the first `ran` ran."""
+    raw = json.loads((FIXTURES / "manifest_valid.json").read_text(encoding="utf-8"))
+    manifest = ExecManifest.model_validate(
+        {**raw, "seeds": list(range(10)), "min_seeds": 3, "target_seconds": 600}
+    )
+    data = _results(exit_reason="completed")
+    for claim in data["claims"]:
+        claim["per_seed"] = [{"seed": s, "value": 0.9, "ok": True} for s in range(ran)]
+        if claim["baseline"] is not None:
+            claim["baseline"]["per_seed"] = [{"seed": s, "value": 0.8} for s in range(ran)]
+    data["seeds_not_started"] = list(range(ran, 10)) if not_started is None else not_started
+    return _raw(data), manifest
+
+
+def test_seeds_the_time_rule_left_out_are_kept_apart() -> None:
+    raw, manifest = _timed()
+    analysis = analyze_results(raw, manifest)
+    assert analysis.exit_reason == "completed"
+    assert analysis.seeds_not_started == [7, 8, 9]
+    assert analysis.used_seeds == list(range(7))
+
+
+@pytest.mark.parametrize(
+    ("ran", "not_started"),
+    [
+        (7, [9, 8, 7]),  # not in the manifest's order
+        (7, [7, 9]),  # not the tail
+        (2, list(range(2, 10))),  # fewer than min_seeds ran: a timeout, not the rule
+        (7, [6, 7, 8, 9]),  # seed 6 ran
+    ],
+    ids=["order", "not-a-tail", "under-the-minimum", "ran"],
+)
+def test_failed_seeds_cannot_pass_as_seeds_not_started(ran: int, not_started: list[int]) -> None:
+    raw, manifest = _timed(ran, not_started)
+    analysis = analyze_results(raw, manifest)
+    assert analysis.exit_reason == "contract_error" and analysis.claims == {}
+
+
+def test_without_a_time_target_no_seed_can_be_not_started() -> None:
+    data = _results(exit_reason="completed", seeds_not_started=[2])
+    analysis = analyze_results(_raw(data), _manifest())
+    assert analysis.exit_reason == "contract_error"
+
+
+def test_an_analysis_from_before_the_time_rule_still_loads() -> None:
+    old = no_results(_manifest(), "budget_timeout").model_dump(mode="json")
+    old.pop("seeds_not_started")
+    assert Analysis.model_validate(old).seeds_not_started == []

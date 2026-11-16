@@ -43,6 +43,8 @@ class Analysis(BaseModel):
     wall_clock_s: float | None = None
     gpu: str | None = None
     problem: str | None = None
+    # the manifest's tail the time rule left out (A-46): never run, so never failed
+    seeds_not_started: list[int] = []
 
     @property
     def used_seeds(self) -> list[int]:
@@ -68,6 +70,20 @@ def _seeds_ok(entries: list[dict[str, Any]], allowed: set[int]) -> bool:
     return len(seeds) == len(set(seeds)) and set(seeds) <= allowed
 
 
+def _not_started_problem(seeds: list[int], manifest: ExecManifest) -> str | None:
+    """Only the time rule leaves seeds out, and only the manifest's tail after the minimum: a
+    job cannot pass failed seeds off as seeds it never started."""
+    if not seeds:
+        return None
+    if manifest.min_seeds is None:
+        return "results.json lists seeds not started without a time target"
+    if len(seeds) > len(manifest.seeds) - manifest.min_seeds:
+        return "results.json lists more seeds not started than the time rule allows"
+    if seeds != manifest.seeds[-len(seeds) :]:
+        return "results.json seeds not started are not the tail of the manifest's seeds"
+    return None
+
+
 def analyze_results(raw: bytes, manifest: ExecManifest) -> Analysis:
     if len(raw) > MAX_RESULTS_BYTES:
         return _contract("results.json is larger than 256 KiB")
@@ -86,9 +102,14 @@ def analyze_results(raw: bytes, manifest: ExecManifest) -> Analysis:
         return _contract("results.json scale does not match the manifest")
     if [c["claim_ref"] for c in data["claims"]] != [c.claim_ref for c in manifest.claims]:
         return _contract("results.json claims do not match the manifest")
+    not_started: list[int] = data.get("seeds_not_started", [])
+    problem = _not_started_problem(not_started, manifest)
+    if problem is not None:
+        return _contract(problem)
+    allowed = set(manifest.seeds) - set(not_started)  # a seed never started has no value
     claims: dict[str, ClaimAnalysis] = {}
     for spec, entry in zip(manifest.claims, data["claims"], strict=True):
-        analysed = _claim(spec, entry, set(manifest.seeds), manifest.scale.full)
+        analysed = _claim(spec, entry, allowed, manifest.scale.full)
         if isinstance(analysed, str):
             return _contract(f"results.json claim {spec.claim_ref}: {analysed}")
         claims[spec.claim_ref] = analysed
@@ -97,6 +118,7 @@ def analyze_results(raw: bytes, manifest: ExecManifest) -> Analysis:
         claims=claims,
         wall_clock_s=float(data["wall_clock_s"]),
         gpu=data["gpu"] if _GPU.fullmatch(data["gpu"]) else "unknown",
+        seeds_not_started=not_started,
     )
 
 
@@ -122,7 +144,7 @@ def _claim(
     if not _seeds_ok(entry["per_seed"], allowed) or (
         relative and not _seeds_ok(baseline["per_seed"], allowed)
     ):
-        return "seeds are duplicated or not in the manifest"
+        return "seeds are duplicated, not in the manifest or listed as not started"
     try:  # a JSON integer can be too large for a float: the runner never writes one
         values = {
             e["seed"]: float(e["value"])

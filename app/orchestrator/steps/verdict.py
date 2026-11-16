@@ -249,6 +249,7 @@ class VerdictStep:
             measurements=measurements if measured is not None else None,
             stand_in_flags=flags,
             setup=setup,
+            not_started=analysis.seeds_not_started,
         )
         text = None  # unmeasured: nothing to explain beyond the code's own reason
         if measured is not None:

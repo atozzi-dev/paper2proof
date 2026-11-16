@@ -42,6 +42,8 @@ class RunConditions(BaseModel):
     seeds_planned: list[int]
     seeds_used: list[int]  # seeds that gave at least one claim a value
     seeds_used_by_claim: dict[str, list[int]]  # by claim id: a seed may fail one claim only
+    # the planned seeds the time rule left out (A-46): never run, so never failed
+    seeds_not_started: list[int] = []
     hardware: HardwareView
     code: PlanMode | None  # None when the plan can't be read
     deviations: list[str]  # deviations from the paper recorded in the plan
@@ -126,6 +128,7 @@ async def _conditions(store: Store, artifacts: ArtifactStore, run_id: str) -> Ru
         seeds_planned=manifest.seeds,
         seeds_used=analysis.used_seeds,
         seeds_used_by_claim={ref: c.used_seeds for ref, c in analysis.claims.items()},
+        seeds_not_started=analysis.seeds_not_started,
         hardware=HardwareView(
             platform=hardware.platform if hardware else None,
             preset=hardware.preset if hardware else None,

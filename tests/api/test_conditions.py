@@ -134,6 +134,7 @@ async def test_the_run_view_carries_the_conditions_of_its_verdict(
         "seeds_planned": [0, 1, 2],
         "seeds_used": [0, 1],
         "seeds_used_by_claim": {"c1": [0, 1], "c2": [0]},
+        "seeds_not_started": [],
         "hardware": {**GPU, "gpu": "NVIDIA L40S"},
         "code": "FROM_SCRATCH",
         "deviations": ["Smaller model than the paper."],
@@ -141,6 +142,19 @@ async def test_the_run_view_carries_the_conditions_of_its_verdict(
         "exit_reason": "completed",
     }
     assert "runs/" not in json.dumps(body)  # storage keys stay internal
+
+
+async def test_the_conditions_carry_the_seeds_the_time_rule_left_out(
+    client: httpx.AsyncClient, store: Store, artifacts: LocalArtifactStore
+) -> None:
+    run_id = await _run(client)
+    await _store_run(store, artifacts, run_id, hardware=GPU)
+    key = f"runs/{run_id}/analysis_1.json"
+    stored = artifacts.get_json(key)
+    stored["analysis"]["seeds_not_started"] = [2]  # checked against the manifest at ANALYZING
+    artifacts.put_json(key, stored)
+    body = (await client.get(f"/api/runs/{run_id}")).json()
+    assert body["conditions"]["seeds_not_started"] == [2]
 
 
 async def test_no_conditions_before_the_results_are_analyzed(
