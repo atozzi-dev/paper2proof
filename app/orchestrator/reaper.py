@@ -182,8 +182,9 @@ class Reaper:
             return
         if record is not None and record.deadline is not None:
             deadline = _aware(record.deadline)
-        else:  # submitted before a crash, never recorded
-            deadline = _aware(created) + FALLBACK_WATCHDOG
+        else:  # submitted before a crash, never recorded: an exec job may run the longest
+            watchdog = PLATFORM_TIMEOUT - JOB_GRACE if kind == "exec" else FALLBACK_WATCHDOG
+            deadline = _aware(created) + watchdog
         if now > deadline + JOB_GRACE:
             await self._cancel(handle, "job_cancelled_overdue", actions)
 

@@ -767,7 +767,10 @@ def test_with_auto_both_runners_must_know_the_time_target(
     (settings.config_dir / "runner_images.yaml").write_text(
         f"time_target:\n  - sha256:{listed * 64}\n", encoding="utf-8"
     )
-    with pytest.raises(main.ConfigError, match=rf"sha256:{missing}{{64}} .*runner_images\.yaml"):
+    variable = "P2P_RUNNER_IMAGE" if missing == "b" else "P2P_RUNNER_CPU_IMAGE"
+    with pytest.raises(
+        main.ConfigError, match=rf"{variable} sha256:{missing}{{64}} .*runner_images"
+    ):
         main.prod_adapters(settings)
 
 
@@ -789,3 +792,13 @@ def test_planning_targets_follow_the_exec_backend(
     assert planning_targets(sandboxes) == PlanTargets(cpu=cpu, gpu=None)
     assert planning_targets(auto) == PlanTargets(cpu=cpu, gpu=l40s)
     assert planning_targets(gpu) == PlanTargets(cpu=None, gpu=l40s)
+
+
+def test_auto_refuses_the_cpu_runner_as_its_gpu_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Minor 8: an L40S paid to run CPU torch."""
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    cpu = "cr.example/p2p-runner-cpu@sha256:" + "c" * 64
+    with pytest.raises(main.ConfigError, match=r"P2P_RUNNER_IMAGE .*P2P_RUNNER_CPU_IMAGE"):
+        main.prod_adapters(_auto(tmp_path, monkeypatch, p2p_runner_image=cpu))

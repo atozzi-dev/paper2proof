@@ -1525,3 +1525,22 @@ async def test_a_resumed_coder_after_the_fallback_keeps_its_count(
     with pytest.raises(P2PError) as err:
         await step.run(ctx)
     assert err.value.code is ErrorCode.SMOKE_EXHAUSTED
+
+
+async def test_a_coder_resumed_after_the_fallback_is_not_told_of_a_package_request(
+    store: Store, tmp_path: Path
+) -> None:
+    """Minor 3: the last return to PROVISIONING was the fallback's, not a package request."""
+    ctx, artifacts = await _setup(store, tmp_path, provisioning_attempts=2)
+    await _fell_back(artifacts, fallback_seen=True)
+    artifacts.put_json(
+        f"runs/{RUN}/workspace.json",
+        {"files": {}, "smoke_runs": 0, "searches": 0, "fallback": True},
+    )
+    artifacts.put_json(f"runs/{RUN}/fallback_provisioned.json", {"attempt": 2})
+    step, models = _step(
+        "planted_bug", artifacts, FakeSmokeExecutor([FAIL, PASS]), FakeRunStorage()
+    )
+    await step.run(ctx)
+    _, first = models.requests[0]
+    assert not any("provisioned again" in str(m.content) for m in first)

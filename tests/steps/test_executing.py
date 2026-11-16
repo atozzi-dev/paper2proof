@@ -1388,3 +1388,49 @@ async def test_our_own_cancel_of_a_queued_gpu_job_never_marks_it_as_started(
     )
     await _fell_back_with(store, result, artifacts, FallbackReason.QUEUE_TIMEOUT)
     assert marked == []
+
+
+async def test_no_fallback_when_the_cpu_plan_would_have_no_time_left(
+    store: Store, tmp_path: Path
+) -> None:
+    """Minor 1: the run's experiment minutes are nearly spent: re-provisioning and a Coder pass
+    for a CPU attempt that can't run would only cost; the run ends without capacity, as before."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    used = ctx.limits.per_run.cpu_minutes - 2
+    spent = await ctx.budget.check_and_reserve(RUN, SpendKind.GPU_MINUTES, used)
+    await ctx.budget.commit(spent, used)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    backend.no_capacity = {"gpu-l40s-a": 99, "gpu-l40s-d": 99}
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING and result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["exit_reason"] == "capacity"
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+async def test_no_capacity_warning_when_no_gpu_job_was_ever_requested(
+    store: Store, tmp_path: Path
+) -> None:
+    """Minor 2: the window ended before any try (an outage between the window file and the
+    first create): no claim about a platform's capacity."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    artifacts.put_json(WINDOW_KEY, {"started_at": NOW.isoformat()})
+    clock = FakeClock()
+    clock.t = 700.0
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.NO_CAPACITY)
+    codes = [p.code for p in await _events(store) if isinstance(p, WarningPayload)]
+    assert "NO_GPU_CAPACITY" not in codes and backend.specs == []
+
+
+async def test_the_execution_record_names_the_runner_the_job_ran(
+    store: Store, tmp_path: Path
+) -> None:
+    """Minor 9: the bundle reads the runner from here, not from the deploy of the day."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    storage.objects[(RUN, "results/1/results.json")] = _results(1)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["runner_image"] == DIGEST.format("p2p-runner")

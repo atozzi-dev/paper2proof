@@ -67,10 +67,10 @@ class PerRunLimits(_Strict):
     tokens_out: int = Field(gt=0)
     inference_usd: float = Field(gt=0)
     gpu_minutes: float = Field(gt=0)  # a GPU run's experiment minutes (and the ledger's cap)
-    cpu_minutes: float = Field(gt=0)  # a CPU (Sandboxes) run's experiment minutes (A-47)
-    gpu_wait_s: int = Field(
-        ge=60, le=1200
-    )  # <= the platform timeout's queue allowance  # a GPU job not running by then: CPU fallback
+    # a CPU (Sandboxes) run's experiment minutes (A-47); a Sandbox lives 60 min: watchdog + 2
+    cpu_minutes: float = Field(gt=0, le=53)
+    # a GPU job still queued by then falls back (at most the platform timeout's queue allowance)
+    gpu_wait_s: int = Field(ge=60, le=1200)
     gpu_when_cpu_estimate_over: float = Field(gt=0, le=1)  # of cpu_minutes: needs a GPU
     fix_iterations: int = Field(gt=0)
     package_requests: int = Field(ge=0)

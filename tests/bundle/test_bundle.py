@@ -462,3 +462,16 @@ async def test_a_run_that_never_fell_back_has_no_fallback_record(run: Run) -> No
     files = await _built(run)
     assert "gpu_fallback.json" not in files
     assert not any("gpu_fallback" in p for p in _manifest(files).get("omitted", {}))
+
+
+async def test_the_bundle_names_the_runner_the_execution_recorded(run: Run) -> None:
+    """Minor 9: a GPU run bundled after a rollback to Sandboxes still names the GPU runner."""
+    _judged_on(run, "gpu-l40s-a")
+    key = f"runs/{RUN}/execution_1.json"
+    execution = run.artifacts.get_json(key)
+    execution["runner_image"] = "registry.example/p2p/p2p-gpu-runner@sha256:" + "3" * 64
+    run.artifacts.put_json(key, execution)
+    files = await _built(run, runner_cpu_image=RUNNER_CPU)
+    assert _manifest(files)["images"] == {
+        "runner": "registry.example/p2p/p2p-gpu-runner@sha256:" + "0" * 64
+    }

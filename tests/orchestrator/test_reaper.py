@@ -133,8 +133,8 @@ async def test_cancels_a_job_past_its_recorded_deadline_plus_grace(world: World)
 
 
 async def test_unrecorded_job_gets_the_fallback_watchdog(world: World) -> None:
-    await world.run(RUN, RunStatus.RUNNING, StepName.EXECUTING)
-    handle = add_job(world.backend, JobKind.EXEC, RUN, JobState.RUNNING, NOW)
+    await world.run(RUN, RunStatus.RUNNING, StepName.PROVISIONING)
+    handle = add_job(world.backend, JobKind.PROVISION, RUN, JobState.RUNNING, NOW)
     world.clock.now = NOW + timedelta(minutes=54)  # 45 min fallback + 10 min grace
     await world.reaper.tick()
     assert world.backend.cancelled == []
@@ -608,3 +608,18 @@ def test_the_reaper_expects_the_longest_job_the_platform_may_run() -> None:
     from app.orchestrator.steps.executing import EXEC_MARGIN_S, MAX_BUDGET_S
 
     assert platform_timeout(MAX_BUDGET_S + EXEC_MARGIN_S) <= reaper.PLATFORM_TIMEOUT
+
+
+async def test_an_unrecorded_exec_job_may_run_as_long_as_the_platform_lets_it(
+    world: World,
+) -> None:
+    """Minor 10: a GPU exec job may queue 20 minutes and run 65 (A-47): never cancelled
+    before its own timeout while its run is active."""
+    await world.run(RUN, RunStatus.RUNNING, StepName.EXECUTING)
+    handle = add_job(world.backend, JobKind.EXEC, RUN, JobState.RUNNING, NOW)
+    world.clock.now = NOW + PLATFORM_TIMEOUT - timedelta(minutes=1)
+    await world.reaper.tick()
+    assert world.backend.cancelled == []
+    world.clock.now = NOW + PLATFORM_TIMEOUT + timedelta(minutes=1)
+    await world.reaper.tick()
+    assert world.backend.cancelled == [handle.name]

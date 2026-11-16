@@ -310,10 +310,12 @@ async def test_an_invite_without_gpu_runs_gets_no_gpu(store: Store) -> None:
 
 async def test_gpu_runs_are_counted_per_utc_day(store: Store) -> None:
     await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=1)
-    await _gpu_run(store)
-    assert await store.consume_gpu_run(RUN, GPU_DAY)
-    assert not await store.consume_gpu_run(RUN, GPU_DAY + timedelta(hours=1))
-    assert await store.consume_gpu_run(RUN, GPU_DAY + timedelta(days=1))
+    runs = [f"r_01jb7z000000000000000000{n}" for n in ("0a", "0b", "0c")]
+    for run_id in runs:
+        await _gpu_run(store, run_id)
+    assert await store.consume_gpu_run(runs[0], GPU_DAY)
+    assert not await store.consume_gpu_run(runs[1], GPU_DAY + timedelta(hours=1))
+    assert await store.consume_gpu_run(runs[2], GPU_DAY + timedelta(days=1))
 
 
 async def test_an_expired_invite_gets_no_gpu(store: Store) -> None:
@@ -348,3 +350,22 @@ async def test_the_gpu_quota_is_listed_with_the_invite(store: Store) -> None:
         1,
         GPU_DAY.date(),
     )
+
+
+async def test_a_run_takes_one_gpu_run_however_often_it_asks(store: Store) -> None:
+    """Minor 4: the grant is recorded on the run in the same transaction: a resumed PLANNING
+    gets it again, never a second one."""
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=2)
+    await _gpu_run(store)
+    assert await store.consume_gpu_run(RUN, GPU_DAY)
+    assert await store.consume_gpu_run(RUN, GPU_DAY)
+    [invite] = [i for i in await store.list_invites() if i.code_hash == GPU_INVITE]
+    assert invite.gpu_used_today == 1
+
+
+async def test_the_gpu_quota_of_a_run_s_invite(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=2)
+    await _gpu_run(store)
+    assert await store.gpu_quota(RUN) == 2
+    await _gpu_run(store, "r_01jb7z0000000000000000000c", invite=None)
+    assert await store.gpu_quota("r_01jb7z0000000000000000000c") == 0

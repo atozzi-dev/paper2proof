@@ -60,6 +60,8 @@ class Run(Base):
     error_code: Mapped[str | None] = mapped_column(String(32))
     created_by: Mapped[str | None] = mapped_column(String(64))  # the session that created it
     invite_hash: Mapped[str | None] = mapped_column(String(64))  # its invite's sha256 (A-47)
+    # it took one GPU run of its invite (A-47): a resumed PLANNING never takes a second
+    gpu_granted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     claim_hint: Mapped[str | None] = mapped_column(Text)
     budget_json: Mapped[dict[str, Any]]
     listed: Mapped[bool] = mapped_column(Boolean, default=False)  # public gallery (admin)

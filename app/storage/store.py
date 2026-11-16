@@ -875,11 +875,16 @@ class Store:
         today. The same two conditional UPDATEs as consume_invite: no read-modify-write race."""
         today = now.astimezone(UTC).date()
         async with self._session() as s, s.begin():
-            code_hash = await s.scalar(select(Run.invite_hash).where(Run.id == run_id))
-            if code_hash is None:
+            row = (
+                await s.execute(select(Run.invite_hash, Run.gpu_granted).where(Run.id == run_id))
+            ).first()
+            if row is None or row.invite_hash is None:
                 return False
+            if row.gpu_granted:  # taken before (a resumed PLANNING): never a second one
+                return True
+            code_hash = row.invite_hash
             valid = InviteRow.expires_at.is_(None) | (InviteRow.expires_at > now)
-            if await self._cas(
+            taken = await self._cas(
                 s,
                 update(InviteRow)
                 .where(
@@ -889,9 +894,7 @@ class Store:
                     InviteRow.gpu_runs_per_day >= 1,
                 )
                 .values(gpu_used_on=today, gpu_used_today=1),
-            ):
-                return True
-            return await self._cas(
+            ) or await self._cas(
                 s,
                 update(InviteRow)
                 .where(
@@ -902,6 +905,19 @@ class Store:
                 )
                 .values(gpu_used_today=InviteRow.gpu_used_today + 1),
             )
+            if taken:  # in the same transaction: the grant and its count go together
+                await s.execute(update(Run).where(Run.id == run_id).values(gpu_granted=True))
+            return taken
+
+    async def gpu_quota(self, run_id: str) -> int:
+        """The daily GPU runs of the run's invite; 0 without an invite (A-47)."""
+        async with self._session() as s:
+            quota = await s.scalar(
+                select(InviteRow.gpu_runs_per_day)
+                .join(Run, Run.invite_hash == InviteRow.code_hash)
+                .where(Run.id == run_id)
+            )
+            return int(quota or 0)
 
     async def set_paper_sha256(self, run_id: str, sha256: str) -> None:
         async with self._session() as s, s.begin():

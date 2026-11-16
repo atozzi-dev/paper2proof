@@ -306,6 +306,19 @@ class SmokeTestingStep:
         except FileNotFoundError:
             return _State(None)
 
+    async def _reprovisioned(self, ctx: RunContext) -> bool:
+        """Whether the last return to PROVISIONING was a package request: not the one the GPU
+        fallback started (A-47)."""
+        if ctx.attempt <= 1:
+            return False
+        steps = await ctx.store.get_steps(ctx.run_id)
+        latest = max((s.attempt for s in steps if s.name is StepName.PROVISIONING), default=1)
+        try:
+            done = await self._json(f"runs/{ctx.run_id}/fallback_provisioned.json")
+        except FileNotFoundError:
+            return True
+        return not (isinstance(done, dict) and done.get("attempt") == latest)
+
     async def _package_requests_so_far(self, ctx: RunContext) -> int:
         steps = await ctx.store.get_steps(ctx.run_id)
         attempts = [s.attempt for s in steps if s.name is StepName.PROVISIONING]
@@ -454,7 +467,7 @@ class SmokeTestingStep:
             ws,
             state,
             max_runs,
-            ctx.attempt > 1,
+            await self._reprovisioned(ctx),
             paper,
             excerpt,
             active.target,

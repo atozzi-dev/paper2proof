@@ -1,7 +1,7 @@
 """Admin helper for the running endpoint: invites, gallery curation, drain and kill switch.
 
 Usage (docs/OPERATIONS.md):
-    uv run python -m app.admin_cli [--url URL] invite create [--quota N] [--expires ISO]
+    uv run python -m app.admin_cli [--url URL] invite create [--quota N] [--expires ISO] [--gpu N]
     uv run python -m app.admin_cli invite list
     uv run python -m app.admin_cli invite revoke (--id HEX | --code-stdin)
     uv run python -m app.admin_cli runs [--listed | --unlisted] [--limit N]

@@ -279,17 +279,17 @@ def _check_runner(settings: Settings) -> None:
     the models were paid for: a stale digest stops the start instead (docs/DEPLOY.md, "When
     the runner changes")."""
     execution = execution_config(settings, prod=True)
-    images = [execution.runner_image]  # the one every manifest names
+    sandboxed = execution.exec_platform == SANDBOX_PLATFORM  # runner_image is runner-cpu
+    images = [(execution.runner_image, "P2P_RUNNER_CPU_IMAGE" if sandboxed else "P2P_RUNNER_IMAGE")]
     if execution.cpu_exec is not None:  # auto: a CPU target's manifests name runner-cpu
-        images.append(execution.runner_cpu_image)
-    for image in images:
+        images.append((execution.runner_cpu_image, "P2P_RUNNER_CPU_IMAGE"))
+    for image, variable in images:
         if not has_time_target(settings.config_dir / "runner_images.yaml", image):
             digest = image.rsplit("@", 1)[-1]
             raise ConfigError(
-                f"the exec runner {digest} (P2P_RUNNER_CPU_IMAGE with Sandboxes, else "
-                "P2P_RUNNER_IMAGE) predates the exec manifest's time target (A-46): rebuild "
-                "the runner from this commit and list its digest in config/runner_images.yaml "
-                "(docs/DEPLOY.md)"
+                f"the exec runner {variable} {digest} predates this control plane's manifests "
+                "(A-46, A-47): rebuild the runner from this commit and list its digest in "
+                "config/runner_images.yaml (docs/DEPLOY.md)"
             )
 
 
@@ -302,6 +302,11 @@ def _check_hybrid(settings: Settings) -> None:
     backend = exec_backend(settings)
     if backend == "auto" and settings.p2p_gpu_preemptible:  # a retry would double the GPU
         raise ConfigError("P2P_EXEC_BACKEND=auto needs P2P_GPU_PREEMPTIBLE=false")
+    if backend == "auto" and settings.p2p_runner_image == settings.p2p_runner_cpu_image:
+        raise ConfigError(  # an L40S paid to run CPU torch
+            "P2P_EXEC_BACKEND=auto: P2P_RUNNER_IMAGE must be the GPU runner, not "
+            "P2P_RUNNER_CPU_IMAGE"
+        )
     if backend in ("sandboxes", "auto"):  # auto: Sandboxes for CPU targets and smoke jobs
         name = f"P2P_EXEC_BACKEND={backend}"
         if settings.smoke_executor != "job":  # smoke jobs, in Sandboxes, with the overlay

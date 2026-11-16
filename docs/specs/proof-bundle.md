@@ -24,6 +24,7 @@ bundle/
 ├── paper/metadata.json              # arXiv ID, title, sha256 and kind of the source: never the PDF/LaTeX
 ├── claims.json                      # every extracted claim (+ `selected`), with its source reference
 ├── plan.json                        # the Planner's plan as approved
+├── gpu_fallback.json                # only when a GPU run ran its CPU plan: why (A-47)
 ├── env/provision_report.json        # validated provision report (archive digests, repo commit)
 ├── env/lock.txt                     # full install lock with hashes (checked against lock_sha256)
 ├── code/workspace.tar               # the exact workspace the GPU job ran (checked against workspace_sha256)

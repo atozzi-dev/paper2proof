@@ -195,8 +195,8 @@ conditions and Proof Bundle say why. A job already pulling its image or running 
 **What a hostile paper can do.** The two plan fields are the Planner's, read from paper text: a
 paper can push its CPU plan to `REDUCED` and so use up its invite's GPU run. That is bounded by
 the invite's `gpu_runs_per_day` (0 by default), the per-run caps and the owner's approval, and
-PLANNING takes at most one GPU run per run (`runs/<id>/gpu_granted.json`, kept across a
-restart). A script that kills its runner within one poll, writing nothing, looks like a platform
+PLANNING takes at most one GPU run per run (`runs.gpu_granted`, set in the same transaction
+as the invite's count, so a resumed PLANNING never takes a second). A script that kills its runner within one poll, writing nothing, looks like a platform
 failure and gets its one CPU fallback: a second execution within the same per-run caps (accepted).
 With `auto` GPU jobs run on demand only (`P2P_GPU_PREEMPTIBLE=false` is required), so
 `est_cost_max_usd` stays an upper bound; the fallback starts only on a creation the platform

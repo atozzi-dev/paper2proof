@@ -70,6 +70,7 @@ def test_the_gpu_policy_loads_with_the_per_run_limits() -> None:
     "change",
     [
         {"cpu_minutes": 0},
+        {"cpu_minutes": 54},  # a Sandbox runs 60 min
         {"gpu_wait_s": 59},
         {"gpu_wait_s": 1201},  # the queue allowance
         {"gpu_when_cpu_estimate_over": 0},

@@ -371,6 +371,9 @@ class Bundler:
         has both runners (auto, A-47); otherwise the one runner (its digest is the
         manifest's either way)."""
         execution = await self._artifact(f"{prefix}/execution_{attempt}.json")
+        recorded = execution.get("runner_image") if isinstance(execution, dict) else None
+        if isinstance(recorded, str) and re.fullmatch(DIGEST_REF, recorded):
+            return recorded  # what the job ran, whatever the deploy is now
         hardware = execution.get("hardware") if isinstance(execution, dict) else None
         platform = hardware.get("platform") if isinstance(hardware, dict) else None
         if platform == SANDBOX_PLATFORM and self._runner_cpu_image is not None:

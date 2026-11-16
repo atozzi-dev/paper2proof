@@ -31,10 +31,14 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("gpu_used_on", sa.Date(), nullable=True))
     with op.batch_alter_table("runs", schema=None) as batch_op:
         batch_op.add_column(sa.Column("invite_hash", sa.String(length=64), nullable=True))
+        batch_op.add_column(
+            sa.Column("gpu_granted", sa.Boolean(), nullable=False, server_default=sa.false())
+        )
 
 
 def downgrade() -> None:
     with op.batch_alter_table("runs", schema=None) as batch_op:
+        batch_op.drop_column("gpu_granted")
         batch_op.drop_column("invite_hash")
     with op.batch_alter_table("invites", schema=None) as batch_op:
         batch_op.drop_column("gpu_used_on")

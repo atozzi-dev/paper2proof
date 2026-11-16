@@ -450,9 +450,11 @@ class ExecutingStep:
         where: tuple[str, str] | None,
         has_results: bool,
         exit_reason: str | None = None,
+        image: str | None = None,
     ) -> StepResult:
         """`state` and `where` None: no job was ever created for the attempt (no GPU capacity).
-        `where` is the platform and preset the attempt's job ran on (the run's conditions)."""
+        `where` is the platform and preset the attempt's job ran on (the run's conditions),
+        `image` the runner it ran (by digest: what the bundle's replay pulls)."""
         key = f"runs/{ctx.run_id}/execution_{manifest.attempt}.json"
         await self._put(
             key,
@@ -461,6 +463,7 @@ class ExecutingStep:
                 "results_key": f"results/{manifest.attempt}/results.json" if has_results else None,
                 "exit_reason": None if has_results else exit_reason,
                 "job_state": None if state is None else state.value,
+                "runner_image": image,
                 "hardware": None  # how the judged job ran (the verdict's conditions)
                 if where is None
                 else {
@@ -515,7 +518,7 @@ class ExecutingStep:
         return started + timedelta(seconds=ctx.limits.per_run.gpu_wait_s)
 
     async def _fall_back(
-        self, ctx: RunContext, reason: FallbackReason, gpu_attempt: int
+        self, ctx: RunContext, reason: FallbackReason, manifest: ExecManifest
     ) -> StepResult:
         """The GPU job never ran: once every exec job of the run is stopped, record why and
         send the run back through PROVISIONING and SMOKE_TESTING on its CPU plan (A-47). The
@@ -525,7 +528,15 @@ class ExecutingStep:
             ctx, exec_jobs, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
         ):
             raise P2PError(ErrorCode.TIMEOUT, "the GPU job did not stop: no CPU fallback yet")
+        gpu_attempt = manifest.attempt
         key = fallback_key(ctx.run_id)
+        if not await self._exists(key) and not await self._cpu_can_run(ctx):
+            await self._no_capacity(  # a CPU attempt that can't run would only cost
+                ctx, "the GPU job did not run, and the run's time left can't hold its CPU plan"
+            )
+            return await self._done(
+                ctx, manifest, None, where=None, has_results=False, exit_reason="capacity"
+            )
         try:
             await self._json(key)  # recorded before a restart: once
         except FileNotFoundError:
@@ -563,6 +574,7 @@ class ExecutingStep:
         GPU window, and a refusal that a wait never helps is returned instead of raised."""
         places = await self._placements(ctx, manifest.attempt, target)
         recorded = await ctx.store.get_job(job_name(JobKind.EXEC, ctx.run_id, manifest.attempt))
+        tries = 0
         for i, where in enumerate(places):
             if deadline is not None and recorded is None and self._clock() >= deadline:
                 break  # a job created before a restart is re-attached instead
@@ -596,6 +608,7 @@ class ExecutingStep:
                 if start.tzinfo is None:
                     start = start.replace(tzinfo=UTC)
                 queue_cap_s = max((deadline - start).total_seconds(), 1.0)
+            tries += 1
             try:
                 outcome = await run_job(
                     ctx,
@@ -634,11 +647,20 @@ class ExecutingStep:
                 )
                 return "queue_timeout"  # it existed: it may have run before the cancel
             return _Placed(outcome, spec)
+        if not tries:  # the window ended before any try: no claim about any platform
+            return "no_capacity"
         tried = " or ".join(dict.fromkeys(p for p, _ in places))
         await self._no_capacity(
             ctx, f"no {_noun(places[0])}capacity on {tried}: the {_job(places[0])} did not run"
         )
         return "no_capacity"
+
+    async def _cpu_can_run(self, ctx: RunContext) -> bool:
+        """Whether the run's experiment minutes left still hold a CPU attempt (A-47): the GPU
+        try's minutes (a billed queue, a pull) count against the same per-run allowance."""
+        spent = await ctx.budget.run_spend(ctx.run_id, SpendKind.GPU_MINUTES)
+        left_s = int((ctx.limits.per_run.cpu_minutes - spent) * 60) - EXEC_MARGIN_S
+        return left_s >= MIN_BUDGET_S
 
     async def _warn(self, ctx: RunContext, message: str) -> None:
         await ctx.emit(EventType.WARNING, {"code": "JOB_PREEMPTED", "message": message})
@@ -697,7 +719,7 @@ class ExecutingStep:
             if placed == "cancelled":
                 return StepResult(next=RunStatus.CANCELLED)
             if not isinstance(placed, _Placed) and deadline is not None:
-                return await self._fall_back(ctx, _REASON[placed], attempt)
+                return await self._fall_back(ctx, _REASON[placed], manifest)
             if not isinstance(placed, _Placed):  # no capacity, or still queued at the cap
                 if previous is None:
                     return await self._done(
@@ -720,7 +742,12 @@ class ExecutingStep:
             ran_on = (spec.platform, spec.preset)
             if outcome.state is JobState.SUCCEEDED:
                 return await self._done(
-                    ctx, manifest, outcome.state, where=ran_on, has_results=True
+                    ctx,
+                    manifest,
+                    outcome.state,
+                    where=ran_on,
+                    has_results=True,
+                    image=spec.image_digest_ref,
                 )
             reason, wall = await self._exit_info(ctx, attempt)
             if (
@@ -735,7 +762,7 @@ class ExecutingStep:
                     if outcome.state is JobState.FAILED
                     else FallbackReason.QUEUE_TIMEOUT
                 )
-                return await self._fall_back(ctx, why, attempt)
+                return await self._fall_back(ctx, why, manifest)
             preempted = reason is None or (
                 reason == "budget_timeout"
                 and (wall is None or wall < manifest.budget_seconds - PREEMPT_SLACK_S)
@@ -748,6 +775,7 @@ class ExecutingStep:
                     where=ran_on,
                     has_results=reason is not None,
                     exit_reason="experiment_error",
+                    image=spec.image_digest_ref,
                 )
             previous = (manifest, outcome.state, reason)
             await self._put(  # decided once: a resumed step goes straight to the retry
@@ -794,4 +822,5 @@ class ExecutingStep:
             where=await self._ran_on(ctx, manifest.attempt, self._where(ExecTarget.GPU)),
             has_results=reason is not None,
             exit_reason="budget_timeout",
+            image=self._where(ExecTarget.GPU).runner_image,
         )

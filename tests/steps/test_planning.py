@@ -101,6 +101,7 @@ async def _plan(
     models: FakeModelClient | None = None,
     targets: PlanTargets | None = None,
     gpu_runs: int | None = None,
+    invite: str | None = None,
     repo: RepoRef | None = OFFICIAL,
     dataset: str = "CIFAR-10",
     popular: frozenset[str] = frozenset({"b"}),
@@ -114,7 +115,7 @@ async def _plan(
     ctx = await ctx_at(
         store,
         StepName.PLANNING,
-        invite_hash=GPU_INVITE if gpu_runs is not None else None,
+        invite_hash=invite or (GPU_INVITE if gpu_runs is not None else None),
         previous=[
             (StepName.INGESTING, "i"),
             (StepName.EXTRACTING_CLAIMS, "c"),
@@ -1042,7 +1043,7 @@ async def test_with_auto_no_gpu_run_left_keeps_the_cpu_plan(store: Store, tmp_pa
         store, tmp_path, "gpu_needed", models=models, targets=AUTO, gpu_runs=0
     )
     artifact = _artifact(tmp_path)
-    skipped = "a GPU would help this experiment, but this invite has no GPU runs left today"
+    skipped = "a GPU would help this experiment, but this invite has no GPU runs"  # minor 5
     assert (artifact.target, artifact.gpu_skipped, plan.scale) == (
         ExecTarget.CPU,
         skipped,
@@ -1115,3 +1116,21 @@ async def test_planning_resumed_after_a_restart_takes_no_second_gpu_run(
     await _plan(store, tmp_path, "gpu_needed_twice", targets=AUTO, gpu_runs=2, runs=2)
     assert await _gpu_runs_used(store) == 1
     assert _artifact(tmp_path).target is ExecTarget.GPU
+
+
+async def test_with_auto_an_invite_s_spent_gpu_runs_are_named_as_such(
+    store: Store, tmp_path: Path
+) -> None:
+    """Minor 5: an invite with GPU runs, all used today, says so (0 says it has none)."""
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=1)
+    await store.create_run(
+        "r_01jb7z0000000000000000000d", "0000.00002", created_by=None, claim_hint=None,
+        budget={}, invite_hash=GPU_INVITE,
+    )  # fmt: skip
+    assert await store.consume_gpu_run("r_01jb7z0000000000000000000d", datetime.now(UTC))
+    models = FakeModelClient(LLM_FIXTURES, case="gpu_needed")
+    await _plan(store, tmp_path, "gpu_needed", models=models, targets=AUTO, gpu_runs=None,
+                invite=GPU_INVITE)  # fmt: skip
+    assert _artifact(tmp_path).gpu_skipped == (
+        "a GPU would help this experiment, but this invite has no GPU runs left today"
+    )
