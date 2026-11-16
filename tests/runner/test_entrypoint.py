@@ -817,11 +817,18 @@ def test_an_invalid_time_target_is_a_contract_error(tmp_path: Path, extra: dict[
 
 
 def test_without_a_time_target_every_seed_runs_as_before(tmp_path: Path) -> None:
+    """And results.json is written as before: a control plane from before A-46 refuses an
+    unknown key, so a new image under old code (an image-first deploy, a code-only rollback)
+    must not turn every run into a contract error."""
     manifest, results = _setup(tmp_path, seeds=[0, 1, 2, 3])
     assert _run(manifest, tmp_path, target_override_s=0.001) == 0  # no rule to apply
     data = _results(results)
     assert _ran(data) == [[0, 1, 2, 3]] * 2
-    assert data["exit_reason"] == "completed" and data["seeds_not_started"] == []
+    assert data["exit_reason"] == "completed" and "seeds_not_started" not in data
+    before = json.loads(
+        (ROOT / "schemas" / "results.schema.json").read_text(encoding="utf-8")
+    )  # top-level keys only: the A-46 schema minus its one new key
+    assert set(data) <= set(before["properties"]) - {"seeds_not_started"}
 
 
 def test_quick_seeds_all_run_within_the_time_target(tmp_path: Path) -> None:
@@ -880,6 +887,7 @@ def test_replay_seeds_must_start_the_manifest_seeds(tmp_path: Path, only: list[i
 
 def test_replay_seeds_are_parsed_strictly() -> None:
     assert entrypoint.parse_seeds("0,1,2") == [0, 1, 2]
+    assert entrypoint.parse_seeds("2147483647") == [2**31 - 1]  # the largest planned seed
     for text in ("", "0,,1", "a", "-1", "0, 1", "1" * 30, ",".join(["1"] * 21)):
         with pytest.raises(entrypoint.ContractError):
             entrypoint.parse_seeds(text)

@@ -67,7 +67,7 @@ TIME_KEYS = {"min_seeds", "target_seconds"}  # optional, both or neither (A-46)
 # the process, reading its metrics and writing results.json.
 SEED_TIME_FACTOR = 1.25
 SEED_START_MARGIN_S = 10.0
-SEEDS_ARG = re.compile(r"[0-9]{1,9}(?:,[0-9]{1,9}){0,19}")
+SEEDS_ARG = re.compile(r"[0-9]{1,10}(?:,[0-9]{1,10}){0,19}")  # planned seeds are < 2**31
 CLAIM_KEYS = {
     "claim_ref", "claim_type", "metric", "higher_is_better", "metric_key", "baseline_name",
     "baseline_key",
@@ -678,8 +678,11 @@ def run(
             "wall_clock_s": round(time.monotonic() - started, 3),
             "gpu": gpu,
             "exit_reason": REASONS[status],
-            "seeds_not_started": list(not_started),
         }
+        # only with the time rule (or a replay): a control plane from before A-46 refuses
+        # the key, and a manifest without min_seeds may come from one
+        if "min_seeds" in manifest or not_started:
+            report["seeds_not_started"] = list(not_started)
         tmp = results / "results.json.tmp"
         tmp.write_text(json.dumps(report, indent=1), encoding="utf-8")
         tmp.replace(results / "results.json")
