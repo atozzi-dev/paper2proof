@@ -1434,3 +1434,25 @@ async def test_the_execution_record_names_the_runner_the_job_ran(
     result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
     assert result.output_ref is not None
     assert artifacts.get_json(result.output_ref)["runner_image"] == DIGEST.format("p2p-runner")
+
+
+async def test_a_manifest_kept_before_a_runner_change_names_the_runner_that_runs(
+    store: Store, tmp_path: Path
+) -> None:
+    """A run resumed after a deploy with a new runner, before its job was created: the job
+    runs the new image, so its manifest (and the bundle's replay) must name it."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    step = _step(artifacts, storage, FakeClock())
+    plan = Plan.model_validate(artifacts.get_json(PLAN_KEY)["plan"])
+    old = await step._manifest(ctx, plan, 1, step._where(ExecTarget.CPU))
+    assert old is not None
+    stale = old.model_copy(update={"image_digest": "sha256:" + "9" * 64})
+    artifacts.put_json(
+        f"runs/{RUN}/exec_manifest_1.json", stale.model_dump(mode="json", by_alias=True)
+    )
+    storage.objects[(RUN, "results/1/results.json")] = _results(1)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    await step.run(_with(ctx, backend))
+    assert _manifest_of(backend.specs[0]).image_digest == "sha256:" + "c" * 64
+    kept = artifacts.get_json(f"runs/{RUN}/exec_manifest_1.json")
+    assert kept["image_digest"] == "sha256:" + "c" * 64

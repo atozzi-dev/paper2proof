@@ -286,6 +286,13 @@ class ExecutingStep:
     async def _json(self, key: str) -> Any:
         return await asyncio.to_thread(self._artifacts.get_json, key)
 
+    async def _created(self, ctx: RunContext, attempt: int) -> bool:
+        """Whether the attempt's job was ever created (recorded, or listed by its name)."""
+        name = job_name(JobKind.EXEC, ctx.run_id, attempt)
+        if await ctx.store.get_job(name) is not None:
+            return True
+        return any(h.name == name for h, _, _ in await ctx.jobs.list_jobs(name))
+
     async def _exists(self, key: str) -> bool:
         try:
             await self._json(key)
@@ -362,9 +369,18 @@ class ExecutingStep:
         (None when the GPU budget left is too small for it)."""
         key = f"runs/{ctx.run_id}/exec_manifest_{attempt}.json"
         try:
-            return ExecManifest.model_validate(await self._json(key))
+            stored = ExecManifest.model_validate(await self._json(key))
         except FileNotFoundError:
-            pass
+            stored = None
+        if stored is not None:
+            digest = where.runner_image.rsplit("@", 1)[1]
+            if stored.image_digest == digest or await self._created(ctx, attempt):
+                return stored  # what its job received
+            # kept before a deploy changed the runner, and no job yet: the job will run the new
+            # image, so the manifest (and the bundle's replay) must name it
+            fresh = stored.model_copy(update={"image_digest": digest})
+            await self._put(key, fresh.model_dump(mode="json", by_alias=True))
+            return fresh
         budget = await self._budget_seconds(ctx, plan, where)
         if budget is None:
             return None
