@@ -1,0 +1,22 @@
+[
+ {
+  "content": null,
+  "tool_calls": [
+   {
+    "id": "p1",
+    "name": "emit_result",
+    "arguments": "{\"mode\": \"REPO_FIRST\", \"claim_ids\": [\"c1\"], \"claim_types\": {\"c1\": \"RELATIVE\"}, \"scale\": \"REDUCED\", \"seeds\": [0, 1, 2], \"packages\": [], \"datasets\": [], \"entrypoint_hint\": \"train.py\", \"gpu_minutes_est\": 28, \"notes\": [], \"setup\": [{\"id\": \"a\", \"name\": \"epochs\", \"kind\": \"NUMBER\", \"paper\": \"100\", \"planned\": \"10\", \"source_ref\": \"Sec. 4\"}]}"
+   }
+  ]
+ },
+ {
+  "content": null,
+  "tool_calls": [
+   {
+    "id": "p1",
+    "name": "emit_result",
+    "arguments": "{\"mode\": \"REPO_FIRST\", \"claim_ids\": [\"c1\"], \"claim_types\": {\"c1\": \"RELATIVE\"}, \"scale\": \"FULL\", \"seeds\": [0, 1, 2], \"packages\": [], \"datasets\": [], \"entrypoint_hint\": \"train.py\", \"gpu_minutes_est\": 25, \"notes\": [], \"setup\": [{\"id\": \"a\", \"name\": \"epochs\", \"kind\": \"NUMBER\", \"paper\": \"100\", \"planned\": \"100\", \"source_ref\": \"Sec. 4\"}]}"
+   }
+  ]
+ }
+]

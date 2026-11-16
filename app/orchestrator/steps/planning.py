@@ -3,8 +3,10 @@ budget and invariants, estimates the cost and decides auto-approval (architectur
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -22,10 +24,13 @@ from app.domain.discovery import (
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import (
+    Claim,
     ClaimType,
     DatasetReq,
+    ExecTarget,
     PackageReq,
     Plan,
+    PlanArtifact,
     PlanMode,
     Scale,
     StepName,
@@ -42,7 +47,7 @@ from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
 from app.models.untrusted import UNTRUSTED_NOTICE, wrap_untrusted
-from app.orchestrator.budget import SpendKind
+from app.orchestrator.budget import PerRunLimits, SpendKind
 from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import EXEC_PLATFORM, EXEC_PRESET, estimate_plan_cost
 from app.orchestrator.fsm import StepResult
@@ -55,13 +60,36 @@ from app.orchestrator.steps.common import (
 )
 from app.storage.artifacts import ArtifactStore
 
+log = logging.getLogger(__name__)
 MIN_SEEDS = 3
 MAX_SEED = 2**31 - 1  # numpy, torch and random all take it; so does the replay's --seeds
 PackageCheck = Callable[[list[PackageReq]], Awaitable[list[PackageReq]]]
 DatasetCheck = Callable[[list[DatasetReq], RunCpu], Awaitable[DatasetReport]]
 
 
-GPU_HARDWARE = "one L40S GPU (48 GB)"
+def gpu_hardware(minutes: float) -> str:
+    """What a GPU target runs on, as the Planner reads it (one L40S job on Nebius)."""
+    return (
+        "one NVIDIA L40S GPU (48 GB, CUDA) with 8 vCPUs and 32 GB of RAM, offline while the "
+        "experiment runs (provisioning fetches packages, the repository and data before), the "
+        f"experiment at most {minutes:g} minutes in all"
+    )
+
+
+def needs_gpu(plan: Plan, limits: PerRunLimits) -> bool:
+    """Whether a CPU plan should get a GPU plan (A-47): code reads two validated fields of it,
+    never a model's choice of hardware. Cut to REDUCED, or estimated over a fraction of the CPU
+    minutes (its estimate is a guess: a margin before the CPU's limit)."""
+    return (
+        plan.scale is Scale.REDUCED
+        or plan.gpu_minutes_est > limits.gpu_when_cpu_estimate_over * limits.cpu_minutes
+    )
+
+
+GPU_SKIPPED_NO_QUOTA = (
+    "a GPU would help this experiment, but this invite has no GPU runs left today"
+)
+GPU_SKIPPED_NO_PLAN = "the GPU plan could not be made: the CPU plan runs"
 
 
 @dataclass(frozen=True)
@@ -71,6 +99,9 @@ class PlanTargets:
 
     cpu: tuple[str, str] | None
     gpu: tuple[str, str] | None
+
+
+DESIGNED = PlanTargets(cpu=None, gpu=(EXEC_PLATFORM, EXEC_PRESET))  # P2P_EXEC_BACKEND=gpu
 
 
 def planning_targets(execution: ExecutionConfig) -> PlanTargets:
@@ -84,12 +115,14 @@ def planning_targets(execution: ExecutionConfig) -> PlanTargets:
 
 
 # the hybrid deploy without GPU capacity (docs/specs/hybrid-deploy.md)
-CPU_HARDWARE = (
-    "a CPU only (no GPU): one Token Factory Sandboxes microVM with 4 vCPUs and 4 GB of RAM, "
-    "offline while the experiment runs (provisioning fetches packages, the repository and data "
-    "before), the experiment at most 30 minutes in all; scale down only GPU-sized training "
-    "that this CPU and memory cannot finish in that time"
-)
+def cpu_hardware(minutes: float) -> str:
+    """What a CPU target runs on, as the Planner reads it (the hybrid deploy's Sandboxes)."""
+    return (
+        "a CPU only (no GPU): one Token Factory Sandboxes microVM with 4 vCPUs and 4 GB of RAM, "
+        "offline while the experiment runs (provisioning fetches packages, the repository and "
+        f"data before), the experiment at most {minutes:g} minutes in all; scale down only "
+        "GPU-sized training that this CPU and memory cannot finish in that time"
+    )
 
 
 def _problems(dropped: list[DatasetProblem]) -> str:
@@ -261,8 +294,7 @@ class PlanningStep:
         preemptible: bool,
         package_check: PackageCheck | None = None,
         dataset_check: DatasetCheck | None = None,
-        exec_on: tuple[str, str] = (EXEC_PLATFORM, EXEC_PRESET),
-        hardware: str = GPU_HARDWARE,
+        targets: PlanTargets = DESIGNED,
         http: httpx.AsyncClient | None = None,
         popular: frozenset[str] | None = None,
     ) -> None:
@@ -272,8 +304,7 @@ class PlanningStep:
         self._preemptible = preemptible
         self._package_check = package_check
         self._dataset_check = dataset_check
-        self._exec_on = exec_on  # the configured exec platform and preset (the estimate's price)
-        self._hardware = hardware  # what the experiment runs on, as the Planner reads it
+        self._targets = targets  # where an experiment may run (A-47): the estimate's prices too
         self._http = http  # PyPI (the authors' package); None: a short-lived client per lookup
         self._popular = POPULAR if popular is None else popular
 
@@ -283,12 +314,127 @@ class PlanningStep:
         discovery = Discovery.model_validate(
             await asyncio.to_thread(self._artifacts.get_json, discovery_key)
         )
+        paper = await ingested_paper(ctx, self._artifacts)
+        excerpt = (
+            await ctx.run_cpu(paper_excerpt, paper, PAPER_EXCERPT_CHARS)
+            if paper is not None
+            else None
+        )
+        inputs = _Inputs(
+            claims=claims,
+            discovery=discovery,
+            paper=None if paper is None else (paper.arxiv_id, excerpt or ""),
+        )
+        limits = ctx.limits.per_run
+        targets = self._targets
+        if targets.cpu is None:  # the designed deploy (P2P_EXEC_BACKEND=gpu): GPU only
+            assert targets.gpu is not None  # noqa: S101 (PlanTargets has at least one)
+            plan = await self._plan_for(
+                ctx, inputs, gpu_hardware(limits.gpu_minutes), limits.gpu_minutes
+            )
+            artifact = await self._priced(ctx, plan, ExecTarget.GPU, targets.gpu)
+        else:
+            plan = await self._plan_for(
+                ctx, inputs, cpu_hardware(limits.cpu_minutes), limits.cpu_minutes
+            )
+            artifact = await self._priced(ctx, plan, ExecTarget.CPU, targets.cpu)
+            if targets.gpu is not None and needs_gpu(plan, limits):
+                artifact = await self._with_gpu(ctx, inputs, artifact, targets.gpu)
+        plan = artifact.plan
+
+        if plan.scale is Scale.REDUCED and all(
+            t is ClaimType.ABSOLUTE for t in plan.claim_types.values()
+        ):
+            await ctx.emit(
+                EventType.WARNING,
+                {
+                    "code": "ABSOLUTE_AT_REDUCED_SCALE",
+                    "message": "only ABSOLUTE claims at reduced scale: the verdict will be "
+                    "inconclusive; prefer a RELATIVE comparison",
+                },
+            )
+
+        needs_approval = artifact.est_cost_usd >= ctx.limits.approval.auto_approve_below_usd
+        key = f"runs/{ctx.run_id}/plan.json"
+        await asyncio.to_thread(self._artifacts.put_json, key, artifact.model_dump(mode="json"))
+        await ctx.emit(
+            EventType.PLAN_READY,
+            {
+                "plan": plan.model_dump(mode="json"),
+                "est_cost_usd": artifact.est_cost_usd,
+                "needs_approval": needs_approval,
+                "target": artifact.target.value,
+                "cpu_plan": None
+                if artifact.cpu_plan is None
+                else artifact.cpu_plan.model_dump(mode="json"),
+                "est_cost_max_usd": artifact.est_cost_max_usd,
+                "gpu_skipped": artifact.gpu_skipped,
+            },
+        )
+        target = StepName.AWAITING_APPROVAL if needs_approval else StepName.PROVISIONING
+        return StepResult(next=target, output_ref=key)
+
+    async def _with_gpu(
+        self, ctx: RunContext, inputs: "_Inputs", cpu: PlanArtifact, gpu: tuple[str, str]
+    ) -> PlanArtifact:
+        """A GPU plan with the CPU one as its fallback, for a CPU plan that needs a GPU (A-47),
+        while the run's invite has a GPU run left today; else the CPU plan, saying why."""
+        if not await ctx.store.consume_gpu_run(ctx.run_id, datetime.now(UTC)):
+            return cpu.model_copy(update={"gpu_skipped": GPU_SKIPPED_NO_QUOTA})
+        limits = ctx.limits.per_run
+        try:
+            plan = await self._plan_for(
+                ctx, inputs, gpu_hardware(limits.gpu_minutes), limits.gpu_minutes
+            )
+        except P2PError as err:
+            log.warning(
+                "no GPU plan: the CPU plan runs", extra={"run_id": ctx.run_id, "code": err.code}
+            )
+            return cpu.model_copy(update={"gpu_skipped": GPU_SKIPPED_NO_PLAN})
+        return await self._priced(ctx, plan, ExecTarget.GPU, gpu, cpu_plan=cpu.plan)
+
+    async def _priced(
+        self,
+        ctx: RunContext,
+        plan: Plan,
+        target: ExecTarget,
+        on: tuple[str, str],
+        *,
+        cpu_plan: Plan | None = None,
+    ) -> PlanArtifact:
+        """The plan.json of this plan on `on`: its estimate and, for a GPU target, its worst
+        case (the whole GPU allowance: the runner's own budget and the watchdog bound it)."""
+        spent = await ctx.budget.run_spend(ctx.run_id, SpendKind.INFERENCE_USD)
+
+        def cost(of: Plan) -> float:
+            return estimate_plan_cost(
+                of, self._cloud, inference_so_far=spent, preemptible=self._preemptible, exec_on=on
+            )
+
+        maximum = None
+        if target is ExecTarget.GPU:
+            whole = plan.model_copy(update={"gpu_minutes_est": ctx.limits.per_run.gpu_minutes})
+            maximum = cost(whole)
+        return PlanArtifact(
+            plan=plan,
+            est_cost_usd=cost(plan),
+            target=target,
+            cpu_plan=cpu_plan,
+            est_cost_max_usd=maximum,
+        )
+
+    async def _plan_for(
+        self, ctx: RunContext, inputs: "_Inputs", hardware: str, minutes: float
+    ) -> Plan:
+        """The Planner's plan for this hardware and these experiment minutes, corrected and
+        checked by code: claims and seeds, datasets that can be fetched, packages the policy
+        accepts, the authors' package."""
         limits = ctx.limits.per_run
         prompt = load_prompt("planner_experiment_plan")
-        paper = await ingested_paper(ctx, self._artifacts)
-        budget = json.dumps({"experiment_minutes": limits.gpu_minutes, "min_seeds": MIN_SEEDS})
+        budget = json.dumps({"experiment_minutes": minutes, "min_seeds": MIN_SEEDS})
+        claims = inputs.claims
         user = prompt.render(
-            hardware=self._hardware,
+            hardware=hardware,
             budget=budget,
             claims=wrap_untrusted(
                 json.dumps([c.model_dump(mode="json") for c in claims], indent=1),
@@ -296,14 +442,14 @@ class PlanningStep:
                 max_chars=30_000,
             ),
             discovery=wrap_untrusted(
-                discovery.model_dump_json(indent=1), source="discovery", max_chars=10_000
+                inputs.discovery.model_dump_json(indent=1), source="discovery", max_chars=10_000
             ),
             paper=wrap_untrusted(
-                await ctx.run_cpu(paper_excerpt, paper, PAPER_EXCERPT_CHARS),
-                source=f"arxiv:{paper.arxiv_id}",
+                inputs.paper[1],
+                source=f"arxiv:{inputs.paper[0]}",
                 max_chars=PAPER_EXCERPT_CHARS,
             )
-            if paper is not None
+            if inputs.paper is not None
             else "(not available)",
         )
         messages = [
@@ -320,13 +466,19 @@ class PlanningStep:
         plan, _ = correct_plan(
             proposed,
             selected=selected,
-            gpu_cap=limits.gpu_minutes,
+            gpu_cap=minutes,
             max_seeds=limits.max_seeds,
             named=named,
         )
         if self._dataset_check is not None and plan.datasets:
             history = [*messages, _said(proposed)]
-            plan = await self._fetchable(ctx, self._dataset_check, plan, history, selected, named)
+            plan = await self._fetchable(
+                ctx, self._dataset_check, plan, history, selected, named, minutes
+            )
+        return await self._packaged(ctx, plan, inputs.discovery)
+
+    async def _packaged(self, ctx: RunContext, plan: Plan, discovery: Discovery) -> Plan:
+        """The plan's packages through the policy, with the authors' package and notes."""
         authors = await self._authors_package(ctx, plan, discovery)
         unknown = authors is not None and normalize(authors.name) not in self._popular
         if authors is not None and not unknown:  # first: the per-request quota never cuts it
@@ -366,44 +518,7 @@ class PlanningStep:
                 "package policy refused it"
             )
             plan = plan.model_copy(update={"notes": [*plan.notes, note]})
-
-        if plan.scale is Scale.REDUCED and all(
-            t is ClaimType.ABSOLUTE for t in plan.claim_types.values()
-        ):
-            await ctx.emit(
-                EventType.WARNING,
-                {
-                    "code": "ABSOLUTE_AT_REDUCED_SCALE",
-                    "message": "only ABSOLUTE claims at reduced scale: the verdict will be "
-                    "inconclusive; prefer a RELATIVE comparison",
-                },
-            )
-
-        spent = await ctx.budget.run_spend(ctx.run_id, SpendKind.INFERENCE_USD)
-        cost = estimate_plan_cost(
-            plan,
-            self._cloud,
-            inference_so_far=spent,
-            preemptible=self._preemptible,
-            exec_on=self._exec_on,
-        )
-        needs_approval = cost >= ctx.limits.approval.auto_approve_below_usd
-        key = f"runs/{ctx.run_id}/plan.json"
-        await asyncio.to_thread(
-            self._artifacts.put_json,
-            key,
-            {"plan": plan.model_dump(mode="json"), "est_cost_usd": cost},
-        )
-        await ctx.emit(
-            EventType.PLAN_READY,
-            {
-                "plan": plan.model_dump(mode="json"),
-                "est_cost_usd": cost,
-                "needs_approval": needs_approval,
-            },
-        )
-        target = StepName.AWAITING_APPROVAL if needs_approval else StepName.PROVISIONING
-        return StepResult(next=target, output_ref=key)
+        return plan
 
     async def _authors_package(
         self, ctx: RunContext, plan: Plan, discovery: Discovery
@@ -430,11 +545,12 @@ class PlanningStep:
         history: list[Message],
         selected: Mapping[str, ClaimType],
         named: Mapping[str, Sequence[KnownDataset]],
+        minutes: float,
     ) -> Plan:
         """Datasets that cannot be fetched (a made-up id, gated, no parquet for the split, over
         the cap) get the Planner one more try with code-written reasons; whatever still fails
         is dropped, noted and warned about. Never a loop: one retry at most."""
-        gpu_cap = ctx.limits.per_run.gpu_minutes
+        gpu_cap = minutes  # the target's experiment minutes
         report = await check(plan.datasets, ctx.run_cpu)
         notes: list[str] = []
         if report.dropped:
@@ -487,6 +603,15 @@ class PlanningStep:
                 f"provisioning): {', '.join(report.unchecked)}"
             )
         return plan.model_copy(update={"notes": [*plan.notes, *notes]})
+
+
+@dataclass(frozen=True)
+class _Inputs:
+    """What both plans (CPU, then GPU) are made from: read once."""
+
+    claims: list[Claim]
+    discovery: Discovery
+    paper: tuple[str, str] | None  # (arXiv ID, excerpt); None: not ingested
 
 
 def _said(plan: Plan) -> Message:

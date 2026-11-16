@@ -215,7 +215,6 @@ def test_a_gpu_plan_artifact_carries_its_cpu_fallback() -> None:
     "fields",
     [
         {"target": ExecTarget.GPU},
-        {"target": ExecTarget.GPU, "est_cost_max_usd": 1.7},
         {"target": ExecTarget.GPU, "cpu_plan": "plan"},
         {"cpu_plan": "plan"},
         {"est_cost_max_usd": 1.7},
@@ -229,6 +228,14 @@ def test_a_plan_artifact_with_a_half_gpu_target_is_refused(fields: dict[str, obj
         data["cpu_plan"] = _plan()
     with pytest.raises(ValidationError):
         PlanArtifact.model_validate(data)
+
+
+def test_a_gpu_target_without_a_cpu_to_fall_back_to_is_the_designed_deploy() -> None:
+    """P2P_EXEC_BACKEND=gpu: the experiment runs on the GPU and there is no CPU plan."""
+    artifact = PlanArtifact(
+        plan=_plan(), est_cost_usd=0.9, target=ExecTarget.GPU, est_cost_max_usd=1.7
+    )
+    assert artifact.cpu_plan is None
 
 
 def test_a_gpu_fallback_records_why_the_cpu_plan_ran() -> None:

@@ -23,10 +23,18 @@ async def ctx_at(
     previous: list[tuple[StepName, str | None]],
     claim_hint: str | None = None,
     arxiv_id: str = "0000.00001",
+    invite_hash: str | None = None,
 ) -> RunContext:
     """Create the run, walk it through `previous` steps (with their output refs) and return
     the context of `step`, which is left RUNNING (attempt 1)."""
-    await store.create_run(RUN, arxiv_id, created_by=None, claim_hint=claim_hint, budget={})
+    await store.create_run(
+        RUN,
+        arxiv_id,
+        created_by=None,
+        claim_hint=claim_hint,
+        budget={},
+        invite_hash=invite_hash,
+    )
     chain = [*previous, (step, None)]
     seen: dict[StepName, int] = {}
     attempts = []

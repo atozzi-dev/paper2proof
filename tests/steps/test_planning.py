@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,8 +21,10 @@ from app.domain.models import (
     ClaimType,
     DatasetReq,
     ErrorCode,
+    ExecTarget,
     PackageReq,
     Plan,
+    PlanArtifact,
     PlanMode,
     RunStatus,
     Scale,
@@ -33,16 +36,18 @@ from app.execution.package_policy import PYPI
 from app.models.client import Message, Role
 from app.models.fake import FakeModelClient
 from app.models.pricing import load_cloud_prices
-from app.orchestrator.budget import BudgetExceeded
+from app.orchestrator.budget import BudgetExceeded, load_budget_limits
 from app.orchestrator.cost_estimate import estimate_plan_cost
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
 from app.orchestrator.steps.planning import (
-    CPU_HARDWARE,
     MIN_SEEDS,
     DatasetCheck,
     PackageCheck,
     PlanningStep,
+    PlanTargets,
     correct_plan,
+    cpu_hardware,
+    needs_gpu,
 )
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
@@ -53,6 +58,11 @@ DISCOVERY = f"runs/{RUN}/discovery.json"
 T = TypeVar("T", bound=BaseModel)
 CLOUD = load_cloud_prices(ROOT / "config" / "pricing.yaml")
 OFFICIAL = RepoRef(url="https://github.com/a/b", source="paper", official=True)
+LIMITS = load_budget_limits(ROOT / "config" / "budgets.yaml").per_run
+SANDBOX_ON, L40S_ON = ("sandbox", "4vcpu-4gb"), ("gpu-l40s-a", "1gpu-8vcpu-32gb")
+CPU_ONLY = PlanTargets(cpu=SANDBOX_ON, gpu=None)
+AUTO = PlanTargets(cpu=SANDBOX_ON, gpu=L40S_ON)
+GPU_INVITE = "ab" * 32
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +99,8 @@ async def _plan(
     dataset_check: DatasetCheck | None = None,
     package_check: PackageCheck | None = None,
     models: FakeModelClient | None = None,
-    hardware: str | None = None,
+    targets: PlanTargets | None = None,
+    gpu_runs: int | None = None,
     repo: RepoRef | None = OFFICIAL,
     dataset: str = "CIFAR-10",
     popular: frozenset[str] = frozenset({"b"}),
@@ -97,9 +108,12 @@ async def _plan(
     artifacts = LocalArtifactStore(tmp_path)
     discovery = Discovery(repo=repo)
     artifacts.put_json(DISCOVERY, discovery.model_dump(mode="json"))
+    if gpu_runs is not None:  # the run's invite and its daily GPU runs (A-47)
+        await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=gpu_runs)
     ctx = await ctx_at(
         store,
         StepName.PLANNING,
+        invite_hash=GPU_INVITE if gpu_runs is not None else None,
         previous=[
             (StepName.INGESTING, "i"),
             (StepName.EXTRACTING_CLAIMS, "c"),
@@ -116,7 +130,7 @@ async def _plan(
         dataset_check=dataset_check,
         package_check=package_check,
         popular=popular,
-        **({"hardware": hardware} if hardware else {}),
+        **({"targets": targets} if targets else {}),
     )
     result = await step.run(ctx)
     assert result.output_ref is not None
@@ -133,14 +147,15 @@ def _prompt(models: FakeModelClient) -> str:
 async def test_the_planner_plans_for_one_l40s_by_default(store: Store, tmp_path: Path) -> None:
     models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
     await _plan(store, tmp_path, "two_seeds", models=models)
-    assert "one L40S GPU (48 GB)" in _prompt(models)
+    assert "one NVIDIA L40S GPU (48 GB, CUDA)" in _prompt(models)
 
 
 async def test_in_sandboxes_the_planner_plans_for_a_cpu(store: Store, tmp_path: Path) -> None:
     models = FakeModelClient(LLM_FIXTURES, case="two_seeds")
-    await _plan(store, tmp_path, "two_seeds", models=models, hardware=CPU_HARDWARE)
+    await _plan(store, tmp_path, "two_seeds", models=models, targets=CPU_ONLY)
     prompt = _prompt(models)
-    assert CPU_HARDWARE in prompt and "L40S" not in prompt
+    assert cpu_hardware(LIMITS.cpu_minutes) in prompt and "L40S" not in prompt
+    assert f'"experiment_minutes": {json.dumps(LIMITS.cpu_minutes)}' in prompt
 
 
 async def test_the_plan_lists_up_to_max_seeds_seeds(store: Store, tmp_path: Path) -> None:
@@ -931,3 +946,160 @@ def test_a_reduction_stated_on_a_condition_code_cannot_keep_still_reduces_the_pl
     )
     assert corrected.scale is Scale.REDUCED
     assert any("could not be kept planned something else" in n for n in notes)
+
+
+# --- GPU when needed (A-47) -----------------------------------------------------------------
+
+
+def _artifact(tmp_path: Path) -> PlanArtifact:
+    return PlanArtifact.model_validate(
+        LocalArtifactStore(tmp_path).get_json(f"runs/{RUN}/plan.json")
+    )
+
+
+def _planner_calls(models: FakeModelClient) -> int:
+    return sum(1 for role, _ in models.requests if role is Role.PLANNER)
+
+
+async def _gpu_runs_used(store: Store) -> int:
+    [invite] = [i for i in await store.list_invites() if i.code_hash == GPU_INVITE]
+    return invite.gpu_used_today
+
+
+def _base_plan(**changes: object) -> Plan:
+    data: dict[str, object] = {
+        "mode": PlanMode.REPO_FIRST,
+        "claim_ids": ["c1"],
+        "claim_types": {"c1": ClaimType.RELATIVE},
+        "scale": Scale.FULL,
+        "seeds": [0, 1, 2],
+        "gpu_minutes_est": 10,
+        **changes,
+    }
+    return Plan.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("changes", "gpu"),
+    [
+        ({"scale": Scale.REDUCED}, True),
+        ({"gpu_minutes_est": 10}, False),
+        ({"gpu_minutes_est": 15}, False),  # half of the 30 CPU minutes: still the CPU
+        ({"gpu_minutes_est": 15.1}, True),
+    ],
+)
+def test_a_cpu_plan_needs_a_gpu_when_cut_or_close_to_the_cpu_time(
+    changes: dict[str, object], gpu: bool
+) -> None:
+    assert needs_gpu(_base_plan(**changes), LIMITS) is gpu
+
+
+async def test_with_auto_a_plan_that_fits_the_cpu_stays_on_cpu(
+    store: Store, tmp_path: Path
+) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="cpu_fits")
+    await _plan(store, tmp_path, "cpu_fits", models=models, targets=AUTO, gpu_runs=1)
+    artifact = _artifact(tmp_path)
+    assert (artifact.target, artifact.cpu_plan, artifact.gpu_skipped) == (
+        ExecTarget.CPU,
+        None,
+        None,
+    )
+    assert _planner_calls(models) == 1
+    assert await _gpu_runs_used(store) == 0  # the invite's GPU run is still there
+
+
+async def test_with_auto_a_cut_plan_gets_a_gpu_plan(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="gpu_needed")
+    plan, _, events = await _plan(
+        store, tmp_path, "gpu_needed", models=models, targets=AUTO, gpu_runs=1
+    )
+    artifact = _artifact(tmp_path)
+    assert artifact.target is ExecTarget.GPU
+    assert (plan.scale, plan.gpu_minutes_est) == (Scale.FULL, 25)
+    assert artifact.cpu_plan is not None and artifact.cpu_plan.scale is Scale.REDUCED
+    assert _planner_calls(models) == 2
+    first, second = (m for role, m in models.requests if role is Role.PLANNER)
+    gpu_prompt = "\n".join(str(m.content) for m in second)
+    assert "NVIDIA L40S" in gpu_prompt and "L40S" not in "\n".join(str(m.content) for m in first)
+    assert f'"experiment_minutes": {json.dumps(LIMITS.gpu_minutes)}' in gpu_prompt
+    hourly = CLOUD.hourly(*L40S_ON, preemptible=True)
+    assert artifact.est_cost_max_usd is not None
+    assert artifact.est_cost_max_usd - artifact.est_cost_usd == pytest.approx(
+        (LIMITS.gpu_minutes - 25) / 60 * hourly, abs=1e-3
+    )  # priced on the GPU platform; the worst case is the whole GPU allowance
+    [ready] = [p for p in events if isinstance(p, PlanReadyPayload)]
+    assert (ready.target, ready.cpu_plan) == (ExecTarget.GPU, artifact.cpu_plan)
+    assert ready.est_cost_max_usd == artifact.est_cost_max_usd
+    assert await _gpu_runs_used(store) == 1
+
+
+async def test_with_auto_no_gpu_run_left_keeps_the_cpu_plan(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="gpu_needed")
+    plan, _, events = await _plan(
+        store, tmp_path, "gpu_needed", models=models, targets=AUTO, gpu_runs=0
+    )
+    artifact = _artifact(tmp_path)
+    skipped = "a GPU would help this experiment, but this invite has no GPU runs left today"
+    assert (artifact.target, artifact.gpu_skipped, plan.scale) == (
+        ExecTarget.CPU,
+        skipped,
+        Scale.REDUCED,
+    )
+    assert _planner_calls(models) == 1
+    [ready] = [p for p in events if isinstance(p, PlanReadyPayload)]
+    assert ready.gpu_skipped == skipped
+
+
+class _GpuPlanFails(FakeModelClient):
+    """The Planner's second answer, the GPU plan, is unusable (a P2PError after repair)."""
+
+    planner_calls = 0
+
+    async def structured(
+        self,
+        role: Role,
+        messages: list[Message],
+        schema: type[T],
+        *,
+        run_id: str | None = None,
+        step: str | None = None,
+        prompt: str | None = None,
+    ) -> T:
+        if prompt == "planner_experiment_plan":
+            self.planner_calls += 1
+            if self.planner_calls == 2:
+                raise P2PError(ErrorCode.SCHEMA_ERROR, "unusable plan")
+        return await super().structured(
+            role, messages, schema, run_id=run_id, step=step, prompt=prompt
+        )
+
+
+async def test_with_auto_a_failed_gpu_plan_keeps_the_cpu_plan(store: Store, tmp_path: Path) -> None:
+    models = _GpuPlanFails(LLM_FIXTURES, case="gpu_needed")
+    await _plan(store, tmp_path, "gpu_needed", models=models, targets=AUTO, gpu_runs=1)
+    artifact = _artifact(tmp_path)
+    assert (artifact.target, artifact.gpu_skipped) == (
+        ExecTarget.CPU,
+        "the GPU plan could not be made: the CPU plan runs",
+    )
+
+
+async def test_in_sandboxes_a_cut_plan_never_asks_for_a_gpu(store: Store, tmp_path: Path) -> None:
+    models = FakeModelClient(LLM_FIXTURES, case="gpu_needed")
+    await _plan(store, tmp_path, "gpu_needed", models=models, targets=CPU_ONLY, gpu_runs=1)
+    artifact = _artifact(tmp_path)
+    assert (artifact.target, artifact.gpu_skipped) == (ExecTarget.CPU, None)
+    assert _planner_calls(models) == 1
+    assert await _gpu_runs_used(store) == 0
+
+
+async def test_the_designed_deploy_plans_once_for_the_gpu(store: Store, tmp_path: Path) -> None:
+    """P2P_EXEC_BACKEND=gpu: every experiment on the GPU, no CPU to fall back to."""
+    models = FakeModelClient(LLM_FIXTURES, case="cpu_fits")
+    targets = PlanTargets(cpu=None, gpu=L40S_ON)
+    await _plan(store, tmp_path, "cpu_fits", models=models, targets=targets)
+    artifact = _artifact(tmp_path)
+    assert (artifact.target, artifact.cpu_plan) == (ExecTarget.GPU, None)
+    assert artifact.est_cost_max_usd is not None
+    assert _planner_calls(models) == 1 and "NVIDIA L40S" in _prompt(models)

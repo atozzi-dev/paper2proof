@@ -77,7 +77,7 @@ from app.orchestrator.steps.discovering import DiscoveringStep
 from app.orchestrator.steps.executing import ExecutingStep
 from app.orchestrator.steps.extracting_claims import ExtractingClaimsStep
 from app.orchestrator.steps.ingesting import IngestingStep
-from app.orchestrator.steps.planning import CPU_HARDWARE, GPU_HARDWARE, PlanningStep
+from app.orchestrator.steps.planning import PlanningStep, planning_targets
 from app.orchestrator.steps.provisioning import ProvisioningStep
 from app.orchestrator.steps.smoke_testing import SmokeTestingStep
 from app.orchestrator.steps.verdict import VerdictStep
@@ -675,8 +675,7 @@ def build_runtime(
             artifacts,
             cloud,
             preemptible=execution.preemptible_gpu,
-            exec_on=(execution.exec_platform, execution.exec_preset),
-            hardware=GPU_HARDWARE if execution.exec_platform.startswith("gpu-") else CPU_HARDWARE,
+            targets=planning_targets(execution),  # A-47: CPU, GPU or both
             package_check=package_check,
             dataset_check=HfDatasets(store, http).check,
         ),

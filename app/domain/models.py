@@ -255,9 +255,10 @@ class ExecTarget(StrEnum):
 
 
 class PlanArtifact(_Strict):
-    """runs/<id>/plan.json, PLANNING's output. A GPU target carries the CPU plan it falls back
-    to when no GPU starts in time, and its worst-case cost (the whole GPU allowance); a CPU
-    target has neither. The two-key plan.json of runs planned before A-47 reads as CPU."""
+    """runs/<id>/plan.json, PLANNING's output. A GPU target carries its worst-case cost (the
+    whole GPU allowance) and, with P2P_EXEC_BACKEND=auto, the CPU plan it falls back to when no
+    GPU starts in time; a CPU target has neither. The two-key plan.json of runs planned before
+    A-47 reads as CPU."""
 
     plan: Plan
     est_cost_usd: float = Field(ge=0)
@@ -267,10 +268,13 @@ class PlanArtifact(_Strict):
     gpu_skipped: str | None = Field(default=None, max_length=300)  # why a GPU was not used
 
     @model_validator(mode="after")
-    def _fallback_iff_gpu(self) -> Self:
+    def _fallback_only_for_gpu(self) -> Self:
         gpu = self.target is ExecTarget.GPU
-        if gpu != (self.cpu_plan is not None) or gpu != (self.est_cost_max_usd is not None):
-            raise ValueError("a GPU target has a CPU fallback plan and a maximum cost; CPU neither")
+        if gpu != (self.est_cost_max_usd is not None) or (not gpu and self.cpu_plan is not None):
+            raise ValueError(
+                "a GPU target has a maximum cost (and, but for the designed deploy, a "
+                "CPU fallback plan); a CPU target neither"
+            )
         return self
 
 
