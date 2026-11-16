@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,7 +22,15 @@ from app.discovery.github import MAX_REPO_BYTES, repo_size_kib
 from app.domain.discovery import Discovery
 from app.domain.errors import P2PError
 from app.domain.events import EventType
-from app.domain.models import ErrorCode, PackageReq, Plan, PlanMode, RunStatus, StepName
+from app.domain.models import (
+    ErrorCode,
+    PackageReq,
+    Plan,
+    PlanArtifact,
+    PlanMode,
+    RunStatus,
+    StepName,
+)
 from app.execution.backend import CACHE_BUCKET, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -31,11 +39,12 @@ from app.execution.run_storage import RunStorage
 from app.models.pricing import CloudPrices
 from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import PROVISION_PLATFORM, PROVISION_PRESET
-from app.orchestrator.fallback import package_requests
+from app.orchestrator.fallback import fell_back, package_requests
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import active_plan, output_of
 from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
+from app.storage.store import StepRecord
 
 WATCHDOG_S = 20 * 60  # both jobs together (execution-contracts §8)
 MIN_FETCH_WORK_S = 300  # a cold start plus some work before the deadline, or a timeout now
@@ -178,7 +187,7 @@ class ProvisioningStep:
         return await ctx.run_cpu(parse_repo_requirements, files)
 
     async def _packages(
-        self, ctx: RunContext, plan: Plan, discovery: Discovery
+        self, ctx: RunContext, plan: Plan, discovery: Discovery, *, package_request: bool
     ) -> list[PackageReq]:
         repo_requirements = await self._repo_requirements(ctx, discovery)
         planned = await self._policy.validate(
@@ -188,7 +197,7 @@ class ProvisioningStep:
             why = f"{rejected.package.name}: {rejected.reason.value} {rejected.detail}"
             await ctx.emit(EventType.WARNING, {"code": "PACKAGE_REJECTED", "message": why.strip()})
         packages = planned.accepted
-        if ctx.attempt > 1:  # back from SMOKE_TESTING with a request_packages call
+        if package_request:  # back from SMOKE_TESTING with a request_packages call
             request = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
             raw = request.get("requested_packages")
             requested = [PackageReq.model_validate(p) for p in raw] if isinstance(raw, list) else []
@@ -221,7 +230,11 @@ class ProvisioningStep:
             ctx, smoke, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
         ):
             raise P2PError(ErrorCode.TIMEOUT, "an earlier smoke job did not stop")
-        packages = await self._packages(ctx, plan, discovery)
+        steps = await ctx.store.get_steps(ctx.run_id)
+        fallback = await self._fallback_entry(ctx, steps)  # A-47: not a package request
+        packages = await self._packages(
+            ctx, plan, discovery, package_request=ctx.attempt > 1 and not fallback
+        )
         bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
         await ctx.jobs.ensure_gateway_up()  # may cold-start the VM: anchor the deadline after it
         built_key = f"runs/{ctx.run_id}/packages_report_{ctx.attempt}.json"
@@ -238,8 +251,9 @@ class ProvisioningStep:
                 ErrorCode.PROVISION_FAILED, "the stored provisioning deadline is invalid"
             )
         deadline = datetime.fromtimestamp(deadline_unix, UTC)
-        fetch_key = f"runs/{ctx.run_id}/fetch_report.json"
-        # The repository and the datasets don't change between attempts (the plan doesn't):
+        fetch_key = await self._fetch_key(ctx, steps)
+        # The repository and the datasets don't change between attempts (the plan doesn't,
+        # but for the GPU fallback's CPU plan: its own key when it needs other data, A-47):
         # a later attempt, or a resumed one, uses the copy stored by this step.
         fetched = await self._stored(fetch_key)
         if fetched is None:
@@ -251,7 +265,38 @@ class ProvisioningStep:
         report = {"schema": "p2p.provision-report/v1", "run_id": ctx.run_id, **overlay, **files}
         key = f"runs/{ctx.run_id}/provision_report.json"
         await asyncio.to_thread(self._artifacts.put_json, key, report)
+        if fallback:  # the CPU plan is provisioned: EXECUTING may run it now
+            await asyncio.to_thread(
+                self._artifacts.put_json, self._provisioned_key(ctx), {"attempt": ctx.attempt}
+            )
         return StepResult(next=StepName.SMOKE_TESTING, output_ref=key)
+
+    @staticmethod
+    def _provisioned_key(ctx: RunContext) -> str:
+        return f"runs/{ctx.run_id}/fallback_provisioned.json"
+
+    async def _fallback_entry(self, ctx: RunContext, steps: Sequence[StepRecord]) -> bool:
+        """Whether this attempt is the GPU fallback's return to provision the CPU plan (A-47):
+        EXECUTING fell back, and the CPU plan was not provisioned yet (or by this attempt,
+        resumed)."""
+        if not fell_back(steps):
+            return False
+        done = await self._stored(self._provisioned_key(ctx))
+        return done is None or done.get("attempt") == ctx.attempt
+
+    async def _fetch_key(self, ctx: RunContext, steps: Sequence[StepRecord]) -> str:
+        """Where the fetched repository and datasets are kept: after the GPU fallback, the CPU
+        plan's own copy when it plans other data or another mode than the GPU plan (A-47)."""
+        key = f"runs/{ctx.run_id}/fetch_report.json"
+        if not fell_back(steps):
+            return key
+        artifact = PlanArtifact.model_validate(
+            await self._json(await output_of(ctx, StepName.PLANNING))
+        )
+        cpu, gpu = artifact.cpu_plan, artifact.plan
+        if cpu is None or (cpu.mode, cpu.datasets) == (gpu.mode, gpu.datasets):
+            return key
+        return f"runs/{ctx.run_id}/fetch_report_cpu.json"
 
     async def _stored(self, key: str) -> dict[str, Any] | None:
         """A report this step stored earlier, or None."""

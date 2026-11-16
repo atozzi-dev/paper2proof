@@ -7,7 +7,7 @@ per_run:
   # CPU (Token Factory Sandboxes) up to cpu_minutes. A CPU plan cut to REDUCED, or estimated
   # over gpu_when_cpu_estimate_over of cpu_minutes, gets a GPU plan when the invite allows it;
   # a GPU job that is not running within gpu_wait_s falls back to the CPU plan.
-  gpu_minutes: 30  # 60 once EXECUTING budgets each target (A-47, task 6)
+  gpu_minutes: 60
   cpu_minutes: 30
   gpu_wait_s: 600
   gpu_when_cpu_estimate_over: 0.5

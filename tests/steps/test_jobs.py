@@ -82,7 +82,7 @@ async def test_a_job_that_no_longer_fits_the_budget_is_cancelled(store: Store) -
     backend = FakeJobBackend()
     ctx = await _ctx(store, backend)
     await _recorded_running_job(store, backend)
-    await _spend(ctx, 20)
+    await _spend(ctx, ctx.limits.per_run.gpu_minutes - 10)
     clock = Clock(t=60)  # 24 minutes left of its watchdog, only 10 in the budget
     with pytest.raises(BudgetExceeded):
         await run_job(
@@ -242,11 +242,14 @@ async def test_a_resumed_job_seen_active_only_now_counts_from_its_submission(
 
 
 def test_queue_and_watchdog_fit_in_the_platform_timeout() -> None:
-    """The platform's own 1-hour timeout may count the queue too: it must never fire first."""
-    from app.execution.nebius_backend import PLATFORM_TIMEOUT
+    """The platform's own timeout may count the queue too: it must never fire first, also for
+    an hour on the GPU (A-47)."""
+    from app.execution.nebius_backend import QUEUE_ALLOWANCE_S, platform_timeout
     from app.orchestrator.steps.executing import EXEC_MARGIN_S, MAX_BUDGET_S
 
-    assert PLATFORM_TIMEOUT.total_seconds() > QUEUE_CAP_S + MAX_BUDGET_S + EXEC_MARGIN_S
+    assert QUEUE_ALLOWANCE_S == QUEUE_CAP_S
+    watchdog = MAX_BUDGET_S + EXEC_MARGIN_S
+    assert platform_timeout(watchdog).total_seconds() > QUEUE_CAP_S + watchdog
 
 
 class SlowToCancel(ScriptedBackend):

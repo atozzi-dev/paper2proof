@@ -1,6 +1,7 @@
 """SMOKE_TESTING: the Coder loop on scripted model turns and a fake smoke executor."""
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1473,3 +1474,54 @@ def test_the_coder_is_told_where_the_full_run_executes() -> None:
     assert "NVIDIA L40S" in gpu and "torch.cuda.is_available()" in gpu
     assert "cuda" not in cpu and "executes on CPU" in cpu
     assert "{{" not in gpu + cpu
+
+
+async def _fell_back(artifacts: LocalArtifactStore, *, fallback_seen: bool) -> None:
+    """The GPU pass of the Coder used up its smoke runs; then the GPU job never started."""
+    from app.domain.models import ExecTarget, FallbackReason, GpuFallback, PlanArtifact
+
+    plan = Plan.model_validate(artifacts.get_json(PLAN_KEY)["plan"])
+    artifact = PlanArtifact(
+        plan=plan, est_cost_usd=1.0, target=ExecTarget.GPU, cpu_plan=plan, est_cost_max_usd=1.7
+    )
+    artifacts.put_json(PLAN_KEY, artifact.model_dump(mode="json"))
+    artifacts.put_json(
+        f"runs/{RUN}/gpu_fallback.json",
+        GpuFallback(
+            reason=FallbackReason.NO_CAPACITY,
+            message="no GPU was free within 10 minutes: the CPU plan runs instead",
+            at=datetime(2026, 11, 16, tzinfo=UTC),
+            gpu_attempt=1,
+        ).model_dump(mode="json"),
+    )
+    artifacts.put_json(
+        f"runs/{RUN}/workspace.json",
+        {"files": {}, "smoke_runs": 8, "searches": 0, "fallback": fallback_seen},
+    )
+
+
+async def test_after_the_gpu_fallback_the_coder_gets_its_smoke_runs_again(
+    store: Store, tmp_path: Path
+) -> None:
+    """A-47: the CPU plan is a new task for the script: a fresh allowance, once."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    await _fell_back(artifacts, fallback_seen=False)
+    smoke, storage = FakeSmokeExecutor([FAIL, PASS]), FakeRunStorage()
+    step, models = _step("planted_bug", artifacts, smoke, storage)
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    state = artifacts.get_json(f"runs/{RUN}/workspace.json")
+    assert (state["smoke_runs"], state["fallback"]) == (2, True)
+    _, first = models.requests[0]
+    assert any("No GPU was available" in str(m.content) for m in first)
+
+
+async def test_a_resumed_coder_after_the_fallback_keeps_its_count(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    await _fell_back(artifacts, fallback_seen=True)
+    step, _ = _step("planted_bug", artifacts, FakeSmokeExecutor([FAIL, PASS]), FakeRunStorage())
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.SMOKE_EXHAUSTED

@@ -3,6 +3,7 @@ watchdog and one on-demand retry after a preemption."""
 
 import asyncio
 import json
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,7 +20,11 @@ from app.domain.models import (
     ClaimType,
     DatasetReq,
     ErrorCode,
+    ExecTarget,
+    FallbackReason,
+    GpuFallback,
     Plan,
+    PlanArtifact,
     PlanMode,
     RunStatus,
     Scale,
@@ -30,9 +35,16 @@ from app.domain.models import (
 from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
 from app.execution.config import ExecutionConfig
 from app.execution.fake_backend import FakeJobBackend
+from app.execution.nebius_backend import JobBackendError
 from app.execution.run_storage import FakeRunStorage
 from app.models.pricing import load_cloud_prices
-from app.orchestrator.budget import Budget, BudgetExceeded, SpendKind
+from app.orchestrator.budget import (
+    Budget,
+    BudgetExceeded,
+    KillSwitchActive,
+    SpendKind,
+    load_budget_limits,
+)
 from app.orchestrator.context import RunContext
 from app.orchestrator.steps.executing import EXEC_MARGIN_S, ExecutingStep, exit_info, new_lines
 from app.orchestrator.steps.jobs import QUEUE_CAP_S
@@ -322,7 +334,7 @@ async def test_in_sandboxes_the_experiment_gets_the_runs_whole_budget(
     backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
     await _step(artifacts, storage, FakeClock(), sandbox=sandbox).run(_with(ctx, backend))
     budget = _manifest_of(backend.specs[0]).budget_seconds
-    whole = ctx.limits.per_run.gpu_minutes * 60 - EXEC_MARGIN_S
+    whole = ctx.limits.per_run.cpu_minutes * 60 - EXEC_MARGIN_S  # A-47: the CPU allowance
     assert budget == (whole if sandbox else 8 * 60)
 
 
@@ -381,10 +393,12 @@ async def test_a_job_preempted_after_partial_seeds_is_retried(store: Store, tmp_
 
 
 async def test_no_retry_when_the_gpu_budget_does_not_allow_it(store: Store, tmp_path: Path) -> None:
-    # 20 planned minutes: the first job runs ~24.5 of its 25-minute watchdog, then is
-    # preempted; the 5.5 minutes left can't hold even a 60 s budget plus the margin.
-    ctx, artifacts, storage = await _setup(store, tmp_path, gpu_minutes=20)
-    polls = 49
+    # 10 minutes under the cap planned: the first job runs all but 30 s of its watchdog (the
+    # plan + 5 minutes), then is preempted; the 5.5 minutes left can't hold even a 60 s budget
+    # plus the margin.
+    planned = int(load_budget_limits(ROOT / "config" / "budgets.yaml").per_run.gpu_minutes) - 10
+    ctx, artifacts, storage = await _setup(store, tmp_path, gpu_minutes=planned)
+    polls = 2 * (planned + 5) - 1
     backend = ScriptedBackend({1: [JobState.RUNNING] * polls + [JobState.FAILED]})
     result = await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
 
@@ -402,12 +416,16 @@ async def test_no_retry_when_the_gpu_budget_does_not_allow_it(store: Store, tmp_
 async def test_partial_results_are_kept_when_there_is_no_retry(
     store: Store, tmp_path: Path
 ) -> None:
-    ctx, artifacts, storage = await _setup(store, tmp_path, gpu_minutes=20)
+    planned = int(load_budget_limits(ROOT / "config" / "budgets.yaml").per_run.gpu_minutes) - 10
+    ctx, artifacts, storage = await _setup(store, tmp_path, gpu_minutes=planned)
 
     def partial(name: str, n: int) -> None:
         storage.objects[(RUN, "results/1/results.json")] = _results(1, "budget_timeout")
 
-    backend = ScriptedBackend({1: [JobState.RUNNING] * 49 + [JobState.FAILED]}, on_status=partial)
+    polls = 2 * (planned + 5) - 1  # all but 30 s of its watchdog: no room for a retry
+    backend = ScriptedBackend(
+        {1: [JobState.RUNNING] * polls + [JobState.FAILED]}, on_status=partial
+    )
     result = await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
     assert result.output_ref is not None
     assert artifacts.get_json(result.output_ref)["results_key"] == "results/1/results.json"
@@ -644,8 +662,9 @@ async def test_a_report_without_valid_digests_fails_provisioning(
 
 async def test_no_exec_job_when_the_gpu_minutes_are_spent(store: Store, tmp_path: Path) -> None:
     ctx, artifacts, storage = await _setup(store, tmp_path)
-    spent = await ctx.budget.check_and_reserve(RUN, SpendKind.GPU_MINUTES, 25)
-    await ctx.budget.commit(spent, 25)
+    used = ctx.limits.per_run.gpu_minutes - 5  # 5 minutes left: not even the margin
+    spent = await ctx.budget.check_and_reserve(RUN, SpendKind.GPU_MINUTES, used)
+    await ctx.budget.commit(spent, used)
     backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
     with pytest.raises(BudgetExceeded):
         await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
@@ -702,10 +721,10 @@ async def test_the_kill_switch_on_the_retry_keeps_the_first_attempt(
     step = _step(artifacts, storage, FakeClock())
     original = step._manifest
 
-    async def manifest_then_trip(ctx_: RunContext, plan: Plan, attempt: int) -> Any:
+    async def manifest_then_trip(ctx_: RunContext, plan: Plan, attempt: int, where: Any) -> Any:
         if attempt == 2:
             await ctx.budget.set_kill_switch(True)
-        return await original(ctx_, plan, attempt)
+        return await original(ctx_, plan, attempt, where)
 
     step._manifest = manifest_then_trip  # type: ignore[method-assign]
     result = await step.run(_with(ctx, backend))
@@ -935,3 +954,261 @@ async def test_records_for_other_conditions_are_not_full_scale(
 ) -> None:
     other = {**_record("200"), "id": "s9"}
     assert await _full_scale(store, tmp_path, setup=[EPOCHS], records=[other]) is False
+
+
+# --- GPU when needed (A-47): the GPU window and the fallback to the CPU plan ---------------
+
+FALLBACK_KEY = f"runs/{RUN}/gpu_fallback.json"
+WINDOW_KEY = f"runs/{RUN}/gpu_window.json"
+PROVISIONED_KEY = f"runs/{RUN}/fallback_provisioned.json"
+
+
+def _auto_config(preemptible: bool = False) -> ExecutionConfig:
+    return _config(preemptible).model_copy(update={"cpu_exec": ("sandbox", "4vcpu-4gb")})
+
+
+def _auto_step(
+    artifacts: LocalArtifactStore, storage: FakeRunStorage, clock: FakeClock
+) -> ExecutingStep:
+    return ExecutingStep(
+        artifacts=artifacts,
+        storage=storage,
+        config=_auto_config(),
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+        poll_s=30,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+
+async def _gpu_target(
+    store: Store, tmp_path: Path
+) -> tuple[RunContext, LocalArtifactStore, FakeRunStorage]:
+    """A run PLANNING sent to the GPU, with its CPU plan to fall back to."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    stored = artifacts.get_json(PLAN_KEY)
+    gpu = Plan.model_validate(stored["plan"]).model_copy(update={"gpu_minutes_est": 40})
+    cpu = gpu.model_copy(update={"gpu_minutes_est": 28})
+    artifact = PlanArtifact(
+        plan=gpu,
+        est_cost_usd=1.0,
+        target=ExecTarget.GPU,
+        cpu_plan=cpu,
+        est_cost_max_usd=1.7,
+    )
+    artifacts.put_json(PLAN_KEY, artifact.model_dump(mode="json"))
+    return ctx, artifacts, storage
+
+
+def _fallback_of(artifacts: LocalArtifactStore) -> GpuFallback:
+    return GpuFallback.model_validate(artifacts.get_json(FALLBACK_KEY))
+
+
+async def _fell_back_with(
+    store: Store, result: Any, artifacts: LocalArtifactStore, reason: FallbackReason
+) -> None:
+    assert (result.next, result.output_ref) == (StepName.PROVISIONING, FALLBACK_KEY)
+    record = _fallback_of(artifacts)
+    assert (record.reason, record.gpu_attempt) == (reason, 1)
+    warnings = [p for p in await _events(store) if isinstance(p, WarningPayload)]
+    assert [w.message for w in warnings if w.code == "NO_GPU_FALLBACK_CPU"] == [record.message]
+
+
+async def test_with_no_gpu_capacity_the_run_falls_back_to_its_cpu_plan(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    backend.no_capacity = {"gpu-l40s-a": 99, "gpu-l40s-d": 99}
+    clock = FakeClock()
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.NO_CAPACITY)
+    assert _fallback_of(artifacts).message == (
+        "no GPU was free within 10 minutes: the CPU plan runs instead"
+    )
+    assert backend.jobs == {} and clock.t < ctx.limits.per_run.gpu_wait_s
+
+
+async def test_a_gpu_job_still_queued_at_the_end_of_the_window_falls_back(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    backend = ScriptedBackend({1: [JobState.PENDING]})
+    clock = FakeClock()
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.QUEUE_TIMEOUT)
+    assert backend.cancelled == [f"p2p-exec-{SLUG}-1"]
+    window = ctx.limits.per_run.gpu_wait_s
+    assert window <= clock.t < window + 120  # the window, a poll and the stop wait
+
+
+async def test_the_window_counts_from_the_first_creation_across_a_restart(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    clock = FakeClock()
+    clock.t = 500.0  # the first try was created 500 s ago, before a restart
+    artifacts.put_json(WINDOW_KEY, {"started_at": NOW.isoformat()})
+    backend = ScriptedBackend({1: [JobState.PENDING]})
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.QUEUE_TIMEOUT)
+    assert clock.t < ctx.limits.per_run.gpu_wait_s + 120  # not another full window
+
+
+class RefusedCreate(ScriptedBackend):
+    """The platform fails the creation without a reason (S5, 2026-10-27: code=13)."""
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        raise JobBackendError(f"{spec.name}: operation failed")
+
+
+async def test_a_gpu_job_the_platform_fails_to_create_falls_back_and_alerts(
+    store: Store, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    with caplog.at_level(logging.WARNING):
+        result = await _auto_step(artifacts, storage, FakeClock()).run(
+            _with(ctx, RefusedCreate({}))
+        )
+    await _fell_back_with(store, result, artifacts, FallbackReason.PLATFORM_ERROR)
+    assert _fallback_of(artifacts).message == (
+        "the GPU job could not start (platform error): the CPU plan runs instead"
+    )
+    assert any(getattr(r, "alert", False) for r in caplog.records)
+
+
+async def test_a_used_up_gpu_quota_falls_back(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    backend.quota_exceeded = ["compute.instance.gpu.l40s"]
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.QUOTA)
+
+
+async def test_a_daily_cloud_budget_too_small_for_the_gpu_falls_back(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    cap = ctx.limits.global_.cloud_usd_per_day
+    spent = await ctx.budget.check_and_reserve(RUN, SpendKind.CLOUD_USD, cap - 0.05)
+    await ctx.budget.commit(spent, cap - 0.05)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.DAILY_CAP)
+    assert backend.specs == []
+
+
+async def test_the_kill_switch_stops_the_run_instead_of_falling_back(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    await ctx.budget.set_kill_switch(True)
+    with pytest.raises(KillSwitchActive):
+        await _auto_step(artifacts, storage, FakeClock()).run(
+            _with(ctx, ScriptedBackend({1: [JobState.SUCCEEDED]}))
+        )
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+async def test_a_gpu_job_that_starts_by_the_end_of_the_window_runs(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    queued = [JobState.PENDING] * 19  # 19 polls of 30 s: still inside the 600 s window
+    backend = ScriptedBackend({1: [*queued, JobState.RUNNING, JobState.SUCCEEDED]})
+    storage.objects[(RUN, "results/1/results.json")] = _results(1)
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+    assert backend.specs[0].platform == "gpu-l40s-a"
+    assert backend.specs[0].image_digest_ref == DIGEST.format("p2p-runner")
+
+
+async def test_a_gpu_job_that_ran_and_failed_is_the_experiment_s_result(
+    store: Store, tmp_path: Path
+) -> None:
+    """A CUDA out-of-memory, say: the plan had 48 GB; no fallback."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+
+    def crashed(name: str, n: int) -> None:
+        storage.objects[(RUN, "results/1/results.json")] = _results(1, "experiment_error", 30)
+
+    backend = ScriptedBackend({1: [JobState.RUNNING, JobState.FAILED]}, on_status=crashed)
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+async def test_a_gpu_job_that_failed_before_it_ran_falls_back(store: Store, tmp_path: Path) -> None:
+    """Never seen running, no results written: the platform failed it (a pull, a mount)."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    backend = ScriptedBackend({1: [JobState.PENDING, JobState.FAILED]})
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.PLATFORM_ERROR)
+
+
+class NeverStops(ScriptedBackend):
+    """The queued GPU job ignores its cancellation (Nebius CANCELLING): it may still start."""
+
+    async def status(self, handle: JobHandle) -> JobState:
+        if handle.name in self.cancelled:
+            return JobState.RUNNING
+        return await super().status(handle)
+
+    async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]:
+        return [(h, JobState.RUNNING, t) for h, _, t in await super().list_jobs(prefix)]
+
+
+async def test_no_fallback_while_the_gpu_job_may_still_run(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    backend = NeverStops({1: [JobState.PENDING]})
+    with pytest.raises(P2PError) as err:
+        await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert err.value.code is ErrorCode.TIMEOUT
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+async def test_after_the_fallback_the_cpu_plan_runs_in_sandboxes(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    record = GpuFallback(
+        reason=FallbackReason.NO_CAPACITY,
+        message="no GPU was free within 10 minutes: the CPU plan runs instead",
+        at=NOW,
+        gpu_attempt=1,
+    )
+    artifacts.put_json(FALLBACK_KEY, record.model_dump(mode="json"))
+    artifacts.put_json(PROVISIONED_KEY, {"attempt": 2})
+    storage.objects[(RUN, "results/3/results.json")] = _results(3)
+    backend = ScriptedBackend({3: [JobState.SUCCEEDED]})
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING
+    [spec] = backend.specs
+    assert (spec.name, spec.platform, spec.preemptible) == (f"p2p-exec-{SLUG}-3", "sandbox", False)
+    assert spec.image_digest_ref == DIGEST.format("p2p-runner-cpu")
+    manifest = _manifest_of(spec)
+    cpu_cap = ctx.limits.per_run.cpu_minutes * 60
+    assert manifest.budget_seconds <= cpu_cap - EXEC_MARGIN_S
+    assert manifest.seeds == Plan.model_validate(artifacts.get_json(PLAN_KEY)["cpu_plan"]).seeds
+
+
+async def test_a_step_resumed_after_the_fallback_record_goes_back_to_provisioning(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    record = GpuFallback(
+        reason=FallbackReason.QUOTA,
+        message="the GPU quota is exhausted: the CPU plan runs instead",
+        at=NOW,
+        gpu_attempt=1,
+    )
+    artifacts.put_json(FALLBACK_KEY, record.model_dump(mode="json"))
+    backend = ScriptedBackend({})
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert (result.next, result.output_ref) == (StepName.PROVISIONING, FALLBACK_KEY)
+    assert backend.specs == []

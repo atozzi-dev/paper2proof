@@ -37,7 +37,7 @@ TRANSITIONS: dict[StepName, frozenset[StepName | RunStatus]] = {
     S.AWAITING_APPROVAL: frozenset({S.PROVISIONING}),
     S.PROVISIONING: frozenset({S.SMOKE_TESTING}),
     S.SMOKE_TESTING: frozenset({S.SMOKE_TESTING, S.PROVISIONING, S.EXECUTING}),
-    S.EXECUTING: frozenset({S.ANALYZING}),
+    S.EXECUTING: frozenset({S.ANALYZING, S.PROVISIONING}),  # A-47: the GPU fallback
     S.ANALYZING: frozenset({S.VERDICT}),
     S.VERDICT: frozenset({RunStatus.COMPLETED}),
 }

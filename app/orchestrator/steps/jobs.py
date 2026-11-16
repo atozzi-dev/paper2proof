@@ -57,6 +57,7 @@ class JobOutcome:
     run_cancelled: bool = False
     queue_timed_out: bool = False  # still queued at the cap: no capacity
     stopped: bool = True  # False: cancelled but still not terminal (it may write meanwhile)
+    ran: bool = False  # seen RUNNING or SUCCEEDED: it left the queue and started (A-47)
 
 
 async def _status(
@@ -238,6 +239,7 @@ async def run_job(
     was_blind = False  # a poll failed (only read while the job was never seen)
     start_hidden = False  # first seen only after an outage: when it began is unknown
     last_queued: datetime | None = None
+    ran = False
 
     async def observe() -> tuple[JobState, datetime]:
         """One poll; GPU time starts at the last poll that still saw the job queued."""
@@ -287,6 +289,7 @@ async def run_job(
         last: JobState | None = None
         while True:
             state, seen = await observe()
+            ran = ran or state in (JobState.RUNNING, JobState.SUCCEEDED)
             if state is not last:
                 await job_status(state)
                 last = state
@@ -349,4 +352,5 @@ async def run_job(
         run_cancelled=cancelled,
         queue_timed_out=queue_timed_out,
         stopped=stopped,
+        ran=ran,
     )

@@ -172,7 +172,7 @@ async def test_the_plan_lists_up_to_max_seeds_seeds(store: Store, tmp_path: Path
 
 async def test_over_budget_plans_are_clamped_and_reduced(store: Store, tmp_path: Path) -> None:
     plan, _, _ = await _plan(store, tmp_path, "over_gpu")
-    assert plan.gpu_minutes_est == 30  # config/budgets.yaml per_run.gpu_minutes
+    assert plan.gpu_minutes_est == LIMITS.gpu_minutes  # config/budgets.yaml per_run
     assert plan.scale is Scale.REDUCED
     assert any("GPU" in n for n in plan.notes)
 

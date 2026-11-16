@@ -13,9 +13,14 @@ from app.domain.errors import P2PError
 from app.domain.events import JobStatusPayload, WarningPayload
 from app.domain.models import (
     ClaimType,
+    DatasetReq,
     ErrorCode,
+    ExecTarget,
+    FallbackReason,
+    GpuFallback,
     PackageReq,
     Plan,
+    PlanArtifact,
     PlanMode,
     RunStatus,
     Scale,
@@ -1189,3 +1194,88 @@ async def test_an_oversized_error_file_is_not_read(store: Store, tmp_path: Path)
         await _step(store, artifacts, storage, FakeClock()).run(ctx)
     assert err.value.code is ErrorCode.PROVISION_FAILED
     assert err.value.message == "provisioning failed"
+
+
+# --- GPU when needed (A-47): the fallback's return to PROVISIONING ------------------------
+
+FALLBACK_KEY = f"runs/{RUN}/gpu_fallback.json"
+
+
+async def _fallen_back(
+    store: Store, tmp_path: Path, *, cpu_datasets: list[str]
+) -> tuple[RunContext, LocalArtifactStore]:
+    """A GPU run whose GPU job never started: EXECUTING recorded the fallback and returned."""
+    artifacts = LocalArtifactStore(tmp_path)
+
+    def plan(datasets: list[str], minutes: float) -> Plan:
+        return Plan(
+            mode=PlanMode.REPO_FIRST,
+            claim_ids=["c1"],
+            claim_types={"c1": ClaimType.RELATIVE},
+            scale=Scale.REDUCED,
+            seeds=[0, 1, 2],
+            datasets=[DatasetReq(kind="hf", id=d) for d in datasets],
+            gpu_minutes_est=minutes,
+        )
+
+    artifact = PlanArtifact(
+        plan=plan(["uoft-cs/cifar10"], 40),
+        est_cost_usd=1.0,
+        target=ExecTarget.GPU,
+        cpu_plan=plan(cpu_datasets, 28),
+        est_cost_max_usd=1.7,
+    )
+    artifacts.put_json(PLAN_KEY, artifact.model_dump(mode="json"))
+    artifacts.put_json(
+        DISCOVERY_KEY,
+        Discovery(
+            repo=RepoRef(url="https://github.com/org/repo", source="paper", official=True)
+        ).model_dump(mode="json"),
+    )
+    artifacts.put_json(
+        FALLBACK_KEY,
+        GpuFallback(
+            reason=FallbackReason.NO_CAPACITY,
+            message="no GPU was free within 10 minutes: the CPU plan runs instead",
+            at=NOW,
+            gpu_attempt=1,
+        ).model_dump(mode="json"),
+    )
+    artifacts.put_json(  # stored by attempt 1, for the GPU plan
+        f"runs/{RUN}/fetch_report.json",
+        {**_fetch_report(), "repo_commit": "0" * 40, "data_archives": [], "datasets": []},
+    )
+    previous = [
+        (StepName.INGESTING, "i"),
+        (StepName.EXTRACTING_CLAIMS, "c"),
+        (StepName.DISCOVERING, DISCOVERY_KEY),
+        (StepName.PLANNING, PLAN_KEY),
+        (StepName.PROVISIONING, "p1"),
+        (StepName.SMOKE_TESTING, "not a package request"),
+        (StepName.EXECUTING, FALLBACK_KEY),
+    ]
+    return await ctx_at(store, StepName.PROVISIONING, previous=previous), artifacts
+
+
+@respx.mock
+async def test_the_fallback_s_return_is_not_a_package_request(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _fallen_back(store, tmp_path, cpu_datasets=["uoft-cs/cifar10"])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    result = await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert result.next is StepName.SMOKE_TESTING
+    assert list(ctx.jobs.jobs) == [f"p2p-prov-{RUN[2:]}-2"]  # type: ignore[attr-defined]
+    assert artifacts.get_json(f"runs/{RUN}/fallback_provisioned.json") == {"attempt": 2}
+
+
+@respx.mock
+async def test_the_fallback_fetches_the_data_its_cpu_plan_needs(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _fallen_back(store, tmp_path, cpu_datasets=["ylecun/mnist"])
+    storage = FakeRunStorage()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, FakeClock()).run(ctx)
+    assert f"p2p-fetch-{RUN[2:]}-2" in ctx.jobs.jobs  # type: ignore[attr-defined]
+    assert _manifest(ctx, JobKind.FETCH)["datasets"][0]["id"] == "ylecun/mnist"
+    assert artifacts.get_json(f"runs/{RUN}/fetch_report_cpu.json")["run_id"] == RUN

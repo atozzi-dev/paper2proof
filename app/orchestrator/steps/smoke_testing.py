@@ -145,6 +145,7 @@ class _State:
         files = data.get("files")
         self.files: dict[str, str] = files if isinstance(files, dict) else {}
         self.smoke_runs = int(data.get("smoke_runs", 0))
+        self.fallback = data.get("fallback") is True  # the CPU plan's fresh start was given (A-47)
         self.searches = int(data.get("searches", 0))
         last = data.get("last_smoke")
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
@@ -173,6 +174,7 @@ class _State:
             "last_smoke": self.last_smoke,
             "stand_in_flags": self.stand_in_flags,
             "swap_hints": self.swap_hints,
+            "fallback": self.fallback,
         }
 
 
@@ -322,6 +324,7 @@ class SmokeTestingStep:
         paper: IngestedPaper | None = None,
         excerpt: str = "",
         target: ExecTarget = ExecTarget.CPU,
+        fallback: bool = False,
     ) -> list[Message]:
         system = coder_system_prompt(runs, target)
         listed = [
@@ -403,7 +406,12 @@ class SmokeTestingStep:
                         max_chars=CONTEXT_FILE_CHARS,
                     )
                 )
-        if reprovisioned:
+        if fallback:
+            context.append(
+                "No GPU was available: the full run now executes on CPU with the plan below. "
+                "Adapt the script you wrote to its planned values, call run_smoke, then finish."
+            )
+        elif reprovisioned:
             context.append(
                 "The packages you requested were provisioned again: call run_smoke first to see "
                 "whether the error is gone, and never request the same package twice."
@@ -427,6 +435,9 @@ class SmokeTestingStep:
         plan = active.plan
         claims = await planned_claims(ctx, plan)
         state = await self._state(ctx)
+        fallback = active.fallback is not None and not state.fallback
+        if fallback:  # A-47: the CPU plan is a new task for the script, with its own allowance
+            state.smoke_runs, state.last_smoke, state.fallback = 0, None, True
         ws = Workspace.from_snapshot(state.files, await self._repo(ctx))
         max_runs = ctx.limits.per_run.fix_iterations
         executor = self._smoke(ctx, await self._archives(ctx))
@@ -438,7 +449,16 @@ class SmokeTestingStep:
             else ""
         )
         messages = self._messages(
-            claims, plan, ws, state, max_runs, ctx.attempt > 1, paper, excerpt, active.target
+            claims,
+            plan,
+            ws,
+            state,
+            max_runs,
+            ctx.attempt > 1,
+            paper,
+            excerpt,
+            active.target,
+            fallback,
         )
         given = "\n".join(  # what the paper gives the experiment, for extra_generator_options
             [excerpt, *(f"{c.text}\n{c.dataset}\n{c.setting}" for c, _ in claims)]

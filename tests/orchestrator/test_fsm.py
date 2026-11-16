@@ -295,3 +295,30 @@ def test_failed_step_results_need_an_error_code() -> None:
 
     with pytest.raises(ValueError, match="error_code"):
         StepResult(next=RunStatus.FAILED)
+
+
+async def test_the_gpu_fallback_s_return_to_provisioning_is_not_a_package_request(
+    store: Store, make_orchestrator: OrchestratorFactory
+) -> None:
+    """A-47: EXECUTING sends a GPU run back on its CPU plan; the CPU Coder still gets its two
+    package requests."""
+    await new_run(store)
+    fallback = f"runs/{RUN}/gpu_fallback.json"
+    steps = make_steps(
+        {
+            StepName.EXECUTING: lambda ctx: StepResult(
+                next=StepName.PROVISIONING, output_ref=fallback
+            ),
+            StepName.SMOKE_TESTING: lambda ctx: StepResult(
+                next=StepName.EXECUTING if ctx.attempt == 1 else StepName.PROVISIONING,
+                output_ref=f"ref-smoke-{ctx.attempt}",
+            ),
+        }
+    )
+    status = await (await make_orchestrator(steps).submit(RUN))
+    assert status is RunStatus.FAILED
+    run = await store.get_run(RUN)
+    assert run is not None and run.error_code is ErrorCode.PACKAGE_REJECTED
+    assert steps[StepName.EXECUTING].calls == [1]
+    assert steps[StepName.PROVISIONING].calls == [1, 2, 3, 4]  # + the fallback's return
+    assert steps[StepName.SMOKE_TESTING].calls == [1, 2, 3, 4]

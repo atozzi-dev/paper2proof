@@ -21,7 +21,7 @@ import math
 import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -39,20 +39,32 @@ from app.domain.models import (
     Claim,
     ClaimType,
     ErrorCode,
+    ExecTarget,
+    FallbackReason,
+    GpuFallback,
     Plan,
     RunStatus,
     Scale,
     SetupRecord,
     StepName,
 )
-from app.execution.backend import CapacityError, JobKind, JobSpec, JobState, VolumeMount
+from app.execution.backend import (
+    CapacityError,
+    JobKind,
+    JobSpec,
+    JobState,
+    QuotaExceeded,
+    VolumeMount,
+)
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
+from app.execution.nebius_backend import JobBackendError
 from app.execution.run_storage import RunStorage
 from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 from app.models.pricing import CloudPrices
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
+from app.orchestrator.fallback import fallback_key
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import active_plan, output_of, planned_claims
 from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job, stop_jobs, utcnow
@@ -63,8 +75,18 @@ from app.verdict.results import MAX_RESULTS_BYTES
 log = logging.getLogger(__name__)
 
 EXEC_MARGIN_S = 300  # watchdog = budget_seconds + margin (execution-contracts §8)
-MIN_BUDGET_S, MAX_BUDGET_S = 60, 1800  # schemas/manifest.schema.json
+MIN_BUDGET_S = 60  # schemas/manifest.schema.json
+MAX_BUDGET_S = 3600  # the schema's bound: an hour on the GPU; on CPU, cpu_minutes (A-47)
 MAX_ATTEMPTS = 2  # the first job and one on-demand retry after a preemption
+FALLBACK_ATTEMPT = MAX_ATTEMPTS + 1  # the CPU plan's job after a GPU fallback (A-47)
+NO_GPU_FALLBACK = "NO_GPU_FALLBACK_CPU"
+_FALLBACK_MESSAGES = {
+    FallbackReason.NO_CAPACITY: "no GPU was free within {minutes} minutes",
+    FallbackReason.QUEUE_TIMEOUT: "no GPU was free within {minutes} minutes",
+    FallbackReason.QUOTA: "the GPU quota is exhausted",
+    FallbackReason.PLATFORM_ERROR: "the GPU job could not start (platform error)",
+    FallbackReason.DAILY_CAP: "the daily cloud budget does not cover a GPU job",
+}
 PREEMPT_SLACK_S = 5.0  # a runner that hit its own budget reports at least budget_seconds
 MAX_LIVE_LOG_BYTES = 512 * 1024
 LINE_CHARS = 500
@@ -218,6 +240,25 @@ class _Placed:
 
 
 _Unplaced = Literal["no_capacity", "queue_timeout", "cancelled"]
+_Refused = Literal["quota", "platform_error", "daily_cap"]  # a GPU job with a fallback only
+_REASON: dict[str, FallbackReason] = {
+    "no_capacity": FallbackReason.NO_CAPACITY,
+    "queue_timeout": FallbackReason.QUEUE_TIMEOUT,
+    "quota": FallbackReason.QUOTA,
+    "platform_error": FallbackReason.PLATFORM_ERROR,
+    "daily_cap": FallbackReason.DAILY_CAP,
+}
+
+
+@dataclass(frozen=True)
+class _Where:
+    """Where the run's target executes (A-47): the platform with its capacity fallback, the
+    runner image the manifest names, and whether it is a GPU (an hour; a window with auto)."""
+
+    primary: tuple[str, str]
+    fallback: tuple[str, str] | None
+    runner_image: str
+    gpu: bool
 
 
 class ExecutingStep:
@@ -241,26 +282,48 @@ class ExecutingStep:
         self._poll_s = poll_s
         self._clock = clock
         self._sleep = sleep
-        self._primary = (config.exec_platform, config.exec_preset)
-        self._fallback = config.exec_fallback  # execution-contracts §8; None in Sandboxes
 
     async def _json(self, key: str) -> Any:
         return await asyncio.to_thread(self._artifacts.get_json, key)
 
+    async def _exists(self, key: str) -> bool:
+        try:
+            await self._json(key)
+        except FileNotFoundError:
+            return False
+        return True
+
     async def _put(self, key: str, value: dict[str, Any]) -> None:
         await asyncio.to_thread(self._artifacts.put_json, key, value)
 
-    async def _budget_seconds(self, ctx: RunContext, plan: Plan) -> int | None:
+    def _where(self, target: ExecTarget) -> _Where:
+        """A CPU target runs in Sandboxes when the deploy has both (auto); otherwise the exec
+        config is the deploy's one place (Sandboxes, or the GPU with its fallback)."""
+        config = self._config
+        if target is ExecTarget.CPU and config.cpu_exec is not None:
+            return _Where(config.cpu_exec, None, config.runner_cpu_image, gpu=False)
+        return _Where(
+            (config.exec_platform, config.exec_preset),
+            config.exec_fallback,
+            config.runner_image,
+            gpu=config.exec_platform != SANDBOX_PLATFORM,
+        )
+
+    async def _budget_seconds(self, ctx: RunContext, plan: Plan, where: _Where) -> int | None:
         """The planned GPU time, within what the run's GPU minutes still allow (the watchdog
         margin included); None when not even the minimum fits. In Sandboxes (CPU, cents per
         hour) the run's whole allowance: the Planner's estimate is a guess, and a job that
         outlives it ends the run without enough seeds (KAN, eval set B)."""
+        limits = ctx.limits.per_run
         spent = await ctx.budget.run_spend(ctx.run_id, SpendKind.GPU_MINUTES)
-        left_s = int((ctx.limits.per_run.gpu_minutes - spent) * 60) - EXEC_MARGIN_S
-        planned = max(math.ceil(plan.gpu_minutes_est * 60), MIN_BUDGET_S)
-        if self._primary[0] == SANDBOX_PLATFORM:
-            planned = MAX_BUDGET_S
-        budget = min(planned, MAX_BUDGET_S, left_s)
+        if where.gpu:  # A-47: up to an hour, within the plan's estimate
+            allowance, cap = limits.gpu_minutes, MAX_BUDGET_S
+            planned = max(math.ceil(plan.gpu_minutes_est * 60), MIN_BUDGET_S)
+        else:  # Sandboxes: the whole CPU allowance (the estimate is a guess)
+            allowance = limits.cpu_minutes
+            cap = planned = int(limits.cpu_minutes * 60)
+        left_s = int((allowance - spent) * 60) - EXEC_MARGIN_S
+        budget = min(planned, cap, left_s)
         return budget if budget >= MIN_BUDGET_S else None
 
     async def _archives(self, ctx: RunContext, plan: Plan) -> ArchiveDigests:
@@ -292,7 +355,9 @@ class ExecutingStep:
             raise failed
         return archives
 
-    async def _manifest(self, ctx: RunContext, plan: Plan, attempt: int) -> ExecManifest | None:
+    async def _manifest(
+        self, ctx: RunContext, plan: Plan, attempt: int, where: _Where
+    ) -> ExecManifest | None:
         """The attempt's manifest: the one kept before its job was submitted, or a new one
         (None when the GPU budget left is too small for it)."""
         key = f"runs/{ctx.run_id}/exec_manifest_{attempt}.json"
@@ -300,7 +365,7 @@ class ExecutingStep:
             return ExecManifest.model_validate(await self._json(key))
         except FileNotFoundError:
             pass
-        budget = await self._budget_seconds(ctx, plan)
+        budget = await self._budget_seconds(ctx, plan, where)
         if budget is None:
             return None
         smoke = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
@@ -310,7 +375,7 @@ class ExecutingStep:
             schema_="p2p.manifest/v2",
             run_id=ctx.run_id,
             attempt=attempt,
-            image_digest=self._config.runner_image.rsplit("@", 1)[1],
+            image_digest=where.runner_image.rsplit("@", 1)[1],
             entrypoint=str(smoke["entrypoint"]),
             args=[str(a) for a in smoke["args"]],
             seeds=plan.seeds,
@@ -340,13 +405,18 @@ class ExecutingStep:
         return self._config.preemptible_gpu and attempt == 1
 
     def _spec(
-        self, manifest: ExecManifest, bucket: str, preemptible: bool, where: tuple[str, str]
+        self,
+        manifest: ExecManifest,
+        bucket: str,
+        preemptible: bool,
+        where: tuple[str, str],
+        image: str,
     ) -> JobSpec:
         body = manifest.model_dump_json(by_alias=True).encode()
         return JobSpec(
             name=job_name(JobKind.EXEC, manifest.run_id, manifest.attempt),
             kind=JobKind.EXEC,
-            image_digest_ref=self._config.runner_image,
+            image_digest_ref=image,
             platform=where[0],
             preset=where[1],
             disk_gib=EXEC_DISK_GIB,
@@ -414,20 +484,65 @@ class ExecutingStep:
             return False
         return True
 
-    async def _placements(self, ctx: RunContext, attempt: int) -> list[tuple[str, str]]:
+    async def _placements(
+        self, ctx: RunContext, attempt: int, where: _Where
+    ) -> list[tuple[str, str]]:
         """Where the attempt's job may be created, in order: the primary platform and its
         retries, then the fallback (if any); only the fallback once the step moved there."""
-        if self._fallback is not None and await self._moved(ctx, attempt):
-            return [self._fallback]
-        retries = [self._primary] * (1 + CAPACITY_RETRIES)
-        return retries if self._fallback is None else [*retries, self._fallback]
+        if where.fallback is not None and await self._moved(ctx, attempt):
+            return [where.fallback]
+        retries = [where.primary] * (1 + CAPACITY_RETRIES)
+        return retries if where.fallback is None else [*retries, where.fallback]
 
-    async def _ran_on(self, ctx: RunContext, attempt: int) -> tuple[str, str]:
+    async def _ran_on(self, ctx: RunContext, attempt: int, where: _Where) -> tuple[str, str]:
         """Where an attempt that had a job ran: the fallback once it moved there, else the
         primary platform (a job is only ever created on one of the two)."""
-        if self._fallback is not None and await self._moved(ctx, attempt):
-            return self._fallback
-        return self._primary
+        if where.fallback is not None and await self._moved(ctx, attempt):
+            return where.fallback
+        return where.primary
+
+    async def _window(self, ctx: RunContext) -> datetime:
+        """The end of the GPU window (A-47): gpu_wait_s from the first creation, kept so that
+        a restart continues it instead of starting a new one."""
+        key = f"runs/{ctx.run_id}/gpu_window.json"
+        try:
+            started = datetime.fromisoformat(str((await self._json(key))["started_at"]))
+        except FileNotFoundError:
+            started = self._clock()
+            await self._put(key, {"started_at": started.isoformat()})
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        return started + timedelta(seconds=ctx.limits.per_run.gpu_wait_s)
+
+    async def _fall_back(
+        self, ctx: RunContext, reason: FallbackReason, gpu_attempt: int
+    ) -> StepResult:
+        """The GPU job never ran: once every exec job of the run is stopped, record why and
+        send the run back through PROVISIONING and SMOKE_TESTING on its CPU plan (A-47). The
+        record is this attempt's output_ref, so the step records alone tell it happened."""
+        exec_jobs = f"p2p-exec-{run_slug(ctx.run_id)}-"
+        if not await stop_jobs(
+            ctx, exec_jobs, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
+        ):
+            raise P2PError(ErrorCode.TIMEOUT, "the GPU job did not stop: no CPU fallback yet")
+        key = fallback_key(ctx.run_id)
+        try:
+            await self._json(key)  # recorded before a restart: once
+        except FileNotFoundError:
+            minutes = f"{ctx.limits.per_run.gpu_wait_s / 60:g}"
+            why = _FALLBACK_MESSAGES[reason].format(minutes=minutes)
+            message = f"{why}: the CPU plan runs instead"
+            await ctx.emit(EventType.WARNING, {"code": NO_GPU_FALLBACK, "message": message})
+            if reason is FallbackReason.PLATFORM_ERROR:  # not capacity: an operator should look
+                log.warning(
+                    "GPU job never started: platform error",
+                    extra={"run_id": ctx.run_id, "alert": True},
+                )
+            record = GpuFallback(
+                reason=reason, message=message, at=self._clock(), gpu_attempt=gpu_attempt
+            )
+            await self._put(key, record.model_dump(mode="json"))
+        return StepResult(next=StepName.PROVISIONING, output_ref=key)
 
     async def _no_capacity(self, ctx: RunContext, message: str) -> None:
         await ctx.emit(EventType.WARNING, {"code": NO_CAPACITY, "message": message})
@@ -439,13 +554,23 @@ class ExecutingStep:
         bucket: str,
         preemptible: bool,
         tail: Callable[[], Awaitable[None]],
-    ) -> _Placed | _Unplaced:
+        target: _Where,
+        deadline: datetime | None = None,
+    ) -> _Placed | _Unplaced | _Refused:
         """Submit and watch the attempt's job where there is GPU capacity (architecture §15).
-        Every try uses the same job name: a refused creation leaves no job behind."""
-        places = await self._placements(ctx, manifest.attempt)
+        Every try uses the same job name: a refused creation leaves no job behind. With a
+        `deadline` (a GPU target that can fall back, A-47) the tries stop at the end of the
+        GPU window, and a refusal that a wait never helps is returned instead of raised."""
+        places = await self._placements(ctx, manifest.attempt, target)
         for i, where in enumerate(places):
+            if deadline is not None and self._clock() >= deadline:
+                break
             if i > 0:
                 if where == places[i - 1]:
+                    if deadline is not None and (
+                        self._clock() + timedelta(seconds=CAPACITY_WAIT_S) >= deadline
+                    ):
+                        break  # the next try would come after the window
                     await self._no_capacity(
                         ctx, f"no {_noun(where)}capacity on {where[0]}: retrying in 2 minutes"
                     )
@@ -461,8 +586,15 @@ class ExecutingStep:
                 run = await ctx.store.get_run(ctx.run_id)
                 if run is None or run.status is not RunStatus.RUNNING:
                     return "cancelled"
-            spec = self._spec(manifest, bucket, preemptible, where)
+            spec = self._spec(manifest, bucket, preemptible, where, target.runner_image)
             await self._clear_stale(ctx, spec.name, manifest.attempt)
+            queue_cap_s = float(QUEUE_CAP_S)
+            if deadline is not None:  # the queue gets what is left of the window
+                existing = await ctx.store.get_job(spec.name)
+                start = self._clock() if existing is None else existing.created_at
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=UTC)
+                queue_cap_s = max((deadline - start).total_seconds(), 1.0)
             try:
                 outcome = await run_job(
                     ctx,
@@ -473,12 +605,26 @@ class ExecutingStep:
                     sleep=self._sleep,
                     gpu=True,
                     on_poll=tail,
+                    queue_cap_s=queue_cap_s,
                 )
             except CapacityError:
                 log.info("no GPU capacity", extra={"run_id": ctx.run_id, "platform": where[0]})
                 continue
+            except QuotaExceeded:
+                if deadline is None:
+                    raise
+                return "quota"
+            except JobBackendError:
+                if deadline is None:
+                    raise
+                log.warning("GPU job creation failed", extra={"run_id": ctx.run_id}, exc_info=True)
+                return "platform_error"
+            except BudgetExceeded as err:
+                if deadline is None or err.limit_name != "cloud_usd_per_day":
+                    raise
+                return "daily_cap"
             if outcome.queue_timed_out:  # accepted, then never placed: its name is taken now
-                minutes = QUEUE_CAP_S // 60
+                minutes = round(queue_cap_s / 60)
                 await self._no_capacity(
                     ctx,
                     f"no {_noun(where)}capacity on {where[0]} after {minutes} minutes in the "
@@ -496,16 +642,26 @@ class ExecutingStep:
         await ctx.emit(EventType.WARNING, {"code": "JOB_PREEMPTED", "message": message})
 
     async def run(self, ctx: RunContext) -> StepResult:
-        plan = (await active_plan(ctx, self._json)).plan  # A-47: CPU after a fallback
+        active = await active_plan(ctx, self._json)  # A-47: the CPU plan after a fallback
+        plan, where = active.plan, self._where(active.target)
+        if active.fallback is not None and not await self._exists(
+            f"runs/{ctx.run_id}/fallback_provisioned.json"
+        ):  # resumed between the record and the transition: provision the CPU plan first
+            return StepResult(next=StepName.PROVISIONING, output_ref=fallback_key(ctx.run_id))
         smoke = f"p2p-smoke-{run_slug(ctx.run_id)}-"  # left by a restart, before `finish`
         if not await stop_jobs(
             ctx, smoke, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
         ):
             raise P2PError(ErrorCode.TIMEOUT, "an earlier smoke job did not stop")
-        previous = await self._retry_started(ctx, plan)
-        first = 1 if previous is None else 2
-        for attempt in range(first, MAX_ATTEMPTS + 1):
-            manifest = await self._manifest(ctx, plan, attempt)
+        # a GPU target with a CPU plan to fall back to gets a window to start in (A-47)
+        can_fall_back = active.target is ExecTarget.GPU and self._config.cpu_exec is not None
+        if active.fallback is not None:
+            previous, attempts = None, [FALLBACK_ATTEMPT]
+        else:
+            previous = await self._retry_started(ctx, plan, where)
+            attempts = list(range(1 if previous is None else 2, MAX_ATTEMPTS + 1))
+        for attempt in attempts:
+            manifest = await self._manifest(ctx, plan, attempt, where)
             if manifest is None and previous is None:
                 raise BudgetExceeded("gpu_minutes")
             if manifest is None:
@@ -520,8 +676,11 @@ class ExecutingStep:
             bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
             await ctx.jobs.ensure_gateway_up()
             tail = _LiveLog(ctx, self._storage, f"results/{attempt}/live.log")
+            deadline = await self._window(ctx) if can_fall_back and attempt == 1 else None
             try:
-                placed = await self._place(ctx, manifest, bucket, preemptible, tail)
+                placed = await self._place(
+                    ctx, manifest, bucket, preemptible, tail, where, deadline
+                )
             except (BudgetExceeded, KillSwitchActive) as err:
                 if previous is None:
                     raise
@@ -535,6 +694,8 @@ class ExecutingStep:
                 return await self._no_retry(ctx, *previous)
             if placed == "cancelled":
                 return StepResult(next=RunStatus.CANCELLED)
+            if not isinstance(placed, _Placed) and deadline is not None:
+                return await self._fall_back(ctx, _REASON[placed], attempt)
             if not isinstance(placed, _Placed):  # no capacity, or still queued at the cap
                 if previous is None:
                     return await self._done(
@@ -560,6 +721,13 @@ class ExecutingStep:
                     ctx, manifest, outcome.state, where=ran_on, has_results=True
                 )
             reason, wall = await self._exit_info(ctx, attempt)
+            if (
+                deadline is not None
+                and outcome.state is JobState.FAILED
+                and not outcome.ran
+                and reason is None
+            ):  # never seen running and nothing written: the platform failed it (A-47)
+                return await self._fall_back(ctx, FallbackReason.PLATFORM_ERROR, attempt)
             preempted = reason is None or (
                 reason == "budget_timeout"
                 and (wall is None or wall < manifest.budget_seconds - PREEMPT_SLACK_S)
@@ -583,7 +751,7 @@ class ExecutingStep:
         )  # pragma: no cover
 
     async def _retry_started(
-        self, ctx: RunContext, plan: Plan
+        self, ctx: RunContext, plan: Plan, where: _Where
     ) -> tuple[ExecManifest, JobState, str | None] | None:
         """The first attempt's outcome when its retry was already set up before a restart:
         attempt 1 is never judged again from a bucket the retry's code can write to."""
@@ -592,7 +760,7 @@ class ExecutingStep:
             outcome = await self._json(f"runs/{ctx.run_id}/exec_preempted_1.json")
         except FileNotFoundError:
             return None
-        first = await self._manifest(ctx, plan, 1)
+        first = await self._manifest(ctx, plan, 1, where)
         assert first is not None  # noqa: S101 (kept before its job was submitted)
         reason = outcome.get("reason")
         return first, JobState(outcome["state"]), reason if isinstance(reason, str) else None
@@ -615,7 +783,7 @@ class ExecutingStep:
             ctx,
             manifest,
             state,
-            where=await self._ran_on(ctx, manifest.attempt),
+            where=await self._ran_on(ctx, manifest.attempt, self._where(ExecTarget.GPU)),
             has_results=reason is not None,
             exit_reason="budget_timeout",
         )

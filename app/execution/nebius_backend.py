@@ -73,7 +73,8 @@ log = logging.getLogger(__name__)
 
 GIB = 1024**3
 PLATFORM_TIMEOUT = timedelta(hours=1)  # the minimum the platform allows (§8)
-WATCHDOG_SLACK_S = 600  # the platform's timeout ends this long after our watchdog
+QUEUE_ALLOWANCE_S = 1200  # = jobs.QUEUE_CAP_S: the platform's timeout may count the queue
+WATCHDOG_SLACK_S = 300  # and ends at least this long after our watchdog
 RUN_BUCKET_PREFIX = "p2p-run-"
 JOB_PREFIX = "p2p-"
 RUN_BUCKET_MAX_BYTES = 200 * GIB  # caps what untrusted code can store in a run bucket [S-11]
@@ -247,9 +248,10 @@ BUCKET_ID = re.compile(r"^storagebucket-[a-z0-9-]+$")
 
 
 def platform_timeout(watchdog_s: int) -> timedelta:
-    """The job's own timeout: the platform's minimum (1 h), or our watchdog plus 10 minutes when
-    that is longer (a 60-minute GPU budget, A-47), in whole minutes: never cut before us."""
-    minutes = math.ceil((watchdog_s + WATCHDOG_SLACK_S) / 60)
+    """The job's own timeout: the platform's minimum (1 h), or the longest queue, our watchdog
+    and a margin when that is longer (a 60-minute GPU budget, A-47), in whole minutes: the
+    platform may count the queue too, and must never cut the job before our watchdog."""
+    minutes = math.ceil((QUEUE_ALLOWANCE_S + watchdog_s + WATCHDOG_SLACK_S) / 60)
     return max(PLATFORM_TIMEOUT, timedelta(minutes=minutes))
 
 
