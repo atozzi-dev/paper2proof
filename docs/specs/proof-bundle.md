@@ -123,7 +123,11 @@ with one `FAIL <path>: <problem>` line per problem, `2` on usage errors. It chec
 
 ## 6. `reproduce.sh`
 
-`./reproduce.sh <staging dir>` re-runs the judged attempt with the runner image by digest:
+`./reproduce.sh <staging dir>` re-runs the judged attempt with the runner image by digest: the
+image the judged job ran, `p2p-runner-cpu` for a run judged in a Sandbox when the deploy has
+both runners (`P2P_EXEC_BACKEND=auto`, A-47), else the one runner; the digest is the manifest's.
+A run planned for a GPU that ran its CPU plan carries `gpu_fallback.json` (why) and its CPU
+attempt (`results/3/`):
 
 - `<staging dir>` holds `overlay.tar.zst`, `repo.tar.zst` (when the run used the repository)
   and `data/<name>.tar.zst`. They are not in the bundle (size); within 24 h of the run they are

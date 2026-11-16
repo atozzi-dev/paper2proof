@@ -79,4 +79,5 @@ reference the pushed digest, never a tag.
 
 A change to `runner/entrypoint.py` needs new `p2p-runner-cpu` and `p2p-runner` images, switched
 together with the control plane: `docs/DEPLOY.md`, "When the runner changes". Since A-46 the
-control plane refuses to start with a runner digest missing from `config/runner_images.yaml`.
+control plane refuses to start with a runner digest missing from `config/runner_images.yaml`;
+with `P2P_EXEC_BACKEND=auto` (GPU when needed, A-47) both runners must be listed.

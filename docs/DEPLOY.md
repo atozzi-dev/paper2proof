@@ -170,6 +170,28 @@ Without that PASS, GPU exec jobs could reach the internet: keep `P2P_EXEC_BACKEN
 Public names resolving is recorded as a fact and does not block: the VPC resolver answers by
 design (architecture §8.3).
 
+**GPU when needed (`P2P_EXEC_BACKEND=auto`, A-47).** Same gate as GPU jobs: S5 `--mode isolated`
+must PASS first. With `auto`, runs stay on CPU in Sandboxes unless their CPU plan would be cut;
+those get one L40S for up to 60 minutes, and fall back to their CPU plan when no GPU starts
+within 10 minutes (`docs/specs/hybrid-deploy.md`, "GPU when needed"). Steps, all the human's:
+1. Measure the real runner's pull time with spike S12 (`IMAGE=<registry>/p2p-runner@sha256:...`).
+   If create-to-start is over about 5 minutes, raise `gpu_wait_s` in `config/budgets.yaml`.
+2. In `/etc/p2p/p2p.env` set `P2P_EXEC_BACKEND=auto`, keep everything Sandboxes needs, and set
+   `P2P_RUNNER_IMAGE` (GPU runner, by digest), `P2P_SUBNET_EXEC` (the exec subnet of
+   `network_sandbox`) and `P2P_GPU_PREEMPTIBLE=false` (on demand). Both runner digests must be in
+   `config/runner_images.yaml` ("When the runner changes"): the control plane refuses to start
+   otherwise.
+3. Give GPU runs only to the invites that should have them: `python -m app.admin_cli invite
+   create --gpu N` (GPU runs a day; the default 0 keeps an invite on CPU, the eval's included).
+4. Update the About page copy (`web/src/pages/About.tsx`: the Execute step, the limits, the "Why
+   only CPU" answer): until `auto` is on it truthfully says CPU only.
+5. Run one paper that needs a GPU end to end (it costs money), then one forced fallback.
+
+Rollback: set `P2P_EXEC_BACKEND=sandboxes` and restart. Runs that ran on a GPU stay readable,
+and their Proof Bundles name the runner they ran. A run planned for the GPU and not executed yet
+would then run its GPU plan in a Sandbox, on CPU, within the CPU minutes (likely cut short): let
+in-flight runs finish before switching.
+
 A first run before the registry exists can only be PARTIAL, because the image does not come
 from the Nebius registry. That is a preliminary result, enough to apply the network. The final
 gate is a run with a `PROBE_IMAGE` from the sandbox registry, and it must PASS. No other PARTIAL
@@ -356,7 +378,8 @@ together. Since A-46 every new exec manifest carries the time target (`min_seeds
 `target_seconds`), and a runner image from before A-46 refuses such a manifest (exit 30). Users
 would see that as the paper's experiment failing, after the models were paid for. So
 `P2P_ENV=prod` refuses to start unless the configured runner digest (`P2P_RUNNER_CPU_IMAGE` with
-Sandboxes, `P2P_RUNNER_IMAGE` with GPU jobs) is listed in `config/runner_images.yaml`. In the
+Sandboxes, `P2P_RUNNER_IMAGE` with GPU jobs, both with `auto`) is listed in
+`config/runner_images.yaml`. In the
 other direction, a new runner under an older control plane works: it writes `results.json` as
 before when the manifest has no time target.
 

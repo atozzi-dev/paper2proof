@@ -95,8 +95,8 @@ same entrypoint and package versions as `p2p-runner`, with PyTorch CPU wheels, i
 Sandboxes once per runner change (`config/sandbox_images.yaml`, digest → image UUID; the steps
 are in `docs/DEPLOY.md`, "When the runner changes"). The judged hardware the
 bundle records is the Sandboxes platform (`sandbox`), never a GPU. The exec job's
-`budget_seconds` is `min(1800, floor((gpu_minutes - spent) * 60) - 300)`, the run's whole
-remaining allowance (1500 s with today's 30 minutes), not the Planner's estimate; the job is
+`budget_seconds` is `min(cpu_minutes × 60, floor((cpu_minutes - spent) * 60) - 300)`, the run's
+whole remaining CPU allowance (1500 s with today's 30 minutes), not the Planner's estimate; the job is
 still reserved through the ledger for its watchdog, `budget_seconds + 300`: a CPU sandbox costs cents per hour and stops when the
 script does, while a job that outlives a low estimate ends without enough seeds (KAN, eval set
 B, 2026-10-30). On the GPU path the estimate still caps it.
@@ -200,7 +200,7 @@ a CPU target is bounded by `budget_seconds ≤ cpu_minutes × 60`. A GPU run's m
 | Variable | Hybrid value |
 |---|---|
 | `P2P_EXECUTION` | `hybrid` (prod only; `nebius` by default) |
-| `P2P_EXEC_BACKEND` | `sandboxes` (the default); `gpu` once spike S5 `--mode isolated` passes |
+| `P2P_EXEC_BACKEND` | `sandboxes` (the default); `auto` (GPU when needed, A-47) or `gpu` once spike S5 `--mode isolated` passes |
 | `P2P_LOCAL_JOBS_DIR` | directory of the local run copies and cache, owned by the API process, on its own filesystem |
 | `P2P_LOCAL_JOBS_NETWORK` | the docker network of the local jobs, restricted by the host firewall |
 | `P2P_BIND_HOST` | `127.0.0.1` (the TLS proxy is on the same host) |
