@@ -72,6 +72,10 @@ RESULTS_MUTATIONS: list[tuple[str, Any]] = [
         "too many seeds",
         lambda d: d["claims"][1].update(per_seed=[{"seed": i, "value": 1.0} for i in range(21)]),
     ),
+    ("duplicate seeds not started", lambda d: d.update(seeds_not_started=[3, 3])),
+    ("negative seed not started", lambda d: d.update(seeds_not_started=[-1])),
+    ("too many seeds not started", lambda d: d.update(seeds_not_started=list(range(21)))),
+    ("seeds not started not a list", lambda d: d.update(seeds_not_started=3)),
 ]
 
 
@@ -139,6 +143,12 @@ MANIFEST_MUTATIONS: list[tuple[str, Any]] = [
     ("args set the seed", lambda d: d.update(args=["--seed", "3"])),
     ("workspace digest missing", lambda d: d.pop("workspace_sha256")),
     ("workspace digest not hex", lambda d: d.update(workspace_sha256="sha256:" + "f" * 64)),
+    ("min seeds without a target", lambda d: d.update(min_seeds=3)),
+    ("a target without min seeds", lambda d: d.update(target_seconds=600)),
+    ("min seeds zero", lambda d: d.update(min_seeds=0, target_seconds=600)),
+    ("min seeds not an integer", lambda d: d.update(min_seeds=2.5, target_seconds=600)),
+    ("target under a minute", lambda d: d.update(min_seeds=1, target_seconds=59)),
+    ("target over 30 min", lambda d: d.update(min_seeds=1, target_seconds=1801)),
 ]
 
 
@@ -197,6 +207,47 @@ def test_a_serialised_results_with_unset_scale_fields_matches_the_schema() -> No
     assert _schema_ok(
         _schema("results.schema.json"), results.model_dump(mode="json", by_alias=True)
     )
+
+
+# --- seeds from time (A-46) --------------------------------------------------------------
+
+
+def test_a_manifest_with_a_time_target_is_valid() -> None:
+    data = copy.deepcopy(_fixture("manifest_valid.json"))
+    data.update(seeds=list(range(10)), min_seeds=3, target_seconds=600)
+    assert _schema_ok(_schema("manifest.schema.json"), data)
+    manifest = ExecManifest.model_validate(data)
+    assert (manifest.min_seeds, manifest.target_seconds) == (3, 600)
+    injected = json.loads(manifest.model_dump_json(by_alias=True))
+    assert (injected["min_seeds"], injected["target_seconds"]) == (3, 600)
+    assert _schema_ok(_schema("manifest.schema.json"), injected)
+
+
+def test_a_manifest_without_a_time_target_is_written_as_before() -> None:
+    """Manifests from before A-46 (kept artifacts, bundles) still load, and a manifest without
+    the fields never gains them: an older runner image would refuse an unknown key."""
+    manifest = ExecManifest.model_validate(_fixture("manifest_valid.json"))
+    assert manifest.min_seeds is None and manifest.target_seconds is None
+    for dumped in (
+        manifest.model_dump(mode="json", by_alias=True),
+        json.loads(manifest.model_dump_json(by_alias=True)),
+    ):
+        assert "min_seeds" not in dumped and "target_seconds" not in dumped
+
+
+def test_min_seeds_cannot_exceed_the_seeds() -> None:
+    """JSON Schema cannot say it; the model (and the runner) do."""
+    data = copy.deepcopy(_fixture("manifest_valid.json"))
+    data.update(min_seeds=4, target_seconds=600)  # the fixture has 3 seeds
+    assert not _model_ok(ExecManifest, data)
+
+
+def test_results_list_the_seeds_not_started() -> None:
+    data = copy.deepcopy(_fixture("results_valid.json"))
+    assert Results.model_validate(data).seeds_not_started == []  # results from before A-46
+    data["seeds_not_started"] = [3, 4]
+    assert _schema_ok(_schema("results.schema.json"), data)
+    assert Results.model_validate(data).seeds_not_started == [3, 4]
 
 
 # --- events.schema.json ------------------------------------------------------------------

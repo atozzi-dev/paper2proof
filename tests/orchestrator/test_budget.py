@@ -41,6 +41,22 @@ def test_limits_load_from_the_config_file() -> None:
     assert limits.per_run.tavily_credits == 20
 
 
+def test_the_seed_policy_loads_with_the_per_run_limits() -> None:
+    """Up to 10 seeds, the ones after the minimum only within 10 minutes (A-46)."""
+    per_run = _limits().per_run
+    assert (per_run.max_seeds, per_run.seed_target_s) == (10, 600)
+
+
+@pytest.mark.parametrize(
+    "change", [{"max_seeds": 2}, {"max_seeds": 21}, {"seed_target_s": 59}, {"seed_target_s": 1801}]
+)
+def test_a_seed_policy_out_of_range_is_refused(change: dict[str, int]) -> None:
+    raw = _limits().model_dump(by_alias=True)
+    raw["per_run"].update(change)
+    with pytest.raises(ValueError):
+        BudgetLimits.model_validate(raw)
+
+
 async def test_reservation_over_the_run_inference_cap_raises(store: Store) -> None:
     await _runs(store)
     budget = _budget(store)

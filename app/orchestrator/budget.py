@@ -70,6 +70,10 @@ class PerRunLimits(_Strict):
     fix_iterations: int = Field(gt=0)
     package_requests: int = Field(ge=0)
     tavily_credits: int = Field(ge=0)
+    # Seeds (A-46): the plan lists up to max_seeds; after the verdict's minimum the runner
+    # starts one more only while it fits seed_target_s (elapsed time only, never the values).
+    max_seeds: int = Field(ge=3, le=20)
+    seed_target_s: int = Field(ge=60, le=1800)
 
 
 class GlobalLimits(_Strict):

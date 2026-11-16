@@ -201,6 +201,16 @@
         "budget_timeout",
         "contract_error"
       ]
+    },
+    "seeds_not_started": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "maxItems": 20,
+      "uniqueItems": true,
+      "description": "the manifest's tail of seeds the time target left out (A-46): never run"
     }
   }
 }

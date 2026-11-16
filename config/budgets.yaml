@@ -7,6 +7,11 @@ per_run:
   fix_iterations: 8
   package_requests: 2
   tavily_credits: 20
+  # Seeds: the plan lists up to max_seeds; after the minimum (verdict.yaml min_seeds) the
+  # runner starts the next one only if it should end within seed_target_s of the job's start
+  # (elapsed time only, never the measured values).
+  max_seeds: 10
+  seed_target_s: 600
 global:
   concurrent_runs: 2
   cloud_usd_per_day: 15.00

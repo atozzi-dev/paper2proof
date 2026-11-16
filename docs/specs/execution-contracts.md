@@ -175,6 +175,13 @@ is in `metrics.json`) and, for a RELATIVE claim, `baseline_name` and `baseline_k
 for an ABSOLUTE one). `claim_ref` is unique; several claims may read the same key (an ABSOLUTE
 claim and a RELATIVE one about the same method).
 
+`seeds` lists up to `per_run.max_seeds` seeds (`config/budgets.yaml`, 10): the Planner's, in its
+order, then the smallest unused integers. `min_seeds` and `target_seconds` (A-46, both or
+neither) set the time rule of §7 step 3: `min_seeds` is the verdict's minimum (3, at most
+`len(seeds)`), `target_seconds` is `per_run.seed_target_s` (600). A manifest without them (one
+written before A-46) runs every seed within `budget_seconds`, as before, and is written without
+the two keys, so a runner image from before A-46 never sees them.
+
 ## 6. Experiment script contract (produced by the Coder)
 
 ```
@@ -261,9 +268,10 @@ reason `NOT_MEASURED`, decided by code.
 1. Read `/etc/p2p/manifest.json`; validate against the schema; exit 30 on failure.
 2. Extract the workspace archive (`paths.workspace`, checked against `workspace_sha256`), `overlay.tar.zst`, `repo.tar.zst` and exactly the `archives.data` entries to local disk under `/work` (not on the mount), hashing the bytes read; nothing else from the bucket is executed or imported.
 3. For each seed in `manifest.seeds`, run the script once from the extracted workspace in its own process group within the remaining budget (SIGTERM to the group at the deadline, SIGKILL 30 s later); `seeds/<seed>/` is emptied first, then the script writes `seeds/<seed>/metrics.json`, which is read once for every claim. Until the last seed, `results.json` reports `budget_timeout` (a job stopped from outside never looks completed).
-4. Aggregate into `results.json` (`p2p.results/v2`): `scale`, `wall_clock_s`, `gpu`, `exit_reason` and one entry per manifest claim, in the manifest's order, with its identifying fields copied from the manifest, `per_seed` and, for a RELATIVE claim, `baseline: {name, key, per_seed}`. Every `per_seed` list holds `{seed, value}` objects so the control plane can align them by seed. A seed whose script failed has `ok: false` and `value: null` for every claim; a seed that ran but wrote no usable value under a claim's key has `ok: false` and `value: null` for that claim only.
+   With `min_seeds` and `target_seconds`, the first `min_seeds` seeds run as above; after them, the next seed starts only if `elapsed + 1.25 × longest seed so far + 10 s ≤ min(target_seconds, budget_seconds)`, `elapsed` counted from the runner's start like the budget. The first seed that does not fit ends the loop: it and every later seed are `seeds_not_started`. The rule reads the clock only, never a metric (verdict-engine.md, "How many seeds"). With `--seeds 0,1,2` (the Proof Bundle's `reproduce.sh`, a replay) exactly those seeds run, in the manifest's order, without the time rule; the others are `seeds_not_started`; a list that is empty, repeats a seed or names one outside `manifest.seeds` is a contract error.
+4. Aggregate into `results.json` (`p2p.results/v2`): `scale`, `wall_clock_s`, `gpu`, `exit_reason` and one entry per manifest claim, in the manifest's order, with its identifying fields copied from the manifest, `per_seed` and, for a RELATIVE claim, `baseline: {name, key, per_seed}`. Every `per_seed` list holds `{seed, value}` objects so the control plane can align them by seed. A seed whose script failed has `ok: false` and `value: null` for every claim; a seed that ran but wrote no usable value under a claim's key has `ok: false` and `value: null` for that claim only. A seed the budget left unrun (the job stopped) is listed the same way; a seed the time rule left out is not in `per_seed` at all but in `seeds_not_started` (optional, `[]` when absent).
 5. Flush `live.log` every 10 s, mirroring the last 200 lines of stdout/stderr.
-6. Exit codes: `0` completed · `10` experiment error (a seed's script failed, or wrote no claim's value) · `20` budget timeout · `30` contract error. A claim missing from some seeds of a completed job is that claim's problem only: its verdict sees fewer seeds.
+6. Exit codes: `0` completed · `10` experiment error (a seed's script failed, or wrote no claim's value) · `20` budget timeout · `30` contract error. A claim missing from some seeds of a completed job is that claim's problem only: its verdict sees fewer seeds. Stopping by the time rule is not a timeout: with every other seed done the job exits `0`; `20` stays for a seed cut at the deadline or a seed never reached within the budget.
 
 ### 7.1 Trusting `results.json`
 
@@ -271,7 +279,8 @@ reason `NOT_MEASURED`, decided by code.
 
 - `run_id`, `attempt` and `scale` must equal the stored manifest, and `claims` must list exactly the manifest's claims in the same order, each with the same `claim_ref`, `claim_type`, `metric`, `metric_key`, `higher_is_better` and baseline `name` and `key`; any mismatch → `exit_reason` is overridden to `contract_error` (FSM `CONTRACT_ERROR`).
 - In every claim, `per_seed[].seed` values must be unique and a subset of `manifest.seeds`; the same holds for `baseline.per_seed`. `value: null` is allowed only with `ok: false`. A number too large for a float (a JSON integer of hundreds of digits) is a contract error.
-- The analysis is per claim: `{exit_reason, claims: {claim_ref: {measurements, used_seeds}}, wall_clock_s, gpu}`. A RELATIVE claim uses only the seeds where both values are present.
+- `seeds_not_started` must be a tail of `manifest.seeds` (its last k seeds, in order) with k at most `len(seeds) - min_seeds`, none of them in any `per_seed` list; a manifest without `min_seeds` allows only `[]`. Anything else is a contract error: a job cannot pass failed seeds off as seeds the time rule skipped.
+- The analysis is per claim: `{exit_reason, claims: {claim_ref: {measurements, used_seeds}}, wall_clock_s, gpu, seeds_not_started}`. A RELATIVE claim uses only the seeds where both values are present.
 - `Measurements.scale` and `higher_is_better` come from the manifest and the stored `Claim`, never from `results.json`.
 
 ## 8. Job specs

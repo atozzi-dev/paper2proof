@@ -100,6 +100,12 @@ ci     = (mean - half, mean + half)
 
 `values` is `per_seed` for ABSOLUTE and `d_i = per_seed[i] - baseline_per_seed[i]` for RELATIVE.
 
+**How many seeds (A-46).** The number of seeds depends on elapsed time only, never on the
+measured values: the plan lists up to `max_seeds` (`config/budgets.yaml`), and after the first
+`min_seeds` the runner starts the next one only if it should end within the time target
+(execution-contracts §7). Nothing that reads a value ever decides whether another seed runs, so
+the interval is never the result of stopping when it looked good (optional stopping).
+
 ### ABSOLUTE
 
 ```

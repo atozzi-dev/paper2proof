@@ -115,6 +115,12 @@ class ExecManifest(_Strict):
     args: list[str] = Field(max_length=20)
     seeds: list[int] = Field(min_length=1, max_length=20)
     budget_seconds: int = Field(ge=60, le=1800)
+    # Both or neither (A-46): after the first min_seeds seeds the runner starts the next one
+    # only if it should end within target_seconds (and budget_seconds). Without them every
+    # seed runs within the budget, as before; they are then left out of the dump, so an older
+    # runner image never sees an unknown key.
+    min_seeds: int | None = Field(default=None, ge=1, le=20)
+    target_seconds: int | None = Field(default=None, ge=60, le=1800)
     paths: ManifestPaths
     claims: list[ClaimSpec] = Field(min_length=1, max_length=MAX_CLAIMS_PER_JOB)
     scale: ScaleSpec
@@ -148,6 +154,22 @@ class ExecManifest(_Strict):
     def _one_spec_per_claim(self) -> Self:
         _unique_refs([c.claim_ref for c in self.claims])
         return self
+
+    @model_validator(mode="after")
+    def _time_target(self) -> Self:
+        if (self.min_seeds is None) != (self.target_seconds is None):
+            raise ValueError("min_seeds and target_seconds go together")
+        if self.min_seeds is not None and self.min_seeds > len(self.seeds):
+            raise ValueError("min_seeds must not exceed the seeds")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_no_target(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        for key in ("min_seeds", "target_seconds"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class SeedResult(_Strict):
@@ -194,8 +216,17 @@ class Results(_Strict):
     wall_clock_s: float = Field(ge=0)
     gpu: str = Field(max_length=128)
     exit_reason: Literal["completed", "experiment_error", "budget_timeout", "contract_error"]
+    # The manifest's tail the time target left out (A-46): never run, so never failed.
+    seeds_not_started: list[int] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def _one_result_per_claim(self) -> Self:
         _unique_refs([c.claim_ref for c in self.claims])
         return self
+
+    @field_validator("seeds_not_started")
+    @classmethod
+    def _unique_not_started(cls, seeds: list[int]) -> list[int]:
+        if len(set(seeds)) != len(seeds) or any(s < 0 for s in seeds):
+            raise ValueError("seeds_not_started must be unique non-negative integers")
+        return seeds
