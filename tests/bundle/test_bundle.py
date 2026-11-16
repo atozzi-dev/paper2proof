@@ -269,6 +269,45 @@ def test_reproduce_rejects_unsafe_values() -> None:
         render_reproduce(manifest, "registry.example/x:latest", run_id=RUN)
 
 
+TIMED = {"seeds": list(range(10)), "min_seeds": 3, "target_seconds": 600}
+
+
+def test_a_replay_runs_the_seeds_that_ran() -> None:
+    """A-46: on a slower machine the time rule would run fewer seeds than the judged job."""
+    manifest = ExecManifest.model_validate({**exec_manifest("e" * 64), **TIMED})
+    script = render_reproduce(manifest, RUNNER, run_id=RUN, seeds=list(range(7))).decode()
+    assert '  "$RUNNER_IMAGE" --seeds 0,1,2,3,4,5,6\n' in script
+    assert "{{" not in script
+
+
+def test_a_manifest_from_before_the_time_rule_replays_without_the_flag() -> None:
+    """Its runner image (the manifest's digest) does not know --seeds."""
+    manifest = ExecManifest.model_validate(exec_manifest("e" * 64))
+    for seeds in (None, [0, 1, 2]):
+        script = render_reproduce(manifest, RUNNER, run_id=RUN, seeds=seeds).decode()
+        assert "--seeds" not in script and '  "$RUNNER_IMAGE"\n' in script
+
+
+@pytest.mark.parametrize("seeds", [[], [1], [0, 0], [0, 2], list(range(11))])
+def test_replay_seeds_must_start_the_manifest_seeds(seeds: list[int]) -> None:
+    manifest = ExecManifest.model_validate({**exec_manifest("e" * 64), **TIMED})
+    with pytest.raises(ValueError):
+        render_reproduce(manifest, RUNNER, run_id=RUN, seeds=seeds)
+
+
+async def test_the_replay_runs_the_seeds_the_judged_attempt_ran(
+    run: Run, signer: FakeSigner
+) -> None:
+    prefix = f"runs/{RUN}"
+    manifest = run.artifacts.get_json(f"{prefix}/exec_manifest_1.json")
+    run.artifacts.put_json(f"{prefix}/exec_manifest_1.json", {**manifest, **TIMED})
+    analysis = run.artifacts.get_json(f"{prefix}/analysis_1.json")
+    analysis["analysis"]["seeds_not_started"] = [7, 8, 9]
+    run.artifacts.put_json(f"{prefix}/analysis_1.json", analysis)
+    files = await _files(run, signer)
+    assert '"$RUNNER_IMAGE" --seeds 0,1,2,3,4,5,6' in files["reproduce.sh"].decode()
+
+
 def test_secret_scan_and_redaction() -> None:
     known = (b"sup3r-s3cret-value",)
     assert find_secrets(b"nothing here", known) is False

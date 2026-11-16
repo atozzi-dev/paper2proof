@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Re-runs attempt {{attempt}} of Paper2Proof run {{run_id}} on this machine, with the same
 # runner image (by digest), workspace and exec manifest as the experiment job that was judged.
+# A judged job that stopped adding seeds at its time target is replayed with exactly the seeds
+# it ran (the runner flag below), however fast or slow this machine is.
 #
 #   ./reproduce.sh <staging dir>
 #
@@ -56,6 +58,6 @@ docker run --rm "${gpus[@]}" --network none \
   --volume "$STAGING:/mnt/run/staging:ro" \
   --volume "$STAGING/results:/mnt/run/results" \
   --tmpfs /mnt/cache \
-  "$RUNNER_IMAGE"
+  "$RUNNER_IMAGE"{{runner_args}}
 
 echo "results: $STAGING/results/$ATTEMPT/results.json (compare with verdict.json)"

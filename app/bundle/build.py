@@ -38,7 +38,7 @@ from app.models.prompt_files import PROMPTS_DIR, load_prompt
 from app.orchestrator.budget import SpendKind
 from app.orchestrator.context import RunContext
 from app.storage.artifacts import ArtifactStore
-from app.verdict.results import MAX_RESULTS_BYTES
+from app.verdict.results import MAX_RESULTS_BYTES, Analysis
 
 log = logging.getLogger(__name__)
 
@@ -186,13 +186,22 @@ def pack(files: Mapping[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
-def render_reproduce(manifest: ExecManifest, runner_image: str, *, run_id: str) -> bytes:
+def render_reproduce(
+    manifest: ExecManifest, runner_image: str, *, run_id: str, seeds: list[int] | None = None
+) -> bytes:
     """reproduce.sh for one exec manifest. Every value is validated against its pattern: the
-    script is generated code that people run."""
+    script is generated code that people run. `seeds`: the ones the judged job ran, so a
+    replay on a slower machine runs the same ones, not fewer by the time rule (A-46). Passed
+    only to a runner that knows the flag: one whose manifest has the time rule."""
     if not re.fullmatch(DIGEST_REF, runner_image):
         raise ValueError("the runner image must be a digest reference")
     if not re.fullmatch(RUN_ID_PATTERN, run_id):
         raise ValueError("invalid run id")
+    runner_args = ""
+    if seeds is not None and manifest.min_seeds is not None:
+        if not seeds or seeds != manifest.seeds[: len(seeds)]:
+            raise ValueError("the replay seeds must be a prefix of the manifest's seeds")
+        runner_args = " --seeds " + ",".join(str(int(s)) for s in seeds)
     image = f"{runner_image.rsplit('@', 1)[0]}@{manifest.image_digest}"
     archives = manifest.archives
     sums = [f"{archives.overlay}  overlay.tar.zst"]
@@ -208,6 +217,7 @@ def render_reproduce(manifest: ExecManifest, runner_image: str, *, run_id: str) 
         "attempt": str(int(manifest.attempt)),
         "runner_image": image,
         "checksums": "\n".join(sums),
+        "runner_args": runner_args,
     }
     template = TEMPLATE.read_text(encoding="utf-8")
     names = set(_PLACEHOLDER.findall(template))
@@ -364,6 +374,23 @@ class Bundler:
         except ValidationError:
             return None
 
+    async def _seeds_ran(
+        self, prefix: str, attempt: int, manifest: ExecManifest
+    ) -> list[int] | None:
+        """The seeds the judged job ran: the manifest's minus the tail the time rule left out
+        (checked at ANALYZING). None when the analysis cannot be read: the replay then applies
+        the time rule itself."""
+        raw = await self._artifact(f"{prefix}/analysis_{attempt}.json")
+        try:
+            analysis = Analysis.model_validate(
+                raw.get("analysis") if isinstance(raw, dict) else None
+            )
+        except ValidationError:
+            return None
+        skipped = analysis.seeds_not_started
+        ran = manifest.seeds[: len(manifest.seeds) - len(skipped)]
+        return ran if ran and ran + skipped == manifest.seeds else None
+
     async def _receipt(self, ctx: RunContext) -> tuple[dict[str, Any], dict[str, list[str]]]:
         calls = await ctx.store.list_model_calls(ctx.run_id)
         totals: dict[tuple[str, str], dict[str, Any]] = {}
@@ -454,8 +481,9 @@ class Bundler:
         else:
             out.omit("code/workspace.tar", Reason.MISSING)
         if judged is not None:
+            seeds = await self._seeds_ran(prefix, attempt, judged)
             script = await asyncio.to_thread(
-                render_reproduce, judged, self._runner_image, run_id=run_id
+                render_reproduce, judged, self._runner_image, run_id=run_id, seeds=seeds
             )
             out.files.append(BundleFile("reproduce.sh", script, Origin.CONTROL_PLANE))
         out.add_json(
