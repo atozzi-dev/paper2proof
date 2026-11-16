@@ -234,6 +234,25 @@ describe('SafeMarkdown', () => {
     expect(container.innerHTML).not.toMatch(/onerror|javascript:/)
     expect(container).toHaveTextContent('click')
   })
+
+  it('keeps the underscores of code names in model text', () => {
+    const text = 'The Coder used _load_breast_cancer_, train_test_split and __init__; the score is *low*.'
+    const { container } = render(<SafeMarkdown text={text} />)
+    expect(container).toHaveTextContent('The Coder used _load_breast_cancer_, train_test_split and __init__; the score is low.')
+    expect(container.querySelector('strong')).toBeNull()
+    expect(container.querySelector('em')).toHaveTextContent('low') // emphasis with * still works
+  })
+
+  it('reads underscores the model already escaped as one underscore', () => {
+    const { container } = render(<SafeMarkdown text={String.raw`dataset load\_breast\_cancer`} />)
+    expect(container).toHaveTextContent(/^dataset load_breast_cancer$/)
+  })
+
+  it('leaves code spans and blocks exactly as written', () => {
+    const { container } = render(<SafeMarkdown text={'Call `__init__` once.\n\n```\nx = load_breast_cancer()\n```'} />)
+    expect(container.querySelector('p code')).toHaveTextContent(/^__init__$/)
+    expect(container.querySelector('pre')).toHaveTextContent(/^x = load_breast_cancer\(\)$/)
+  })
 })
 
 describe('LogPanel', () => {
