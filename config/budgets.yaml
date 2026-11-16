@@ -3,7 +3,14 @@ per_run:
   tokens_in: 1500000
   tokens_out: 150000
   inference_usd: 1.00
-  gpu_minutes: 30
+  # Experiment minutes (A-47, GPU when needed): a run on the GPU has up to gpu_minutes, one on
+  # CPU (Token Factory Sandboxes) up to cpu_minutes. A CPU plan cut to REDUCED, or estimated
+  # over gpu_when_cpu_estimate_over of cpu_minutes, gets a GPU plan when the invite allows it;
+  # a GPU job that is not running within gpu_wait_s falls back to the CPU plan.
+  gpu_minutes: 30  # 60 once EXECUTING budgets each target (A-47, task 6)
+  cpu_minutes: 30
+  gpu_wait_s: 600
+  gpu_when_cpu_estimate_over: 0.5
   fix_iterations: 8
   package_requests: 2
   tavily_credits: 20

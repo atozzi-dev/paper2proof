@@ -64,7 +64,8 @@
     "budget_seconds": {
       "type": "integer",
       "minimum": 60,
-      "maximum": 1800
+      "maximum": 3600,
+      "description": "the runner's own time limit: up to an hour on the GPU, half an hour on CPU (A-47)"
     },
     "min_seeds": {
       "type": "integer",

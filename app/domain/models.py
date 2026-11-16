@@ -1,5 +1,6 @@
 """Shared domain types (docs/specs/verdict-engine.md, architecture §6.1). Defined once, reused."""
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Self
 
@@ -244,3 +245,49 @@ class Plan(_Strict):
         if set(self.claim_types) != set(self.claim_ids):
             raise ValueError("claim_types must have exactly one entry per claim id")
         return self
+
+
+class ExecTarget(StrEnum):
+    """Where a run's experiment executes (A-47): a Token Factory Sandbox on CPU, or one GPU."""
+
+    CPU = "cpu"
+    GPU = "gpu"
+
+
+class PlanArtifact(_Strict):
+    """runs/<id>/plan.json, PLANNING's output. A GPU target carries the CPU plan it falls back
+    to when no GPU starts in time, and its worst-case cost (the whole GPU allowance); a CPU
+    target has neither. The two-key plan.json of runs planned before A-47 reads as CPU."""
+
+    plan: Plan
+    est_cost_usd: float = Field(ge=0)
+    target: ExecTarget = ExecTarget.CPU
+    cpu_plan: Plan | None = None
+    est_cost_max_usd: float | None = Field(default=None, ge=0)
+    gpu_skipped: str | None = Field(default=None, max_length=300)  # why a GPU was not used
+
+    @model_validator(mode="after")
+    def _fallback_iff_gpu(self) -> Self:
+        gpu = self.target is ExecTarget.GPU
+        if gpu != (self.cpu_plan is not None) or gpu != (self.est_cost_max_usd is not None):
+            raise ValueError("a GPU target has a CPU fallback plan and a maximum cost; CPU neither")
+        return self
+
+
+class FallbackReason(StrEnum):
+    """Why a GPU run ran its CPU plan instead (A-47)."""
+
+    NO_CAPACITY = "NO_CAPACITY"
+    QUEUE_TIMEOUT = "QUEUE_TIMEOUT"
+    QUOTA = "QUOTA"
+    PLATFORM_ERROR = "PLATFORM_ERROR"
+    DAILY_CAP = "DAILY_CAP"
+
+
+class GpuFallback(_Strict):
+    """runs/<id>/gpu_fallback.json: written once by EXECUTING when the GPU job never ran."""
+
+    reason: FallbackReason
+    message: str = Field(min_length=1, max_length=300)
+    at: datetime
+    gpu_attempt: int = Field(ge=1)

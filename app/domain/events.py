@@ -6,7 +6,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.models import Claim, ErrorCode, Plan, RunStatus, StepName, Verdict
+from app.domain.models import (
+    Claim,
+    ErrorCode,
+    ExecTarget,
+    Plan,
+    RunStatus,
+    StepName,
+    Verdict,
+)
 
 MAX_LINES = 50
 JobKindName = Literal["prov", "fetch", "exec", "smoke"]  # values of app.execution.backend.JobKind
@@ -60,6 +68,11 @@ class PlanReadyPayload(_Payload):
     plan: Plan
     est_cost_usd: float = Field(ge=0)
     needs_approval: bool
+    # A-47: where the experiment runs; a GPU plan's CPU fallback and worst case; why no GPU
+    target: ExecTarget = ExecTarget.CPU
+    cpu_plan: Plan | None = None
+    est_cost_max_usd: float | None = Field(default=None, ge=0)
+    gpu_skipped: str | None = Field(default=None, max_length=300)
 
 
 class ApprovalRequiredPayload(_Payload):

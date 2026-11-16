@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from app.domain.events import CostUpdatePayload
 from app.orchestrator.budget import (
@@ -57,6 +58,32 @@ def test_a_seed_policy_out_of_range_is_refused(change: dict[str, int]) -> None:
         BudgetLimits.model_validate(raw)
 
 
+def test_the_gpu_policy_loads_with_the_per_run_limits() -> None:
+    """GPU when needed (A-47): half an hour on CPU, ten minutes to get a GPU, and a CPU plan
+    over half its time goes to the GPU."""
+    per_run = _limits().per_run
+    assert per_run.cpu_minutes == 30
+    assert (per_run.gpu_wait_s, per_run.gpu_when_cpu_estimate_over) == (600, 0.5)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"cpu_minutes": 0},
+        {"gpu_wait_s": 59},
+        {"gpu_wait_s": 3601},
+        {"gpu_when_cpu_estimate_over": 0},
+        {"gpu_when_cpu_estimate_over": 1.5},
+    ],
+)
+def test_a_gpu_policy_out_of_range_is_refused(change: dict[str, float]) -> None:
+    raw = _limits().model_dump(by_alias=True)
+    raw["per_run"].update(change)
+    with pytest.raises(ValidationError) as refused:
+        BudgetLimits.model_validate(raw)
+    assert [e["type"] for e in refused.value.errors()] != ["extra_forbidden"]  # a known key
+
+
 async def test_reservation_over_the_run_inference_cap_raises(store: Store) -> None:
     await _runs(store)
     budget = _budget(store)
@@ -87,8 +114,9 @@ async def test_commit_below_the_reserve_frees_the_difference(store: Store) -> No
 async def test_committed_spend_survives_a_restart(store: Store) -> None:
     await _runs(store)
     first_process = _budget(store)
-    reservation = await first_process.check_and_reserve(RUN, SpendKind.GPU_MINUTES, 25)
-    await first_process.commit(reservation, 25)
+    spent = _limits().per_run.gpu_minutes - 5
+    reservation = await first_process.check_and_reserve(RUN, SpendKind.GPU_MINUTES, spent)
+    await first_process.commit(reservation, spent)
     with pytest.raises(BudgetExceeded) as err:
         await _budget(store).check_and_reserve(RUN, SpendKind.GPU_MINUTES, 6)  # new process
     assert err.value.limit_name == "gpu_minutes"

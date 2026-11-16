@@ -66,7 +66,10 @@ class PerRunLimits(_Strict):
     tokens_in: int = Field(gt=0)
     tokens_out: int = Field(gt=0)
     inference_usd: float = Field(gt=0)
-    gpu_minutes: float = Field(gt=0)
+    gpu_minutes: float = Field(gt=0)  # a GPU run's experiment minutes (and the ledger's cap)
+    cpu_minutes: float = Field(gt=0)  # a CPU (Sandboxes) run's experiment minutes (A-47)
+    gpu_wait_s: int = Field(ge=60, le=3600)  # a GPU job not running by then: CPU fallback
+    gpu_when_cpu_estimate_over: float = Field(gt=0, le=1)  # of cpu_minutes: needs a GPU
     fix_iterations: int = Field(gt=0)
     package_requests: int = Field(ge=0)
     tavily_credits: int = Field(ge=0)

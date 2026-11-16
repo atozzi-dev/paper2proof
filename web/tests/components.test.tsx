@@ -14,7 +14,7 @@ import type { Claim, Verdict } from '../src/types/api'
 import { claimAbs, claimRel, notReproduced, plan, reproduced, runConditions } from './fixtures'
 
 const conditions = {
-  plan: { plan, est_cost_usd: 1, needs_approval: false },
+  plan: { plan, est_cost_usd: 1, needs_approval: false, target: 'cpu' as const },
   warnings: [{ code: 'JOB_PREEMPTED', message: 'The GPU job was preempted: retried once on demand.' }],
   jobs: { 'p2p-exec-abc-1': { kind: 'exec' as const, name: 'p2p-exec-abc-1', state: 'SUCCEEDED' } },
 }

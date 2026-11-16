@@ -290,9 +290,9 @@ reason `NOT_MEASURED`, decided by code.
 | Image | `p2p-provisioner@sha256:…` | `p2p-provisioner@sha256:…` | `p2p-runner@sha256:…` | `p2p-runner-cpu@sha256:…` |
 | Platform / preset | `cpu-d3` / `4vcpu-16gb` | `cpu-d3` / `4vcpu-16gb` | `gpu-l40s-a` / `1gpu-8vcpu-32gb` (fallback `gpu-l40s-d` / `1gpu-16vcpu-96gb`) | `cpu-d3` / `4vcpu-16gb` |
 | Disk | 50Gi | 50Gi | 100Gi | 30Gi |
-| Timeout (platform) | 1h (minimum allowed) | 1h | 1h | 1h |
+| Timeout (platform) | 1h (minimum allowed) | 1h | 1h, or the watchdog + 10 min when longer (A-47: a 60-minute GPU budget) | 1h |
 | Our watchdog | 20 min from submission (provisioner deadline 18 min) | what is left of the provision job's 20 min (same deadline) | `budget_seconds + 300` from the end of the queue | `timeout_s + 300` s from the end of the queue (S12: 218 s from create to start) |
-| Queue cap | none (the watchdog covers it) | none | 20 min (`QUEUE_CAP_S`) | 10 min |
+| Queue cap | none (the watchdog covers it) | none | 20 min (`QUEUE_CAP_S`); with `auto`, what is left of `gpu_wait_s` | 10 min |
 | Subnet | `provision` | `provision` | `exec` | `exec` |
 | Volumes | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:rw` | `p2p-run-…:/mnt/run:rw` only | `p2p-run-…:/mnt/run:rw`, `p2p-cache:/mnt/cache:ro` | same as exec |
 | Preemptible | no | no | yes in dev/eval, **no** for demo recordings (`P2P_GPU_PREEMPTIBLE`) | no |
@@ -396,6 +396,22 @@ else stays `CapacityError`, as above:
 - a limit that is not plain ASCII digits;
 - `not_enough_resources` or `too_many_requests` in the error;
 - a message that names no quota in that form.
+
+**GPU when needed (A-47, `P2P_EXEC_BACKEND=auto`).** PLANNING sets each run's target in
+`plan.json` (`PlanArtifact`): `cpu` (a Sandboxes exec job, `budget_seconds` at most
+`cpu_minutes × 60`) or `gpu` (the GPU job above, `budget_seconds` at most 3600, the manifest's
+upper bound), with the CPU plan as `cpu_plan`. A GPU target's exec job has `gpu_wait_s` (600 s),
+counted from its first creation and kept in `runs/<run_id>/gpu_window.json`, to be seen
+`RUNNING`. Whatever keeps it from running falls back to the CPU plan: no capacity on either
+platform, still queued at the end of the window, `QuotaExceeded`, a creation that fails
+(`JobBackendError`, e.g. S5's `code=13`), a job that ends `FAILED` before it ran, or the daily
+`cloud_usd` cap refusing it; the kill switch stops the run as usual. Before the fallback every
+`p2p-exec-<slug>-*` job is stopped; then `runs/<run_id>/gpu_fallback.json` (`GpuFallback`: the
+reason, the message shown, the attempt) is written once, a `NO_GPU_FALLBACK_CPU` warning is
+emitted (an alert log for a platform error), and the run goes back to PROVISIONING and
+SMOKE_TESTING on the CPU plan. Its exec job is attempt 3 (`p2p-exec-<slug>-3`), on Sandboxes,
+never preemptible. A GPU job that ran and then failed (a CUDA OOM, say) is the experiment's
+result, as before: no fallback.
 
 ## 9. Interfaces
 

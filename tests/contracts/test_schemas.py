@@ -279,3 +279,15 @@ def test_events_schema_is_valid_and_lists_every_event_type() -> None:
     schema = json.loads((SCHEMAS / "events.schema.json").read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
     assert set(schema["x-event-types"]) == {t.value for t in EventType}
+
+
+def test_a_manifest_may_ask_for_an_hour_and_no_more() -> None:
+    """A GPU run has up to 60 minutes of experiment (A-47)."""
+    data = _fixture("manifest_valid.json")
+    data["budget_seconds"] = 3600
+    assert _schema_ok(_schema("manifest.schema.json"), data)
+    assert ExecManifest.model_validate(data).budget_seconds == 3600
+    data["budget_seconds"] = 3601
+    assert not _schema_ok(_schema("manifest.schema.json"), data)
+    with pytest.raises(ValidationError):
+        ExecManifest.model_validate(data)

@@ -167,6 +167,34 @@ planned; the run then reports `REPRODUCED_AT_REDUCED_SCALE` or `INCONCLUSIVE` ho
 **Invariant 1** holds: model and paper code runs only inside Sandboxes. The host only uploads
 bytes and parses the harvested tar as untrusted data.
 
+## GPU when needed (`P2P_EXEC_BACKEND=auto`, A-47)
+
+**Why.** A paper whose experiment does not fit 30 minutes on 4 vCPUs ends reduced or
+`INCONCLUSIVE` in Sandboxes. With `auto` such a run gets one L40S for up to 60 minutes, and every
+other run stays on CPU (fast, cents per hour, always available). Off until spike S5
+`--mode isolated` passes: a GPU job never runs with internet access.
+
+**Choosing the target (PLANNING).** The Planner plans for CPU first, as with `sandboxes`. Code then
+reads two validated fields of that plan: if `scale` is `REDUCED` or `gpu_minutes_est` exceeds
+`gpu_when_cpu_estimate_over × cpu_minutes` (0.5 × 30), and the run's invite still has a GPU run
+today (`gpu_runs_per_day`, set with `admin_cli invite create --gpu N`, default 0), the Planner
+makes a second plan for the GPU. `plan.json` then has `target: gpu`, the CPU plan as `cpu_plan`
+and the worst-case cost `est_cost_max_usd`; otherwise `target: cpu` and, when a GPU would have
+helped, `gpu_skipped` says why it was not used. The owner's approval works as before, on the
+target's estimate, and covers the fallback (cheaper).
+
+**Routing.** `HybridJobBackend` routes each exec job by its platform: `sandbox` to Sandboxes,
+`gpu-*` to Nebius. Smoke jobs stay in Sandboxes on CPU; the Coder writes the script for the
+target (`cuda` when available).
+
+**Fallback.** See execution-contracts §8, "GPU when needed": a GPU job that is not running within
+`gpu_wait_s` (600 s) sends the run back through PROVISIONING and SMOKE_TESTING on the CPU plan,
+and the run's conditions and Proof Bundle say why.
+
+**Budget.** The ledger keeps one kind of experiment minutes (`gpu_minutes`, the per-run cap, 60);
+a CPU target is bounded by `budget_seconds ≤ cpu_minutes × 60`. A GPU run's money goes to
+`cloud_usd` at the platform's price, under the daily cap (15 USD).
+
 ## Settings
 
 | Variable | Hybrid value |

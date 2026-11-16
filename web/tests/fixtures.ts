@@ -103,7 +103,7 @@ export function fullRun(): RunEvent[] {
     ev('claim.extracted', { claim: claimAbs }),
     ev('claim.extracted', { claim: claimRel }),
     ev('step.finished', { step: 'EXTRACTING_CLAIMS', attempt: 1, ok: true, duration_ms: 3000 }),
-    ev('plan.ready', { plan, est_cost_usd: 1.25, needs_approval: true }),
+    ev('plan.ready', { plan, est_cost_usd: 1.25, needs_approval: true, target: 'cpu' }),
     ev('approval.required', { expires_at: '2026-10-16T13:00:00Z' }),
     ev('step.started', { step: 'AWAITING_APPROVAL', attempt: 1 }),
     ev('step.finished', { step: 'AWAITING_APPROVAL', attempt: 1, ok: true, duration_ms: 4000 }),

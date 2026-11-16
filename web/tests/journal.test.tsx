@@ -122,7 +122,7 @@ describe('conditionChips', () => {
   })
 
   it('falls back on the plan before the conditions are recorded', () => {
-    const ready: PlanReady = { plan, est_cost_usd: 1, needs_approval: false }
+    const ready: PlanReady = { plan, est_cost_usd: 1, needs_approval: false, target: 'cpu' }
     expect(conditionChips(null, ready)).toEqual(['full scale', '3 seeds', "code adapted from the authors' repository"])
   })
 

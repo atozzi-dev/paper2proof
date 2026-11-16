@@ -114,7 +114,7 @@ class ExecManifest(_Strict):
     entrypoint: str = Field(pattern=ENTRYPOINT_PATTERN)
     args: list[str] = Field(max_length=20)
     seeds: list[int] = Field(min_length=1, max_length=20)
-    budget_seconds: int = Field(ge=60, le=1800)
+    budget_seconds: int = Field(ge=60, le=3600)  # an hour on the GPU, half on CPU (A-47)
     # Both or neither (A-46): after the first min_seeds seeds the runner starts the next one
     # only if it should end within target_seconds (and budget_seconds). Without them every
     # seed runs within the budget, as before; they are then left out of the dump, so an older

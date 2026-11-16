@@ -7,7 +7,7 @@ import { claimAbs, notReproduced, plan, runConditions } from './fixtures'
 // A-46: the plan lists up to ten seeds; after three, the runner starts one more only while it
 // fits the time target, and the seeds it leaves out are "not started", never failures.
 
-const ready = { plan, est_cost_usd: 1, needs_approval: false }
+const ready = { plan, est_cost_usd: 1, needs_approval: false, target: 'cpu' as const }
 const conditions = { plan: ready, warnings: [], jobs: {} }
 const ran = [0, 1, 2, 3, 4, 5, 6]
 

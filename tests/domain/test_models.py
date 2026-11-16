@@ -11,9 +11,13 @@ from app.domain.models import (
     ClaimType,
     DatasetReq,
     ErrorCode,
+    ExecTarget,
+    FallbackReason,
+    GpuFallback,
     Measurements,
     PackageReq,
     Plan,
+    PlanArtifact,
     PlanMode,
     ReasonCode,
     RunStatus,
@@ -180,6 +184,83 @@ def test_plan_accepts_a_well_formed_plan() -> None:
 def test_plan_rejects_malformed_plans(overrides: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         _plan(**overrides)
+
+
+def test_a_plan_artifact_from_before_the_gpu_target_reads_as_cpu() -> None:
+    """plan.json of a run planned before A-47 has only the plan and its cost."""
+    artifact = PlanArtifact.model_validate(
+        {"plan": _plan().model_dump(mode="json"), "est_cost_usd": 0.12}
+    )
+    assert artifact.target is ExecTarget.CPU
+    assert (artifact.cpu_plan, artifact.est_cost_max_usd, artifact.gpu_skipped) == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_a_gpu_plan_artifact_carries_its_cpu_fallback() -> None:
+    cpu = _plan(gpu_minutes_est=25)
+    artifact = PlanArtifact(
+        plan=_plan(scale=Scale.FULL),
+        est_cost_usd=0.9,
+        target=ExecTarget.GPU,
+        cpu_plan=cpu,
+        est_cost_max_usd=1.7,
+    )
+    assert artifact.cpu_plan == cpu
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"target": ExecTarget.GPU},
+        {"target": ExecTarget.GPU, "est_cost_max_usd": 1.7},
+        {"target": ExecTarget.GPU, "cpu_plan": "plan"},
+        {"cpu_plan": "plan"},
+        {"est_cost_max_usd": 1.7},
+        {"gpu_skipped": "x" * 301},
+    ],
+)
+def test_a_plan_artifact_with_a_half_gpu_target_is_refused(fields: dict[str, object]) -> None:
+    """A GPU target always has its CPU fallback and its worst case; a CPU one has neither."""
+    data: dict[str, object] = {"plan": _plan(), "est_cost_usd": 0.5, **fields}
+    if data.get("cpu_plan") == "plan":
+        data["cpu_plan"] = _plan()
+    with pytest.raises(ValidationError):
+        PlanArtifact.model_validate(data)
+
+
+def test_a_gpu_fallback_records_why_the_cpu_plan_ran() -> None:
+    fallback = GpuFallback(
+        reason=FallbackReason.NO_CAPACITY,
+        message="no GPU was free within 10 minutes: the CPU plan runs instead",
+        at=datetime(2026, 11, 16, tzinfo=UTC),
+        gpu_attempt=1,
+    )
+    assert GpuFallback.model_validate_json(fallback.model_dump_json()) == fallback
+    assert {r.value for r in FallbackReason} == {
+        "NO_CAPACITY",
+        "QUEUE_TIMEOUT",
+        "QUOTA",
+        "PLATFORM_ERROR",
+        "DAILY_CAP",
+    }
+
+
+@pytest.mark.parametrize(
+    "fields", [{"message": ""}, {"message": "x" * 301}, {"gpu_attempt": 0}, {"reason": "OTHER"}]
+)
+def test_a_gpu_fallback_out_of_shape_is_refused(fields: dict[str, object]) -> None:
+    data: dict[str, object] = {
+        "reason": "QUOTA",
+        "message": "the GPU quota is exhausted: the CPU plan runs instead",
+        "at": "2026-11-16T00:00:00Z",
+        "gpu_attempt": 1,
+        **fields,
+    }
+    with pytest.raises(ValidationError):
+        GpuFallback.model_validate(data)
 
 
 def test_package_req_keeps_raw_names_for_the_policy() -> None:

@@ -286,6 +286,15 @@
       "title": "EventType",
       "type": "string"
     },
+    "ExecTarget": {
+      "description": "Where a run's experiment executes (A-47): a Token Factory Sandbox on CPU, or one GPU.",
+      "enum": [
+        "cpu",
+        "gpu"
+      ],
+      "title": "ExecTarget",
+      "type": "string"
+    },
     "JobLogPayload": {
       "additionalProperties": false,
       "properties": {
@@ -526,10 +535,47 @@
     "PlanReadyPayload": {
       "additionalProperties": false,
       "properties": {
+        "cpu_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Plan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "est_cost_max_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Est Cost Max Usd"
+        },
         "est_cost_usd": {
           "minimum": 0,
           "title": "Est Cost Usd",
           "type": "number"
+        },
+        "gpu_skipped": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gpu Skipped"
         },
         "needs_approval": {
           "title": "Needs Approval",
@@ -537,6 +583,10 @@
         },
         "plan": {
           "$ref": "#/$defs/Plan"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecTarget",
+          "default": "cpu"
         }
       },
       "required": [

@@ -374,6 +374,12 @@ export interface components {
             /** Events */
             events: components["schemas"]["EventEnvelope"][];
         };
+        /**
+         * ExecTarget
+         * @description Where a run's experiment executes (A-47): a Token Factory Sandbox on CPU, or one GPU.
+         * @enum {string}
+         */
+        ExecTarget: "cpu" | "gpu";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -469,11 +475,18 @@ export interface components {
         PlanMode: "REPO_FIRST" | "FROM_SCRATCH";
         /** PlanReadyPayload */
         PlanReadyPayload: {
+            cpu_plan?: components["schemas"]["Plan"] | null;
+            /** Est Cost Max Usd */
+            est_cost_max_usd?: number | null;
             /** Est Cost Usd */
             est_cost_usd: number;
+            /** Gpu Skipped */
+            gpu_skipped?: string | null;
             /** Needs Approval */
             needs_approval: boolean;
             plan: components["schemas"]["Plan"];
+            /** @default cpu */
+            target: components["schemas"]["ExecTarget"];
         };
         /**
          * ReasonCode
