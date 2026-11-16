@@ -28,13 +28,13 @@ function seedsLine(used: number[]): string {
 describe('seeds sized by time', () => {
   it('calls the seeds the time target left out not started, not failed', () => {
     const line = seedsLine(ran)
-    expect(line).toContain('Seeds: 7 seeds (seeds 0, 1, 2, 3, 4, 5, 6; time target reached: 3 more not started)')
+    expect(line).toContain('Seeds: 7 seeds (seeds 0, 1, 2, 3, 4, 5, 6; time limit reached: 3 more not started)')
     expect(line).not.toContain('planned')
   })
 
   it('names the seeds that ran when one of them gave no value', () => {
     expect(seedsLine([0, 1, 2, 4, 5, 6])).toContain(
-      'Seeds: 6 seeds (seeds 0, 1, 2, 4, 5, 6 of the 7 that ran; time target reached: 3 more not started)',
+      'Seeds: 6 seeds (seeds 0, 1, 2, 4, 5, 6 of the 7 that ran; time limit reached: 3 more not started)',
     )
   })
 

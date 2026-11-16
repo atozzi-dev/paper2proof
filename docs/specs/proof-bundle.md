@@ -136,6 +136,9 @@ with one `FAIL <path>: <problem>` line per problem, `2` on usage errors. It chec
   (read-only), `results/` at `/mnt/run/results`, the exec manifest at `/etc/p2p/manifest.json`
   (read-only) and a tmpfs at `/mnt/cache`, and runs `docker run --rm --gpus all --network none
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 4096 <runner>@sha256:…`.
+- For a manifest with the time rule (A-46: `min_seeds`, `target_seconds`) it appends
+  `--seeds <the seeds the judged job ran>` after the image, so a slower or faster machine
+  replays the same seeds; a manifest without it gets no flag (its runner image predates it).
 - Results land in `<staging dir>/results/<attempt>/results.json`.
 
 ## 7. Content rules

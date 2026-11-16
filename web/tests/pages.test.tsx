@@ -210,7 +210,7 @@ describe('About', () => {
     render(<App />)
     expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('How we check a paper')
     expect(document.body).toHaveTextContent('up to ten when the experiment is quick')
-    expect(document.body).toHaveTextContent('never on the values')
+    expect(document.body).toHaveTextContent('no value is ever read to decide it')
   })
 
   it('names the models the roles really use', async () => {

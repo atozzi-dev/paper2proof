@@ -75,7 +75,8 @@ export function AboutPage() {
           <p className="about-text">
             You give it an arXiv ID, nothing else. A model reads the paper and picks the claims a run can test. The
             experiment is written from the paper, tried in a sandbox with no network, and run over at least three seeds,
-            up to ten when the experiment is quick: the count depends on run time only, never on the values.
+            up to ten when the experiment is quick: the runner’s clock sets the count, and no value is ever read to
+            decide it.
             Then a pure function compares our measurements with the paper&rsquo;s value, and that settles the verdict.
             Every file of the run is hashed and signed, so anyone can check it and run it again.
           </p>

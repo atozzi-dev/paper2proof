@@ -156,7 +156,7 @@ export function verdictConditions(
   if (used && planned && notStarted.length) {
     const ran = planned.filter((s) => !notStarted.includes(s))
     const of = used.join() !== ran.join() ? ` of the ${ran.length} that ran` : ''
-    seeds = ` (seeds ${used.join(', ')}${of}; time target reached: ${notStarted.length} more not started)`
+    seeds = ` (seeds ${used.join(', ')}${of}; time limit reached: ${notStarted.length} more not started)`
   } else if (used && planned && used.join() !== planned.join()) {
     seeds = ` (seeds ${used.join(', ')} of the planned ${planned.join(', ')})`
   } else if (used) seeds = ` (seeds ${used.join(', ')})`

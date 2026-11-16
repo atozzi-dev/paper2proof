@@ -76,14 +76,14 @@ def test_full_scale_limitations_are_short() -> None:
         (
             [7, 8, 9],
             "6 of the 7 seeds that ran produced usable values; 3 more were not started: the "
-            "time target was reached (the seed count depends on run time only, never on the "
-            "values).",
+            "time limit was reached (the runner decides by its clock and never reads a value to "
+            "do so).",
         ),
         (
             [9],
             "6 of the 9 seeds that ran produced usable values; 1 more was not started: the "
-            "time target was reached (the seed count depends on run time only, never on the "
-            "values).",
+            "time limit was reached (the runner decides by its clock and never reads a value to "
+            "do so).",
         ),
     ],
 )

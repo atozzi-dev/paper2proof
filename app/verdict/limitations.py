@@ -33,8 +33,8 @@ def _seeds_line(used: int, planned: int, not_started: int) -> str:
     more = "1 more was" if not_started == 1 else f"{not_started} more were"
     return (
         f"{used} of the {planned - not_started} seeds that ran produced usable values; {more} "
-        "not started: the time target was reached (the seed count depends on run time only, "
-        "never on the values)."
+        "not started: the time limit was reached (the runner decides by its clock and never "
+        "reads a value to do so)."
     )
 
 

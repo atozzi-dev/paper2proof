@@ -104,7 +104,10 @@ ci     = (mean - half, mean + half)
 measured values: the plan lists up to `max_seeds` (`config/budgets.yaml`), and after the first
 `min_seeds` the runner starts the next one only if it should end within the time target
 (execution-contracts §7). Nothing that reads a value ever decides whether another seed runs, so
-the interval is never the result of stopping when it looked good (optional stopping).
+the runner never stops because the interval looked good (optional stopping). One limit, stated
+plainly: the clock measures the experiment script, so a script whose run time depends on its own
+results (early stopping, a retry on divergence, or a hostile one that sleeps) can still shift
+the count; at least `min_seeds` always run, and such a script could as well write false values.
 
 ### ABSOLUTE
 
