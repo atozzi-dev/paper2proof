@@ -47,6 +47,7 @@ export const runConditions: RunConditions = {
   seeds_used: [0, 1],
   seeds_used_by_claim: { c1: [0, 1], c2: [0] },
   seeds_not_started: [],
+  gpu_fallback: null,
   hardware: { platform: 'gpu-l40s-a', preset: '1gpu-8vcpu-32gb', preemptible: true, gpu: 'NVIDIA L40S' },
   code: 'FROM_SCRATCH',
   deviations: ['Smaller model than the paper.'],

@@ -11,7 +11,16 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from app.domain.contracts import ExecManifest
-from app.domain.models import Plan, PlanMode, Scale, SetupRecord, StepName
+from app.domain.models import (
+    GpuFallback,
+    Plan,
+    PlanArtifact,
+    PlanMode,
+    Scale,
+    SetupRecord,
+    StepName,
+)
+from app.orchestrator.fallback import fallback_key
 from app.orchestrator.setup_check import clean
 from app.storage.artifacts import ArtifactStore
 from app.storage.store import StepRecord, Store
@@ -51,6 +60,8 @@ class RunConditions(BaseModel):
     # are the paper's and the Coder's words (model text, bounded): shown as plain text
     setup: list[SetupRecord]
     exit_reason: ExitReason
+    # A-47: why a run planned for the GPU ran its CPU plan (control-plane text), or None
+    gpu_fallback: str | None = None
 
 
 class _Hardware(BaseModel):
@@ -115,7 +126,8 @@ async def _conditions(store: Store, artifacts: ArtifactStore, run_id: str) -> Ru
         return None
     if not analysis.claims:  # a contract error: nothing was measured
         return None
-    plan = await _plan(artifacts, refs.get(StepName.PLANNING))
+    fallback = await _fallback(artifacts, run_id)
+    plan = await _plan(artifacts, refs.get(StepName.PLANNING), fell_back=fallback is not None)
     hardware = await _hardware(artifacts, refs.get(StepName.EXECUTING), manifest.attempt)
     return RunConditions(
         attempt=manifest.attempt,
@@ -139,6 +151,7 @@ async def _conditions(store: Store, artifacts: ArtifactStore, run_id: str) -> Ru
         deviations=plan.notes if plan else [],
         setup=_setup(await _read(artifacts, refs.get(StepName.SMOKE_TESTING))),
         exit_reason=analysis.exit_reason,
+        gpu_fallback=fallback.message if fallback is not None else None,
     )
 
 
@@ -172,10 +185,23 @@ def _shown(text: str) -> str:
     return WITHHELD if not cleaned or mentions_verdict(cleaned) else cleaned
 
 
-async def _plan(artifacts: ArtifactStore, key: str | None) -> Plan | None:
+async def _plan(artifacts: ArtifactStore, key: str | None, *, fell_back: bool) -> Plan | None:
+    """The plan that ran: PLANNING's, or its CPU plan after the GPU fallback (A-47)."""
     stored = await _read(artifacts, key)
     try:
-        return Plan.model_validate(stored.get("plan")) if stored else None
+        artifact = PlanArtifact.model_validate(stored) if stored else None
+    except ValidationError:
+        return None
+    if artifact is None:
+        return None
+    return artifact.cpu_plan if fell_back and artifact.cpu_plan is not None else artifact.plan
+
+
+async def _fallback(artifacts: ArtifactStore, run_id: str) -> GpuFallback | None:
+    """EXECUTING's record of a GPU run that ran its CPU plan, if it fell back (A-47)."""
+    stored = await _read(artifacts, fallback_key(run_id))
+    try:
+        return GpuFallback.model_validate(stored) if stored else None
     except ValidationError:
         return None
 

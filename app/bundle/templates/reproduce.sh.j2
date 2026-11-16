@@ -11,6 +11,7 @@
 # Check the bundle first: uv run python -m app.bundle.verify <bundle> (Paper2Proof repository).
 # Needs Linux, Docker and sha256sum. With an NVIDIA GPU (and the NVIDIA Container Toolkit) the
 # job gets every GPU; without one it runs on CPU, as runs judged in a Token Factory Sandbox did.
+# A run judged on a GPU also replays on CPU, much more slowly.
 #
 # WARNING: this runs code written by a model and code from the paper's repository. Run it only
 # on an isolated, disposable machine (never a developer laptop or a control-plane host). The

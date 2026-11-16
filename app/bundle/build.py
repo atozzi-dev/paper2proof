@@ -33,6 +33,7 @@ from app.domain.contracts import ARCHIVE_NAME_PATTERN, RUN_ID_PATTERN, ExecManif
 from app.domain.paper import IngestedPaper
 from app.execution.config import DIGEST_REF
 from app.execution.run_storage import RunStorage
+from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 from app.execution.smoke import MAX_WORKSPACE_BYTES
 from app.models.prompt_files import PROMPTS_DIR, load_prompt
 from app.orchestrator.budget import SpendKind
@@ -43,7 +44,7 @@ from app.verdict.results import MAX_RESULTS_BYTES, Analysis
 log = logging.getLogger(__name__)
 
 BUNDLE_SCHEMA = "p2p.bundle/v2"
-MAX_ATTEMPTS = 2  # the first GPU job and one on-demand retry (EXECUTING)
+MAX_ATTEMPTS = 3  # the first GPU job, one on-demand retry, the CPU fallback's (EXECUTING)
 MAX_JSON_BYTES = MAX_RESULTS_BYTES  # results.json and env.json
 MAX_LOG_BYTES = 4 * 1024 * 1024
 MAX_LOCK_BYTES = 1024 * 1024
@@ -272,6 +273,7 @@ class Bundler:
         signer: Signer | None,
         runner_image: str,
         known_secrets: Sequence[str],
+        runner_cpu_image: str | None = None,
         public_key_pem: bytes | None = None,
         commit: str | None = None,
         clock: Callable[[], datetime] = _utcnow,
@@ -281,6 +283,7 @@ class Bundler:
         self._bundles = bundles
         self._signer = signer
         self._runner_image = runner_image
+        self._runner_cpu_image = runner_cpu_image  # A-47: a run judged in Sandboxes
         self._known = tuple(s.encode() for s in known_secrets)
         self._pinned = public_key_pem  # the published key (docs/bundle-public-key.pem)
         self._commit = commit
@@ -362,6 +365,17 @@ class Bundler:
                 await self._bucket(
                     ctx, out, f"results/{n}/{leaf}", f"results/{n}/{leaf}", cap, json=is_json
                 )
+
+    async def _runner(self, prefix: str, attempt: int) -> str:
+        """The image the judged job ran: runner-cpu when it ran in a Sandbox and the deploy
+        has both runners (auto, A-47); otherwise the one runner (its digest is the
+        manifest's either way)."""
+        execution = await self._artifact(f"{prefix}/execution_{attempt}.json")
+        hardware = execution.get("hardware") if isinstance(execution, dict) else None
+        platform = hardware.get("platform") if isinstance(hardware, dict) else None
+        if platform == SANDBOX_PLATFORM and self._runner_cpu_image is not None:
+            return self._runner_cpu_image
+        return self._runner_image
 
     async def _judged(self, prefix: str, attempt: int) -> ExecManifest | None:
         """The manifest the judged GPU job received (kept before submission by EXECUTING)."""
@@ -456,6 +470,9 @@ class Bundler:
             ],
         )
         await self._copy(out, f"{prefix}/plan.json", "plan.json")
+        fallback = await self._artifact(f"{prefix}/gpu_fallback.json")
+        if fallback is not None:  # A-47: why the GPU plan's run ran its CPU plan
+            out.add_json("gpu_fallback.json", fallback)
         report = await self._copy(
             out, f"{prefix}/provision_report.json", "env/provision_report.json"
         )
@@ -466,6 +483,7 @@ class Bundler:
         smoke = await self._copy(out, f"{prefix}/smoke_result.json", "code/smoke_result.json")
         await self._attempts(ctx, out, prefix)
         judged = await self._judged(prefix, attempt)
+        runner = await self._runner(prefix, attempt)
         if judged is None:
             out.omit("reproduce.sh", Reason.MISSING)
         workspace_sha = (
@@ -483,7 +501,7 @@ class Bundler:
         if judged is not None:
             seeds = await self._seeds_ran(prefix, attempt, judged)
             script = await asyncio.to_thread(
-                render_reproduce, judged, self._runner_image, run_id=run_id, seeds=seeds
+                render_reproduce, judged, runner, run_id=run_id, seeds=seeds
             )
             out.files.append(BundleFile("reproduce.sh", script, Origin.CONTROL_PLANE))
         out.add_json(
@@ -514,7 +532,7 @@ class Bundler:
             "models": models,
             "prompts": await ctx.run_cpu(prompt_versions),
             "images": (
-                {"runner": f"{self._runner_image.rsplit('@', 1)[0]}@{judged.image_digest}"}
+                {"runner": f"{runner.rsplit('@', 1)[0]}@{judged.image_digest}"}
                 if judged is not None
                 else {}
             ),

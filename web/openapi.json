@@ -922,6 +922,17 @@
             "title": "Exit Reason",
             "type": "string"
           },
+          "gpu_fallback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Fallback"
+          },
           "hardware": {
             "$ref": "#/components/schemas/HardwareView"
           },

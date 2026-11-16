@@ -400,3 +400,65 @@ def test_json_escaped_known_secrets_are_found() -> None:
 )
 def test_more_token_shapes_are_found(token: bytes) -> None:
     assert find_secrets(b"x " + token + b" y")
+
+
+# --- GPU when needed (A-47): the runner the judged job ran, and why it was the CPU -------
+
+RUNNER_CPU = "registry.example/p2p/p2p-runner-cpu@sha256:" + "2" * 64
+
+
+async def _built(run: Run, **kwargs: Any) -> dict[str, bytes]:
+    await run.bundler(None, **kwargs).build(run.ctx)
+    stored = await run.bundles.get(RUN)
+    assert stored is not None
+    return read_archive(stored)
+
+
+def _judged_on(run: Run, platform: str) -> None:
+    key = f"runs/{RUN}/execution_1.json"
+    execution = run.artifacts.get_json(key)
+    execution["hardware"] = {"platform": platform, "preset": "x", "preemptible": False}
+    run.artifacts.put_json(key, execution)
+
+
+async def test_a_run_judged_in_a_sandbox_replays_with_the_cpu_runner(run: Run) -> None:
+    _judged_on(run, "sandbox")
+    files = await _built(run, runner_cpu_image=RUNNER_CPU)
+    image = RUNNER_CPU.split("@")[0] + "@sha256:" + "0" * 64  # the manifest's digest
+    assert _manifest(files)["images"] == {"runner": image}
+    assert f"RUNNER_IMAGE={image}" in files["reproduce.sh"].decode()
+
+
+async def test_a_run_judged_on_a_gpu_replays_with_the_gpu_runner(run: Run) -> None:
+    _judged_on(run, "gpu-l40s-a")
+    files = await _built(run, runner_cpu_image=RUNNER_CPU)
+    assert _manifest(files)["images"] == {"runner": RUNNER.split("@")[0] + "@sha256:" + "0" * 64}
+
+
+async def test_without_a_cpu_runner_the_bundle_names_the_runner_as_before(run: Run) -> None:
+    _judged_on(run, "sandbox")  # P2P_EXEC_BACKEND=sandboxes: the one runner is runner-cpu
+    files = await _built(run)
+    assert _manifest(files)["images"] == {"runner": RUNNER.split("@")[0] + "@sha256:" + "0" * 64}
+
+
+async def test_the_bundle_says_why_a_gpu_run_ran_on_cpu_and_keeps_its_cpu_attempt(
+    run: Run,
+) -> None:
+    record = {
+        "reason": "NO_CAPACITY",
+        "message": "no GPU was free within 10 minutes: the CPU plan runs instead",
+        "at": "2026-11-16T00:00:00Z",
+        "gpu_attempt": 1,
+    }
+    run.artifacts.put_json(f"runs/{RUN}/gpu_fallback.json", record)
+    execution = run.artifacts.get_json(f"runs/{RUN}/execution_1.json")
+    run.artifacts.put_json(f"runs/{RUN}/execution_3.json", execution)
+    files = await _built(run)
+    assert json.loads(files["gpu_fallback.json"])["reason"] == "NO_CAPACITY"
+    assert "results/3/execution.json" in files
+
+
+async def test_a_run_that_never_fell_back_has_no_fallback_record(run: Run) -> None:
+    files = await _built(run)
+    assert "gpu_fallback.json" not in files
+    assert not any("gpu_fallback" in p for p in _manifest(files).get("omitted", {}))

@@ -162,6 +162,8 @@ export function verdictConditions(
   } else if (used) seeds = ` (seeds ${used.join(', ')})`
   out.push({ label: 'Seeds', value: `${verdict.n_seeds} seeds${seeds}` })
   out.push({ label: 'Hardware', value: hardwareText(c?.hardware ?? null, jobs) })
+  // A-47: planned for a GPU, it ran its CPU plan: say why, next to the verdict (invariant 10)
+  if (c?.gpu_fallback) out.push({ label: 'GPU', value: `Planned for one GPU; ${c.gpu_fallback}` })
   const mode = c?.code ?? p?.mode
   if (mode) {
     out.push({

@@ -22,6 +22,12 @@ function seedsText(seeds: number[]): string {
   return seeds.length > MIN_SEEDS ? `${list} (at least ${MIN_SEEDS}; the rest while time allows)` : list
 }
 
+/** A control-plane phrase ("a GPU would help ...") as a sentence. */
+function sentence(text: string): string {
+  const trimmed = text.trim()
+  return trimmed ? `${trimmed[0].toUpperCase()}${trimmed.slice(1)}${/[.!?]$/.test(trimmed) ? '' : '.'}` : ''
+}
+
 export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: Props) {
   const headingId = useId()
   const Heading = level === 3 ? 'h3' : 'h2'
@@ -29,6 +35,7 @@ export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: 
   const packages = p.packages ?? []
   const datasets = p.datasets ?? []
   const notes = p.notes ?? []
+  const onGpu = ready.target === 'gpu' // A-47; plans from before name no target: CPU
   const [busy, setBusy] = useState(false)
   const [decided, setDecided] = useState<'approved' | 'rejected' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -59,10 +66,15 @@ export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: 
         <dd>{seedsText(p.seeds)}</dd>
         <dt>Claims tested</dt>
         <dd>{p.claim_ids.join(', ')}</dd>
+        <dt>Runs on</dt>
+        <dd>{onGpu ? 'One NVIDIA L40S GPU' : 'CPU (Token Factory Sandbox)'}</dd>
         <dt>Estimated compute time</dt>
         <dd>{p.gpu_minutes_est.toFixed(0)} min</dd>
         <dt>Estimated cost</dt>
-        <dd>{formatUsd(ready.est_cost_usd)}</dd>
+        <dd>
+          {formatUsd(ready.est_cost_usd)}
+          {ready.est_cost_max_usd != null && ` (at most ${formatUsd(ready.est_cost_max_usd)})`}
+        </dd>
         {packages.length > 0 && (
           <>
             <dt>Packages</dt>
@@ -76,6 +88,14 @@ export function PlanCard({ runId, plan: ready, approval, readOnly, level = 2 }: 
           </>
         )}
       </dl>
+      {onGpu && ready.cpu_plan && (
+        <p className="note">
+          {`If no GPU becomes free in time, a CPU version of this plan runs instead${
+            ready.cpu_plan.scale === 'REDUCED' ? ', at reduced scale' : ''
+          }.`}
+        </p>
+      )}
+      {ready.gpu_skipped && <p className="note">{sentence(ready.gpu_skipped)}</p>}
       {notes.length > 0 && (
         <ul className="notes" aria-label="Plan notes">
           {notes.map((n, i) => (

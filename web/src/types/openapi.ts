@@ -522,6 +522,8 @@ export interface components {
              * @enum {string}
              */
             exit_reason: "completed" | "experiment_error" | "budget_timeout" | "contract_error" | "capacity";
+            /** Gpu Fallback */
+            gpu_fallback?: string | null;
             hardware: components["schemas"]["HardwareView"];
             scale: components["schemas"]["ScaleView"];
             /**

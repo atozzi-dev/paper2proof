@@ -648,6 +648,7 @@ def build_runtime(
         bundles=built.bundles,
         signer=built.signer,
         runner_image=execution.runner_image,
+        runner_cpu_image=execution.runner_cpu_image,  # A-47: runs judged in Sandboxes
         known_secrets=known_secrets(settings),
         public_key_pem=public_key,
         commit=settings.p2p_build_commit,

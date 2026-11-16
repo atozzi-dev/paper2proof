@@ -140,6 +140,7 @@ async def test_the_run_view_carries_the_conditions_of_its_verdict(
         "deviations": ["Smaller model than the paper."],
         "setup": [],
         "exit_reason": "completed",
+        "gpu_fallback": None,
     }
     assert "runs/" not in json.dumps(body)  # storage keys stay internal
 
@@ -258,3 +259,31 @@ async def test_setup_text_that_reads_like_a_verdict_is_not_shown(
     await _store_run(store, artifacts, run_id, hardware=GPU, setup=[hostile])
     (shown,) = (await client.get(f"/api/runs/{run_id}")).json()["conditions"]["setup"]
     assert shown["name"] == "(withheld)" and shown["used"] == "20"
+
+
+async def test_the_conditions_say_why_a_gpu_run_ran_on_its_cpu_plan(
+    client: httpx.AsyncClient, store: Store, artifacts: LocalArtifactStore
+) -> None:
+    """A-47, invariant 10: next to the verdict, the run says it ran on CPU and why; the
+    deviations are the CPU plan's, the one that ran."""
+    from app.domain.models import ExecTarget, PlanArtifact
+
+    run_id = await _run(client)
+    sandbox = {"platform": "sandbox", "preset": "4vcpu-4gb", "preemptible": False}
+    await _store_run(store, artifacts, run_id, hardware=sandbox)
+    cpu = Plan.model_validate(_plan()["plan"])
+    gpu = cpu.model_copy(update={"notes": ["the GPU plan's own note"]})
+    artifact = PlanArtifact(
+        plan=gpu, est_cost_usd=1.0, target=ExecTarget.GPU, cpu_plan=cpu, est_cost_max_usd=1.7
+    )
+    artifacts.put_json(f"runs/{run_id}/plan.json", artifact.model_dump(mode="json"))
+    message = "no GPU was free within 10 minutes: the CPU plan runs instead"
+    artifacts.put_json(
+        f"runs/{run_id}/gpu_fallback.json",
+        {"reason": "NO_CAPACITY", "message": message, "at": "2026-11-16T00:00:00Z",
+         "gpu_attempt": 1},
+    )  # fmt: skip
+    conditions = (await client.get(f"/api/runs/{run_id}")).json()["conditions"]
+    assert conditions["gpu_fallback"] == message
+    assert conditions["deviations"] == ["Smaller model than the paper."]
+    assert conditions["hardware"]["platform"] == "sandbox"
