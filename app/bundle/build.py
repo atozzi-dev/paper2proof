@@ -35,6 +35,7 @@ from app.execution.config import DIGEST_REF
 from app.execution.run_storage import RunStorage
 from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 from app.execution.smoke import MAX_WORKSPACE_BYTES
+from app.ingestion.title import display_title
 from app.models.prompt_files import PROMPTS_DIR, load_prompt
 from app.orchestrator.budget import SpendKind
 from app.orchestrator.context import RunContext
@@ -334,7 +335,7 @@ class Bundler:
             {
                 "arxiv_id": paper.arxiv_id,
                 "sha256": paper.sha256,
-                "title": paper.title,
+                "title": display_title(paper.title, None),  # as the pages show it
                 "source_kind": paper.source_kind,
                 "sections": len(paper.sections),
                 "tables": len(paper.tables),

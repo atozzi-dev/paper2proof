@@ -475,3 +475,17 @@ async def test_the_bundle_names_the_runner_the_execution_recorded(run: Run) -> N
     assert _manifest(files)["images"] == {
         "runner": "registry.example/p2p/p2p-gpu-runner@sha256:" + "0" * 64
     }
+
+
+async def test_the_bundle_carries_the_paper_s_title_cleaned(run: Run) -> None:
+    """The title is paper text: the bundle shows it as the pages do, never raw."""
+    from app.ingestion.title import display_title
+
+    key = f"runs/{RUN}/ingested.json"
+    paper = run.artifacts.get_json(key)
+    paper["title"] = "A \\textbf{Bold}\u202e Title\x07"
+    run.artifacts.put_json(key, paper)
+    files = await _built(run)
+    shown = json.loads(files["paper/metadata.json"])["title"]
+    assert shown == display_title(paper["title"], None)
+    assert "\u202e" not in shown and "textbf" not in shown
