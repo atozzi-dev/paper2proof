@@ -9,10 +9,18 @@ from app.domain.models import Verdict, VerdictKind
 
 MAX_SUMMARY_CHARS = 64  # runs.verdict_summary is String(64)
 SEPARATOR = " · "
+# Most cautionary first: what does not fit is folded into "+n more" from the end, so a
+# NOT_REPRODUCED is always shown, with the link to its conditions (invariant 10).
+CAUTION_ORDER = (
+    VerdictKind.NOT_REPRODUCED,
+    VerdictKind.INCONCLUSIVE,
+    VerdictKind.REPRODUCED_AT_REDUCED_SCALE,
+    VerdictKind.REPRODUCED,
+)
 
 
 def verdict_summary(verdicts: Iterable[Verdict]) -> str | None:
-    """`"<n> <KIND>"` per kind, in VerdictKind order, e.g. `1 REPRODUCED · 1 NOT_REPRODUCED`.
+    """`"<n> <KIND>"` per kind, most cautionary first, e.g. `1 NOT_REPRODUCED · 1 REPRODUCED`.
     Kinds that don't fit the column are counted as `+<n> more`, never cut or dropped."""
     return kinds_summary(v.kind for v in verdicts)
 
@@ -20,7 +28,9 @@ def verdict_summary(verdicts: Iterable[Verdict]) -> str | None:
 def kinds_summary(kinds: Iterable[VerdictKind]) -> str | None:
     """The same line from the stored verdict kinds (gallery curation re-derives it)."""
     counts = Counter(kinds)
-    parts = [(counts[kind], f"{counts[kind]} {kind.value}") for kind in VerdictKind if counts[kind]]
+    parts = [
+        (counts[kind], f"{counts[kind]} {kind.value}") for kind in CAUTION_ORDER if counts[kind]
+    ]
     if not parts:
         return None
     shown: list[str] = []

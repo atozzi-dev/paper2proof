@@ -18,14 +18,14 @@ def test_one_verdict() -> None:
     assert verdict_summary([_v(VerdictKind.NOT_REPRODUCED)]) == "1 NOT_REPRODUCED"
 
 
-def test_counts_in_a_fixed_order_whatever_the_claim_order() -> None:
+def test_counts_most_cautionary_first_whatever_the_claim_order() -> None:
     verdicts = [
         _v(VerdictKind.NOT_REPRODUCED),
         _v(VerdictKind.REPRODUCED),
         _v(VerdictKind.NOT_REPRODUCED),
     ]
-    assert verdict_summary(verdicts) == "1 REPRODUCED · 2 NOT_REPRODUCED"
-    assert verdict_summary(list(reversed(verdicts))) == "1 REPRODUCED · 2 NOT_REPRODUCED"
+    assert verdict_summary(verdicts) == "2 NOT_REPRODUCED · 1 REPRODUCED"
+    assert verdict_summary(list(reversed(verdicts))) == "2 NOT_REPRODUCED · 1 REPRODUCED"
 
 
 def test_no_verdict_is_no_summary() -> None:
@@ -51,4 +51,14 @@ def test_always_fits_the_column_never_cuts_a_kind_and_never_hides_a_verdict() ->
 
 def test_a_summary_that_does_not_fit_says_how_many_verdicts_are_left_out() -> None:
     verdicts = [_v(k) for k in VerdictKind for _ in range(12)]
-    assert verdict_summary(verdicts) == "12 REPRODUCED · 12 REPRODUCED_AT_REDUCED_SCALE · +24 more"
+    assert verdict_summary(verdicts) == "12 NOT_REPRODUCED · 12 INCONCLUSIVE · +24 more"
+
+
+def test_a_not_reproduced_verdict_is_never_folded_away() -> None:
+    # invariant 10: the gallery card shows it, with the link to its conditions
+    for n in range(1, len(VerdictKind) + 1):
+        for combo in itertools.combinations(VerdictKind, n):
+            if VerdictKind.NOT_REPRODUCED not in combo:
+                continue
+            summary = verdict_summary([_v(k) for k in combo for _ in range(12)])
+            assert summary is not None and summary.startswith("12 NOT_REPRODUCED")
