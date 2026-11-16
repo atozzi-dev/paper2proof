@@ -214,3 +214,14 @@ def test_a_code_typed_at_a_terminal_is_not_echoed() -> None:
     )
     assert code == 0 and asked == ["Invite code: "]
     assert json.loads(recorder.only().content) == {"id": hashlib.sha256(b"typed-code").hexdigest()}
+
+
+def test_titles_backfill_posts_to_the_admin_endpoint() -> None:
+    recorder = Recorder(200, {"updated": 3})
+    code, out, _ = _run(["titles", "backfill"], recorder)
+    request = recorder.only()
+    assert code == 0 and (request.method, str(request.url)) == (
+        "POST",
+        f"{URL}/admin/titles/backfill",
+    )
+    assert "3" in out

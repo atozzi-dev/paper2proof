@@ -923,6 +923,11 @@ class Store:
         async with self._session() as s, s.begin():
             await s.execute(update(Run).where(Run.id == run_id).values(paper_sha256=sha256))
 
+    async def runs_without_title(self) -> list[str]:
+        """Runs with no title: ingested before migration 0008 (or with no visible one)."""
+        async with self._session() as s:
+            return list(await s.scalars(select(Run.id).where(Run.title.is_(None))))
+
     async def set_title(self, run_id: str, title: str | None) -> None:
         """The paper's title, already cleaned (app/ingestion/title.py::display_title)."""
         async with self._session() as s, s.begin():

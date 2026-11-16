@@ -9,6 +9,7 @@ Usage (docs/OPERATIONS.md):
     uv run python -m app.admin_cli gallery remove RUN_ID
     uv run python -m app.admin_cli drain on|off
     uv run python -m app.admin_cli kill-switch on|off
+    uv run python -m app.admin_cli titles backfill
 
 The URL comes from --url or P2P_API_URL. The admin token comes from ADMIN_TOKEN or a prompt,
 never from the command line (shell history, process listings). Invite codes to revoke are read
@@ -71,6 +72,9 @@ def _parser() -> argparse.ArgumentParser:
     remove = gallery.add_parser("remove", help="take a run down from the gallery")
     remove.add_argument("run_id")
 
+    titles = commands.add_parser("titles").add_subparsers(dest="action", required=True)
+    titles.add_parser("backfill", help="fill the titles of runs ingested before they were kept")
+
     for name in ("drain", "kill-switch"):
         toggle = commands.add_parser(name)
         toggle.add_argument("state", choices=("on", "off"))
@@ -114,6 +118,8 @@ def _request(
         else:
             ident = str(args.id).lower()
         return "POST", "/admin/invites/revoke", {"id": ident}, {}
+    if args.command == "titles":
+        return "POST", "/admin/titles/backfill", None, {}
     if args.command == "runs":
         query = {"limit": str(args.limit)}
         if args.listed is not None:

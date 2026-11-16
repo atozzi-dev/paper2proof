@@ -3,6 +3,7 @@
 Not part of the public OpenAPI schema. `python -m app.admin_cli` calls them
 (docs/OPERATIONS.md)."""
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -14,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import RUN_ID, client_ip, get_state
 from app.domain.models import RunStatus, VerdictKind
+from app.domain.paper import IngestedPaper
+from app.ingestion.title import display_title
 from app.settings import MIN_SECRET_LEN
 from app.verdict.summary import kinds_summary
 
@@ -71,6 +74,10 @@ class InviteView(BaseModel):
 
 class RevokeInvite(BaseModel):
     id: str = Field(pattern=r"^[0-9a-f]{12,64}$")  # a prefix of the code's sha256
+
+
+class TitleBackfill(BaseModel):
+    updated: int
 
 
 class AdminRun(BaseModel):
@@ -178,3 +185,24 @@ async def revoke_invite(body: RevokeInvite, request: Request) -> Response:
     if matches > 1:
         raise HTTPException(409, "several invites match: give more characters of the id")
     return Response(status_code=204)
+
+
+@router.post("/titles/backfill")
+async def backfill_titles(request: Request) -> TitleBackfill:
+    """Runs ingested before migration 0008 have no title: fill it from the paper INGESTING kept,
+    cleaned as INGESTING cleans it now. Runs whose paper can't be read are left as they are."""
+    state = get_state(request)
+    if state.artifacts is None:
+        raise HTTPException(503, "no artifact store")
+    updated = 0
+    for run_id in await state.store.runs_without_title():
+        try:
+            raw = await asyncio.to_thread(state.artifacts.get_json, f"runs/{run_id}/ingested.json")
+            paper = IngestedPaper.model_validate(raw)
+        except (FileNotFoundError, ValueError):  # ValidationError included
+            continue
+        title = display_title(paper.title, None)
+        if title:
+            await state.store.set_title(run_id, title)
+            updated += 1
+    return TitleBackfill(updated=updated)

@@ -21,13 +21,14 @@ token in argv ends up in the shell history and the process list. Unset it when d
 
 | Command | What it does |
 |---|---|
-| `invite create [--quota N] [--expires ISO]` | New invite code, printed **once** (only its sha256 is stored). Default quota: 3 runs per day |
+| `invite create [--quota N] [--expires ISO] [--gpu N]` | New invite code, printed **once** (only its sha256 is stored). Default quota: 3 runs per day; `--gpu N` GPU runs a day (default 0, CPU only; A-47) |
 | `invite list` | Every invite by id (first 12 hex characters of the code's sha256), quota, use today, expiry, active |
 | `invite revoke --id <id>` / `invite revoke --code-stdin` | The invite expires now. With `--code-stdin` the code is read from stdin and hashed locally |
 | `runs [--listed \| --unlisted] [--limit N]` | Recent runs with their verdict kinds, newest first (curation candidates) |
 | `gallery add <run_id> [--reviewed]` | List a finished run in the public gallery |
 | `gallery remove <run_id>` | Take a run down from the gallery (always succeeds) |
 | `drain on\|off`, `kill-switch on\|off` | Stop accepting new runs (deploy) / pause new runs for the day (budget) |
+| `titles backfill` | Fill the title of runs ingested before titles were kept (migration 0008) from the paper INGESTING stored, cleaned as the pages show it; prints how many were filled. Run once after the deploy that brings 0008 |
 
 A refused request exits with status 1 and prints the HTTP status and the server's message.
 

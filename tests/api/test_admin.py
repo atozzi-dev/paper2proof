@@ -1,5 +1,6 @@
 import hashlib
 import json
+from typing import Any
 from unittest import mock
 
 import httpx
@@ -253,3 +254,32 @@ async def test_an_invite_may_allow_gpu_runs(client: httpx.AsyncClient) -> None:
 async def test_a_gpu_quota_out_of_range_is_refused(client: httpx.AsyncClient, gpu: int) -> None:
     response = await client.post("/admin/invites", json={"gpu_runs_per_day": gpu}, headers=HEAD)
     assert response.status_code == 400  # validation errors are 400 here (app/api/main.py)
+
+
+async def test_titles_are_backfilled_from_the_ingested_paper(
+    client: httpx.AsyncClient, store: Store, state: AppState, tmp_path: Any
+) -> None:
+    """Runs ingested before migration 0008 have no title: the admin fills it from the paper
+    INGESTING kept, cleaned as INGESTING does now."""
+    from app.storage.artifacts import LocalArtifactStore
+
+    state.artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    old, new, none = (
+        "r_01jb7z0000000000000000000e",
+        "r_01jb7z0000000000000000000f",
+        ("r_01jb7z0000000000000000000g"),
+    )
+    for run_id in (old, new, none):
+        await store.create_run(run_id, "2106.09685", created_by=None, claim_hint=None, budget={})
+    await store.set_title(new, "Already Set")
+    paper = {"arxiv_id": "2106.09685", "sha256": "d" * 64, "title": "LoRA: \\emph{Low}-Rank",
+             "sections": [], "tables": [], "source_kind": "pdf"}  # fmt: skip
+    state.artifacts.put_json(f"runs/{old}/ingested.json", paper)
+    response = await client.post("/admin/titles/backfill", headers=HEAD)
+    assert response.status_code == 200
+    assert response.json() == {"updated": 1}
+    titles = {r: (await store.get_run(r)).title for r in (old, new, none)}  # type: ignore[union-attr]
+    from app.ingestion.title import display_title
+
+    assert titles == {old: display_title(paper["title"], None), new: "Already Set", none: None}
+    assert titles[old] and "emph" not in titles[old]
