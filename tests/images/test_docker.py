@@ -511,3 +511,57 @@ def test_runners_load_the_openmp_runtime(image: str) -> None:
     """LightGBM and XGBoost wheels need the system libgomp: torch and scikit-learn bundle
     their own, so importing them proves nothing."""
     _run(image, "-c", "import ctypes; ctypes.CDLL('libgomp.so.1')", entrypoint="python")
+
+
+def test_the_replay_flag_reaches_the_runner_through_tini(tmp_path: Path) -> None:
+    """A-46: reproduce.sh appends `--seeds 0,1,2` after the image, so docker passes it to the
+    ENTRYPOINT (tini -- python -I entrypoint.py): exactly those seeds run, the rest of the
+    manifest's are not started."""
+    _need("p2p-runner-cpu")
+    image, name = f"p2p-runner-cpu:{TAG}", f"p2p-replay-{uuid.uuid4().hex[:12]}"
+    run, staging = tmp_path / "run", tmp_path / "run" / "staging"
+    (staging / "data").mkdir(parents=True)
+    for d in (run, staging, staging / "data"):
+        d.chmod(0o777)
+    workspace, workspace_sha256 = pack_with_digest({"train.py": CANARY_SCRIPT.encode()})
+    (staging / "workspace.tar").write_bytes(workspace)
+    (staging / "overlay.tar").write_bytes(_tar({"canary_overlay.py": "BASE = 0.5\n"}))
+    (staging / "data" / "canary.tar").write_bytes(_tar({"offset.txt": "0.25\n"}))
+    mount = ["-v", f"{run}:/mnt/run"]
+    try:
+        packed = _docker(
+            ["run", "--rm", "--network", "none", "--entrypoint", "zstd", *mount, image,
+             "-q", "--rm", "/mnt/run/staging/overlay.tar", "/mnt/run/staging/data/canary.tar"]
+        )  # fmt: skip
+        assert packed.returncode == 0, packed.stderr[-2000:]
+        overlay, data = (
+            hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in (staging / "overlay.tar.zst", staging / "data" / "canary.tar.zst")
+        )
+        manifest = _canary_manifest(workspace_sha256, overlay, data).model_copy(
+            update={"seeds": [0, 1, 2, 3, 4], "min_seeds": 3, "target_seconds": 60}
+        )
+        body = manifest.model_dump(mode="json", by_alias=True)
+        (tmp_path / "manifest.json").write_text(json.dumps(body), encoding="utf-8")
+        done = _docker(
+            ["run", "--rm", "--name", name, "--network", "none", *mount,
+             "-v", f"{tmp_path / 'manifest.json'}:/etc/p2p/manifest.json:ro", image,
+             "--seeds", "0,1,2"],
+            timeout=300,
+        )  # fmt: skip
+        assert done.returncode == 0, done.stderr[-3000:]
+        results = json.loads((run / "results" / "1" / "results.json").read_text("utf-8"))
+        assert results["seeds_not_started"] == [3, 4]
+        assert results["exit_reason"] == "completed"
+        # a replay, not a judged job: ANALYZING's time-rule check does not apply to it
+        out = (run / "results" / "1" / "stdout.log").read_text(encoding="utf-8")
+        assert all(f"seed {s}: " in out for s in (0, 1, 2)) and "seed 3: " not in out
+    finally:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(["rm", "-f", name], timeout=60)
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _docker(
+                ["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "chmod",
+                 *mount, image, "-R", "a+rwX", "/mnt/run"],
+                timeout=60,
+            )  # fmt: skip
