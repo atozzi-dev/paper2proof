@@ -3,6 +3,7 @@ import json
 from unittest import mock
 
 import httpx
+import pytest
 
 from app.api.main import AppState
 from app.api.openapi_export import build
@@ -191,6 +192,8 @@ async def test_invites_are_listed_without_their_codes_and_can_be_revoked(
             "used_on": None,
             "expires_at": None,
             "active": True,
+            "gpu_runs_per_day": 0,  # CPU only unless the admin says so (A-47)
+            "gpu_used_today": 0,
         }
     ]
     revoked = await client.post("/admin/invites/revoke", json={"id": digest[:12]}, headers=HEAD)
@@ -235,3 +238,18 @@ async def test_admin_failures_are_rate_limited(client: httpx.AsyncClient) -> Non
     ]
     assert codes[:10] == [401] * 10
     assert 429 in codes[10:]
+
+
+async def test_an_invite_may_allow_gpu_runs(client: httpx.AsyncClient) -> None:
+    code = (await client.post("/admin/invites", json={"gpu_runs_per_day": 2}, headers=HEAD)).json()[
+        "code"
+    ]
+    digest = hashlib.sha256(code.encode()).hexdigest()
+    listing = (await client.get("/admin/invites", headers=HEAD)).json()
+    assert [i["gpu_runs_per_day"] for i in listing if i["id"] == digest[:12]] == [2]
+
+
+@pytest.mark.parametrize("gpu", [-1, 21])
+async def test_a_gpu_quota_out_of_range_is_refused(client: httpx.AsyncClient, gpu: int) -> None:
+    response = await client.post("/admin/invites", json={"gpu_runs_per_day": gpu}, headers=HEAD)
+    assert response.status_code == 400  # validation errors are 400 here (app/api/main.py)

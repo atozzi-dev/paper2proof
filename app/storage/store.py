@@ -57,6 +57,7 @@ class RunRecord(_Record):
     created_by: str | None
     claim_hint: str | None
     budget: dict[str, Any]
+    invite_hash: str | None = None  # None: created before A-47 (never a GPU)
     listed: bool
     approval: str | None
     verdict_summary: str | None
@@ -75,6 +76,7 @@ def _run_record(row: Run) -> RunRecord:
         created_by=row.created_by,
         claim_hint=row.claim_hint,
         budget=row.budget_json,
+        invite_hash=row.invite_hash,
         listed=row.listed,
         approval=row.approval,
         verdict_summary=row.verdict_summary,
@@ -141,6 +143,9 @@ class InviteRecord(_Record):
     used_today: int
     used_on: date | None
     expires_at: datetime | None
+    gpu_runs_per_day: int = 0
+    gpu_used_today: int = 0
+    gpu_used_on: date | None = None
 
     def active(self, now: datetime) -> bool:
         expires = self.expires_at
@@ -172,6 +177,7 @@ class Store:
         created_by: str | None,
         claim_hint: str | None,
         budget: dict[str, Any],
+        invite_hash: str | None = None,
     ) -> None:
         async with self._session() as s, s.begin():
             s.add(
@@ -180,6 +186,7 @@ class Store:
                     arxiv_id=arxiv_id,
                     status=RunStatus.QUEUED.value,
                     created_by=created_by,
+                    invite_hash=invite_hash,
                     claim_hint=claim_hint,
                     budget_json=budget,
                 )
@@ -776,7 +783,11 @@ class Store:
         return [(cid, v) for cid, v in verdicts if v is not None]
 
     async def create_invite(
-        self, code_hash: str, quota_per_day: int, expires_at: datetime | None
+        self,
+        code_hash: str,
+        quota_per_day: int,
+        expires_at: datetime | None,
+        gpu_runs_per_day: int = 0,
     ) -> None:
         async with self._session() as s, s.begin():
             s.add(
@@ -785,6 +796,8 @@ class Store:
                     quota_per_day=quota_per_day,
                     used_today=0,
                     expires_at=expires_at,
+                    gpu_runs_per_day=gpu_runs_per_day,
+                    gpu_used_today=0,
                 )
             )
 
@@ -798,6 +811,9 @@ class Store:
                     used_today=r.used_today,
                     used_on=r.used_on,
                     expires_at=r.expires_at,
+                    gpu_runs_per_day=r.gpu_runs_per_day,
+                    gpu_used_today=r.gpu_used_today,
+                    gpu_used_on=r.gpu_used_on,
                 )
                 for r in rows
             ]
@@ -851,6 +867,40 @@ class Store:
                     InviteRow.used_today < InviteRow.quota_per_day,
                 )
                 .values(used_today=InviteRow.used_today + 1),
+            )
+
+    async def consume_gpu_run(self, run_id: str, now: datetime) -> bool:
+        """Count one GPU run against the daily GPU quota of the run's invite (A-47); False when
+        the run has no invite (created before A-47), the invite expired or has no GPU run left
+        today. The same two conditional UPDATEs as consume_invite: no read-modify-write race."""
+        today = now.astimezone(UTC).date()
+        async with self._session() as s, s.begin():
+            code_hash = await s.scalar(select(Run.invite_hash).where(Run.id == run_id))
+            if code_hash is None:
+                return False
+            valid = InviteRow.expires_at.is_(None) | (InviteRow.expires_at > now)
+            if await self._cas(
+                s,
+                update(InviteRow)
+                .where(
+                    InviteRow.code_hash == code_hash,
+                    valid,
+                    InviteRow.gpu_used_on.is_(None) | (InviteRow.gpu_used_on != today),
+                    InviteRow.gpu_runs_per_day >= 1,
+                )
+                .values(gpu_used_on=today, gpu_used_today=1),
+            ):
+                return True
+            return await self._cas(
+                s,
+                update(InviteRow)
+                .where(
+                    InviteRow.code_hash == code_hash,
+                    valid,
+                    InviteRow.gpu_used_on == today,
+                    InviteRow.gpu_used_today < InviteRow.gpu_runs_per_day,
+                )
+                .values(gpu_used_today=InviteRow.gpu_used_today + 1),
             )
 
     async def set_paper_sha256(self, run_id: str, sha256: str) -> None:

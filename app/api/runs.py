@@ -107,6 +107,7 @@ async def create_run(
         created_by=session.sid,
         claim_hint=body.claim_hint,
         budget=state.limits.per_run.model_dump(),
+        invite_hash=session.invite,  # its daily GPU quota (A-47)
     )
     await state.submit(run_id)
     return Created(run_id=run_id, events_url=f"/api/runs/{run_id}/events")

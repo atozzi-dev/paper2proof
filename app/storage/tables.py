@@ -58,7 +58,8 @@ class Run(Base):
     title: Mapped[str | None] = mapped_column(String(300))  # cleaned paper title (A-44)
     status: Mapped[str] = mapped_column(String(24), index=True)
     error_code: Mapped[str | None] = mapped_column(String(32))
-    created_by: Mapped[str | None] = mapped_column(String(64))  # sha256 of the invite code
+    created_by: Mapped[str | None] = mapped_column(String(64))  # the session that created it
+    invite_hash: Mapped[str | None] = mapped_column(String(64))  # its invite's sha256 (A-47)
     claim_hint: Mapped[str | None] = mapped_column(Text)
     budget_json: Mapped[dict[str, Any]]
     listed: Mapped[bool] = mapped_column(Boolean, default=False)  # public gallery (admin)
@@ -177,6 +178,10 @@ class InviteRow(Base):
     used_today: Mapped[int] = mapped_column(Integer, default=0)
     used_on: Mapped[date | None]
     expires_at: Mapped[datetime | None]
+    # GPU when needed (A-47): GPU runs a day, counted like the runs (0: CPU only)
+    gpu_runs_per_day: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    gpu_used_today: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    gpu_used_on: Mapped[date | None]
 
 
 class LedgerDaily(Base):

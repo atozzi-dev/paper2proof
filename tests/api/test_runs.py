@@ -258,3 +258,14 @@ async def test_non_ascii_digits_are_not_an_arxiv_id(
     await login(client)
     response = await client.post("/api/runs", json={"arxiv_id": arxiv_id})
     assert response.status_code in (400, 422)
+
+
+async def test_a_run_remembers_its_invite_for_the_gpu_quota(
+    client: httpx.AsyncClient, store: Store
+) -> None:
+    digest = hashlib.sha256(b"gpu-invite").hexdigest()
+    await store.create_invite(digest, 2, None, gpu_runs_per_day=1)
+    await login(client, "gpu-invite")
+    run_id = (await _create(client)).json()["run_id"]
+    run = await store.get_run(run_id)
+    assert run is not None and run.invite_hash == digest

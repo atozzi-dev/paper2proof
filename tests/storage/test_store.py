@@ -283,3 +283,68 @@ async def test_trusted_overlays_first_writer_wins_newest_first(store: Store) -> 
     await store.trust_overlay("b" * 64, "3" * 64, RUN, at=t0 + timedelta(hours=2))
     assert await store.trusted_overlays() == {"a" * 64: "1" * 64, "b" * 64: "3" * 64}
     assert await store.trusted_overlays(limit=1) == {"b" * 64: "3" * 64}
+
+
+GPU_INVITE = "9f" * 32
+GPU_DAY = datetime(2026, 11, 16, 9, tzinfo=UTC)
+
+
+async def _gpu_run(store: Store, run_id: str = RUN, invite: str | None = GPU_INVITE) -> None:
+    await store.create_run(
+        run_id, "2106.09685", created_by="sid", claim_hint=None, budget={}, invite_hash=invite
+    )
+
+
+async def test_a_run_keeps_the_invite_it_was_created_with(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=1)
+    await _gpu_run(store)
+    run = await store.get_run(RUN)
+    assert run is not None and run.invite_hash == GPU_INVITE
+
+
+async def test_an_invite_without_gpu_runs_gets_no_gpu(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None)  # the default: CPU only
+    await _gpu_run(store)
+    assert not await store.consume_gpu_run(RUN, GPU_DAY)
+
+
+async def test_gpu_runs_are_counted_per_utc_day(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=1)
+    await _gpu_run(store)
+    assert await store.consume_gpu_run(RUN, GPU_DAY)
+    assert not await store.consume_gpu_run(RUN, GPU_DAY + timedelta(hours=1))
+    assert await store.consume_gpu_run(RUN, GPU_DAY + timedelta(days=1))
+
+
+async def test_an_expired_invite_gets_no_gpu(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, GPU_DAY - timedelta(days=1), gpu_runs_per_day=5)
+    await _gpu_run(store)
+    assert not await store.consume_gpu_run(RUN, GPU_DAY)
+
+
+async def test_a_run_without_an_invite_gets_no_gpu(store: Store) -> None:
+    """Runs created before A-47 have no invite_hash; an unknown run has nothing at all."""
+    await _gpu_run(store, invite=None)
+    assert not await store.consume_gpu_run(RUN, GPU_DAY)
+    assert not await store.consume_gpu_run("r_" + "9" * 26, GPU_DAY)
+
+
+async def test_two_runs_racing_for_the_last_gpu_run_get_one(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=1)
+    runs = ["r_01jb7z0000000000000000000a", "r_01jb7z0000000000000000000b"]
+    for run_id in runs:
+        await _gpu_run(store, run_id)
+    got = await asyncio.gather(*(store.consume_gpu_run(r, GPU_DAY) for r in runs))
+    assert sorted(got) == [False, True]
+
+
+async def test_the_gpu_quota_is_listed_with_the_invite(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=2)
+    await _gpu_run(store)
+    await store.consume_gpu_run(RUN, GPU_DAY)
+    [invite] = [i for i in await store.list_invites() if i.code_hash == GPU_INVITE]
+    assert (invite.gpu_runs_per_day, invite.gpu_used_today, invite.gpu_used_on) == (
+        2,
+        1,
+        GPU_DAY.date(),
+    )

@@ -51,6 +51,7 @@ class Listing(BaseModel):
 class InviteRequest(BaseModel):
     quota_per_day: int = Field(default=DEFAULT_QUOTA, ge=1, le=100)
     expires_at: datetime | None = None
+    gpu_runs_per_day: int = Field(default=0, ge=0, le=20)  # A-47: 0 keeps it on CPU
 
 
 class InviteCreated(BaseModel):
@@ -64,6 +65,8 @@ class InviteView(BaseModel):
     used_on: date | None
     expires_at: datetime | None
     active: bool
+    gpu_runs_per_day: int
+    gpu_used_today: int
 
 
 class RevokeInvite(BaseModel):
@@ -140,7 +143,9 @@ async def curate(run_id: str, body: Listing, request: Request) -> Response:
 async def create_invite(body: InviteRequest, request: Request) -> InviteCreated:
     code = secrets.token_urlsafe(18)
     digest = hashlib.sha256(code.encode()).hexdigest()
-    await get_state(request).store.create_invite(digest, body.quota_per_day, body.expires_at)
+    await get_state(request).store.create_invite(
+        digest, body.quota_per_day, body.expires_at, gpu_runs_per_day=body.gpu_runs_per_day
+    )
     return InviteCreated(code=code)
 
 
@@ -155,6 +160,10 @@ async def list_invites(request: Request) -> list[InviteView]:
             used_on=invite.used_on,
             expires_at=invite.expires_at,
             active=invite.active(now),
+            gpu_runs_per_day=invite.gpu_runs_per_day,
+            gpu_used_today=invite.gpu_used_today
+            if invite.gpu_used_on == now.astimezone(UTC).date()
+            else 0,
         )
         for invite in await get_state(request).store.list_invites()
     ]

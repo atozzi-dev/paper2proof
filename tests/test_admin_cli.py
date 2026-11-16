@@ -64,7 +64,11 @@ def test_invite_create_uses_the_default_quota_and_prints_the_code_once() -> None
     assert code == 0 and out.strip() == "new-code"
     assert (request.method, str(request.url)) == ("POST", f"{URL}/admin/invites")
     assert request.headers["x-admin-token"] == TOKEN
-    assert json.loads(request.content) == {"quota_per_day": 3, "expires_at": None}
+    assert json.loads(request.content) == {
+        "quota_per_day": 3,
+        "expires_at": None,
+        "gpu_runs_per_day": 0,
+    }
 
 
 def test_invite_create_with_quota_and_expiry() -> None:
@@ -72,7 +76,17 @@ def test_invite_create_with_quota_and_expiry() -> None:
     argv = ["invite", "create", "--quota", "5", "--expires", "2026-12-15T00:00:00Z"]
     assert _run(argv, recorder)[0] == 0
     body = json.loads(recorder.only().content)
-    assert body == {"quota_per_day": 5, "expires_at": "2026-12-15T00:00:00Z"}
+    assert body == {
+        "quota_per_day": 5,
+        "expires_at": "2026-12-15T00:00:00Z",
+        "gpu_runs_per_day": 0,
+    }
+
+
+def test_invite_create_may_allow_gpu_runs() -> None:
+    recorder = Recorder(201, {"code": "c"})
+    assert _run(["invite", "create", "--gpu", "2"], recorder)[0] == 0
+    assert json.loads(recorder.only().content)["gpu_runs_per_day"] == 2
 
 
 def test_the_token_is_prompted_for_when_not_in_the_environment() -> None:

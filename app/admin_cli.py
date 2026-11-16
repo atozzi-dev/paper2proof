@@ -47,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     create = invite.add_parser("create", help="new invite code (printed once)")
     create.add_argument("--quota", type=int, default=DEFAULT_QUOTA, help="runs per day")
     create.add_argument("--expires", help="ISO 8601 expiry, e.g. 2026-12-15T00:00:00Z")
+    create.add_argument("--gpu", type=int, default=0, help="GPU runs per day (0: CPU only)")
     invite.add_parser("list", help="invites by hash prefix (never the codes)")
     revoke = invite.add_parser("revoke", help="expire an invite now")
     which = revoke.add_mutually_exclusive_group(required=True)
@@ -94,7 +95,11 @@ def _request(
         return (
             "POST",
             "/admin/invites",
-            {"quota_per_day": args.quota, "expires_at": args.expires},
+            {
+                "quota_per_day": args.quota,
+                "expires_at": args.expires,
+                "gpu_runs_per_day": args.gpu,
+            },
             {},
         )
     if args.command == "invite" and args.action == "list":
