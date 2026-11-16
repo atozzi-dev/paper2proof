@@ -39,3 +39,6 @@ class ExecutionConfig(BaseModel):
     exec_platform: str = Field(default=EXEC_PLATFORM, min_length=1)
     exec_preset: str = Field(default=EXEC_PRESET, min_length=1)
     exec_fallback: tuple[str, str] | None = EXEC_FALLBACK
+    # GPU when needed (A-47, P2P_EXEC_BACKEND=auto): where a run whose target is CPU runs
+    # its exec job (Sandboxes); the exec_* fields above are then the GPU target's
+    cpu_exec: tuple[str, str] | None = None

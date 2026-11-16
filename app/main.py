@@ -278,15 +278,19 @@ def _check_runner(settings: Settings) -> None:
     refuses them all (exit 30), which users would read as the paper's experiment failing after
     the models were paid for: a stale digest stops the start instead (docs/DEPLOY.md, "When
     the runner changes")."""
-    image = execution_config(settings, prod=True).runner_image  # the one every manifest names
-    if not has_time_target(settings.config_dir / "runner_images.yaml", image):
-        digest = image.rsplit("@", 1)[-1]
-        raise ConfigError(
-            f"the exec runner {digest} (P2P_RUNNER_CPU_IMAGE with Sandboxes, else "
-            "P2P_RUNNER_IMAGE) predates the exec manifest's time target (A-46): rebuild the "
-            "runner from this commit and list its digest in config/runner_images.yaml "
-            "(docs/DEPLOY.md)"
-        )
+    execution = execution_config(settings, prod=True)
+    images = [execution.runner_image]  # the one every manifest names
+    if execution.cpu_exec is not None:  # auto: a CPU target's manifests name runner-cpu
+        images.append(execution.runner_cpu_image)
+    for image in images:
+        if not has_time_target(settings.config_dir / "runner_images.yaml", image):
+            digest = image.rsplit("@", 1)[-1]
+            raise ConfigError(
+                f"the exec runner {digest} (P2P_RUNNER_CPU_IMAGE with Sandboxes, else "
+                "P2P_RUNNER_IMAGE) predates the exec manifest's time target (A-46): rebuild "
+                "the runner from this commit and list its digest in config/runner_images.yaml "
+                "(docs/DEPLOY.md)"
+            )
 
 
 def _check_hybrid(settings: Settings) -> None:
@@ -295,18 +299,20 @@ def _check_hybrid(settings: Settings) -> None:
         raise ConfigError("P2P_EXECUTION=hybrid has no gateway: unset GATEWAY_INSTANCE_ID")
     if settings.p2p_local_jobs_dir is None:
         raise ConfigError("P2P_EXECUTION=hybrid needs P2P_LOCAL_JOBS_DIR")
-    if exec_backend(settings) == "sandboxes":
+    backend = exec_backend(settings)
+    if backend in ("sandboxes", "auto"):  # auto: Sandboxes for CPU targets and smoke jobs
+        name = f"P2P_EXEC_BACKEND={backend}"
         if settings.smoke_executor != "job":  # smoke jobs, in Sandboxes, with the overlay
-            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs SMOKE_EXECUTOR=job")
+            raise ConfigError(f"{name} needs SMOKE_EXECUTOR=job")
         if not settings.tf_project_id:
-            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs TF_PROJECT_ID")
+            raise ConfigError(f"{name} needs TF_PROJECT_ID")
         if settings.nebius_api_key is None or not settings.nebius_api_key.get_secret_value():
-            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs NEBIUS_API_KEY")
+            raise ConfigError(f"{name} needs NEBIUS_API_KEY")
         if not settings.p2p_runner_cpu_image:
-            raise ConfigError("P2P_EXEC_BACKEND=sandboxes needs P2P_RUNNER_CPU_IMAGE")
+            raise ConfigError(f"{name} needs P2P_RUNNER_CPU_IMAGE")
         if _sandbox_image(settings) is None:
             raise ConfigError(
-                "P2P_EXEC_BACKEND=sandboxes: P2P_RUNNER_CPU_IMAGE is not imported into "
+                f"{name}: P2P_RUNNER_CPU_IMAGE is not imported into "
                 "Sandboxes (config/sandbox_images.yaml)"
             )
     elif settings.smoke_executor != "sandboxes":
@@ -329,7 +335,7 @@ def _hybrid_jobs(
     assert settings.p2p_local_jobs_dir and settings.p2p_provisioner_image  # noqa: S101
     root = settings.p2p_local_jobs_dir
     sandbox = None
-    if exec_backend(settings) == "sandboxes":
+    if exec_backend(settings) in ("sandboxes", "auto"):
         image = _sandbox_image(settings)
         key, project = settings.nebius_api_key, settings.tf_project_id
         if not (image and key and project and settings.p2p_runner_cpu_image):  # _check_hybrid
@@ -357,6 +363,7 @@ def _hybrid_jobs(
         local_buckets=root.resolve() / "buckets",
         upload=functools.partial(upload_run_dir, s3),
         sandbox=sandbox,
+        split_exec=exec_backend(settings) == "auto",  # A-47: GPU and CPU exec jobs
     )
 
 
@@ -397,6 +404,7 @@ def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
     }
     hybrid = settings.p2p_execution == "hybrid"
     sandboxed = hybrid and exec_backend(settings) == "sandboxes"
+    auto = hybrid and exec_backend(settings) == "auto"
     if hybrid:  # provision and fetch jobs run on this host: no provision subnet
         values.pop("subnet_provision")
     if sandboxed:  # smoke and exec jobs run runner-cpu in Sandboxes: no GPU image, no subnet
@@ -428,6 +436,14 @@ def execution_config(settings: Settings, *, prod: bool) -> ExecutionConfig:
                 "exec_fallback": None,
             }
         )
+    if auto:  # A-47: GPU targets on Nebius (exec subnet); CPU targets and smoke in Sandboxes
+        config.update(
+            subnet_provision=defaults["subnet_provision"],
+            smoke_platform=SANDBOX_PLATFORM,
+            smoke_preset=SANDBOX_PRESET,
+            cpu_exec=(SANDBOX_PLATFORM, SANDBOX_PRESET),
+        )
+        return ExecutionConfig.model_validate(config)
     if hybrid:  # no CPU quota: smoke jobs (the Sandboxes fallback) run on the GPU platform
         config.update(
             subnet_provision=defaults["subnet_provision"],
@@ -582,8 +598,9 @@ def build_runtime(
     prod = settings.p2p_env == "prod"
     if not prod and settings.p2p_execution == "hybrid":
         raise ConfigError("P2P_EXECUTION=hybrid is a prod deploy (docs/specs/hybrid-deploy.md)")
-    if settings.p2p_execution != "hybrid" and exec_backend(settings) == "sandboxes":
-        raise ConfigError("P2P_EXEC_BACKEND=sandboxes runs in the hybrid deploy only")
+    backend = exec_backend(settings)
+    if settings.p2p_execution != "hybrid" and backend in ("sandboxes", "auto"):
+        raise ConfigError(f"P2P_EXEC_BACKEND={backend} runs in the hybrid deploy only")
     if prod and settings.p2p_job_backend != "fake":
         raise ConfigError("P2P_JOB_BACKEND=docker is for dev canaries only, never in prod")
     built = (adapters or (prod_adapters if prod else dev_adapters))(settings)

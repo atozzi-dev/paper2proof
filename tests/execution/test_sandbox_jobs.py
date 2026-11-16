@@ -1023,3 +1023,14 @@ async def test_a_healthy_slow_upload_is_never_cut_short(
     api.upload_delay_s = 0.2
     await _backend(tmp_path, local, storage).submit(_spec())
     assert len(api.spawns) == 1
+
+
+async def test_the_index_knows_which_jobs_are_in_sandboxes(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    """The hybrid backend asks this to route status and cancel after a restart (A-47)."""
+    backend = _backend(tmp_path, local, storage)
+    handle = await backend.submit(_spec())
+    assert await backend.knows(handle.name)
+    assert not await backend.knows(f"p2p-exec-{SLUG}-3")
+    assert not await backend.knows("not a job name")

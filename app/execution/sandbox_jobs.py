@@ -712,6 +712,13 @@ class SandboxesJobBackend:
         if response.status_code not in (200, 202, 204, 404, 409):  # gone or already done
             raise JobStatusUnavailable(f"Sandboxes cancel: HTTP {response.status_code}")
 
+    async def knows(self, name: str) -> bool:
+        """Whether the host index has this job, an intent or a spawned one: the hybrid backend
+        routes status and cancel of an exec job by it (A-47)."""
+        if not _NAME.fullmatch(name):
+            return False
+        return (await asyncio.to_thread(self._index.get, name)) is not None
+
     async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]:
         """Every indexed job named `prefix*` with its state (UNKNOWN during an outage); an
         intent never spawned is forgotten once stale."""

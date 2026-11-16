@@ -9,6 +9,7 @@ the fixes after the spikes stay here. Assumptions not yet verified are marked:
 import asyncio
 import contextlib
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -72,6 +73,7 @@ log = logging.getLogger(__name__)
 
 GIB = 1024**3
 PLATFORM_TIMEOUT = timedelta(hours=1)  # the minimum the platform allows (§8)
+WATCHDOG_SLACK_S = 600  # the platform's timeout ends this long after our watchdog
 RUN_BUCKET_PREFIX = "p2p-run-"
 JOB_PREFIX = "p2p-"
 RUN_BUCKET_MAX_BYTES = 200 * GIB  # caps what untrusted code can store in a run bucket [S-11]
@@ -244,6 +246,13 @@ _MODES = {"ro": SdkJobSpec.VolumeMount.Mode.READ_ONLY, "rw": SdkJobSpec.VolumeMo
 BUCKET_ID = re.compile(r"^storagebucket-[a-z0-9-]+$")
 
 
+def platform_timeout(watchdog_s: int) -> timedelta:
+    """The job's own timeout: the platform's minimum (1 h), or our watchdog plus 10 minutes when
+    that is longer (a 60-minute GPU budget, A-47), in whole minutes: never cut before us."""
+    minutes = math.ceil((watchdog_s + WATCHDOG_SLACK_S) / 60)
+    return max(PLATFORM_TIMEOUT, timedelta(minutes=minutes))
+
+
 def to_sdk_job_spec(spec: JobSpec, bucket_ids: Mapping[str, str]) -> SdkJobSpec:
     """Every JobSpec field, and nothing that widens the job: no command or args override (the
     image ENTRYPOINT is the runner), no public IP, ports, SSH keys or registry/S3 credentials,
@@ -280,7 +289,7 @@ def to_sdk_job_spec(spec: JobSpec, bucket_ids: Mapping[str, str]) -> SdkJobSpec:
         ],
         preemptible=spec.preemptible,
         restart_attempts=0,  # restart policy "never" [S-4]
-        timeout=PLATFORM_TIMEOUT,
+        timeout=platform_timeout(spec.watchdog_s),
     )
     if spec.preemptible:  # the CLI pairs --preemptible with --follows-spot-price [S-4]
         sdk.pricing_model = PricingModelSpec(follows_spot_price=FollowsSpotPriceSpec())

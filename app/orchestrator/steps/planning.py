@@ -4,6 +4,7 @@ budget and invariants, estimates the cost and decides auto-approval (architectur
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -29,12 +30,14 @@ from app.domain.models import (
     Scale,
     StepName,
 )
+from app.execution.config import ExecutionConfig
 from app.execution.package_policy import (
     PACKAGE_NAME,
     PACKAGE_SPECIFIER,
     load_policy_config,
     normalize,
 )
+from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 from app.models.client import Message, ModelClient, Role
 from app.models.pricing import CloudPrices
 from app.models.prompt_files import load_prompt
@@ -59,6 +62,27 @@ DatasetCheck = Callable[[list[DatasetReq], RunCpu], Awaitable[DatasetReport]]
 
 
 GPU_HARDWARE = "one L40S GPU (48 GB)"
+
+
+@dataclass(frozen=True)
+class PlanTargets:
+    """Where a run's experiment may execute (A-47), as (platform, preset): `cpu` in Sandboxes,
+    `gpu` on Nebius. With both, PLANNING plans for CPU and adds a GPU plan when it is needed."""
+
+    cpu: tuple[str, str] | None
+    gpu: tuple[str, str] | None
+
+
+def planning_targets(execution: ExecutionConfig) -> PlanTargets:
+    """sandboxes: CPU only; gpu (the designed deploy): GPU only; auto: both."""
+    exec_on = (execution.exec_platform, execution.exec_preset)
+    if execution.cpu_exec is not None:
+        return PlanTargets(cpu=execution.cpu_exec, gpu=exec_on)
+    if execution.exec_platform == SANDBOX_PLATFORM:
+        return PlanTargets(cpu=exec_on, gpu=None)
+    return PlanTargets(cpu=None, gpu=exec_on)
+
+
 # the hybrid deploy without GPU capacity (docs/specs/hybrid-deploy.md)
 CPU_HARDWARE = (
     "a CPU only (no GPU): one Token Factory Sandboxes microVM with 4 vCPUs and 4 GB of RAM, "

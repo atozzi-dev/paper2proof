@@ -487,6 +487,9 @@ class FakeSandbox(FakeJobBackend):
     async def forget(self, run_id: str) -> None:
         self.forgotten.append(run_id)
 
+    async def knows(self, name: str) -> bool:
+        return name in self.jobs
+
 
 def _sandboxed(
     tmp_path: Path,
@@ -525,3 +528,67 @@ async def test_with_sandboxes_the_reaper_sees_them_and_a_deleted_run_is_forgotte
     await backend.ensure_run_bucket(RUN)
     await backend.delete_run_bucket(RUN)
     assert sandbox.forgotten == [RUN] and remote.buckets == set()
+
+
+# --- GPU when needed (A-47): each exec job where its platform is -------------------------
+
+
+def _split(
+    tmp_path: Path,
+    local: FakeJobBackend | None = None,
+    remote: FakeJobBackend | None = None,
+    sandbox: FakeSandbox | None = None,
+) -> tuple[HybridJobBackend, FakeJobBackend, FakeJobBackend, FakeSandbox]:
+    local, remote = local or FakeJobBackend(), remote or FakeJobBackend()
+    sandbox = sandbox or FakeSandbox()
+    backend = HybridJobBackend(
+        local=local, remote=remote, local_buckets=tmp_path / "buckets", upload=Uploads(),
+        sandbox=sandbox, split_exec=True,
+    )  # fmt: skip
+    return backend, local, remote, sandbox
+
+
+@pytest.mark.parametrize(
+    ("platform", "where"),
+    [("sandbox", "sandbox"), ("gpu-l40s-a", "remote"), ("gpu-l40s-d", "remote")],
+)
+async def test_with_auto_each_exec_job_runs_where_its_platform_is(
+    tmp_path: Path, platform: str, where: str
+) -> None:
+    backend, _, remote, sandbox = _split(tmp_path)
+    handle = await backend.submit(_spec(JobKind.EXEC, name=f"p2p-exec-{SLUG}-1", platform=platform))
+    ran, other = (sandbox, remote) if where == "sandbox" else (remote, sandbox)
+    assert handle.name in ran.jobs and not other.jobs
+    assert await backend.status(handle) is JobState.SUCCEEDED
+    await backend.cancel(handle)
+    assert ran.cancelled == [handle.name]
+
+
+async def test_with_auto_smoke_jobs_stay_in_sandboxes(tmp_path: Path) -> None:
+    backend, _, remote, sandbox = _split(tmp_path)
+    spec = _spec(JobKind.SMOKE, name=f"p2p-smoke-{SLUG}-1", platform="sandbox")
+    handle = await backend.submit(spec)
+    assert handle.name in sandbox.jobs and not remote.jobs
+
+
+async def test_with_auto_a_restart_finds_each_exec_job_where_it_was_created(
+    tmp_path: Path,
+) -> None:
+    """status and cancel carry only the job's name: after a restart the backend must still
+    ask the platform the job was created on (a GPU attempt, then the CPU fallback's)."""
+    backend, local, remote, sandbox = _split(tmp_path)
+    gpu = await backend.submit(
+        _spec(JobKind.EXEC, name=f"p2p-exec-{SLUG}-1", platform="gpu-l40s-a")
+    )
+    cpu = await backend.submit(_spec(JobKind.EXEC, name=f"p2p-exec-{SLUG}-3", platform="sandbox"))
+    again, *_ = _split(tmp_path, local, remote, sandbox)
+    assert await again.status(gpu) is JobState.SUCCEEDED
+    await again.cancel(gpu)
+    await again.cancel(cpu)
+    assert (remote.cancelled, sandbox.cancelled) == ([gpu.name], [cpu.name])
+
+
+def test_the_sandbox_platform_name_is_the_sandboxes_backends() -> None:
+    from app.execution.sandbox_jobs import SANDBOX_PLATFORM
+
+    assert hybrid.SANDBOX_PLATFORM == SANDBOX_PLATFORM  # mirrored: an import cycle otherwise

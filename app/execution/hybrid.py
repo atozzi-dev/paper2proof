@@ -238,6 +238,7 @@ def upload_run_dir(client: S3Client, bucket: str, root: Path) -> int:
 
 
 LOCAL_KINDS = frozenset({JobKind.PROVISION, JobKind.FETCH})
+SANDBOX_PLATFORM = "sandbox"  # = sandbox_jobs.SANDBOX_PLATFORM (that module imports this one)
 _PREFIXES = {kind: f"p2p-{kind.value}-" for kind in JobKind}
 Upload = Callable[[str, Path], int]  # (bucket, local run directory) -> files sent; blocking
 
@@ -251,6 +252,7 @@ class SandboxJobs(Protocol):
     async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]: ...
     async def forget(self, run_id: str) -> None: ...
     def bind_cpu_pool(self, pool: Executor | None) -> None: ...
+    async def knows(self, name: str) -> bool: ...
 
 
 def _kind(name: str) -> JobKind:
@@ -275,10 +277,15 @@ class HybridJobBackend:
         local_buckets: Path,
         upload: Upload,
         sandbox: SandboxJobs | None = None,
+        split_exec: bool = False,
     ) -> None:
+        if split_exec and sandbox is None:
+            raise ValueError("exec jobs split by platform need the Sandboxes backend")
         self._local = local
         self._remote = remote
         self._sandbox = sandbox
+        # GPU when needed (A-47): an exec job runs where its platform is, Sandboxes or Nebius
+        self._split_exec = split_exec
         self._buckets = local_buckets
         self._upload = upload
         self._uploaded: set[str] = set()  # job names whose output is in the run bucket
@@ -293,6 +300,21 @@ class HybridJobBackend:
             return self._local
         return self._sandbox or self._remote
 
+    def _split(self, name: str) -> SandboxJobs | None:
+        """The Sandboxes backend when exec jobs are split by platform and this is one."""
+        if self._split_exec and _kind(name) is JobKind.EXEC:
+            return self._sandbox
+        return None
+
+    async def _created_on(self, name: str) -> JobBackend | SandboxJobs:
+        """Where the job with this name was created: status and cancel carry only the name, so
+        a split exec job is in Sandboxes iff its host index has it (written before the spawn,
+        kept across restarts), else on Nebius."""
+        sandbox = self._split(name)
+        if sandbox is None:
+            return self._for(name)
+        return sandbox if await sandbox.knows(name) else self._remote
+
     async def ensure_run_bucket(self, run_id: str) -> str:
         await self._local.ensure_run_bucket(run_id)
         return await self._remote.ensure_run_bucket(run_id)
@@ -304,10 +326,14 @@ class HybridJobBackend:
             await self._sandbox.forget(run_id)
 
     async def submit(self, spec: JobSpec) -> JobHandle:
+        sandbox = self._split(spec.name)
+        if sandbox is not None:
+            where = sandbox if spec.platform == SANDBOX_PLATFORM else self._remote
+            return await where.submit(spec)
         return await self._for(spec.name).submit(spec)
 
     async def status(self, handle: JobHandle) -> JobState:
-        state = await self._for(handle.name).status(handle)
+        state = await (await self._created_on(handle.name)).status(handle)
         if _kind(handle.name) not in LOCAL_KINDS:
             return state
         if state is JobState.FAILED:  # its error report says why: best effort, once
@@ -342,7 +368,7 @@ class HybridJobBackend:
             log.warning("failed job's copy not uploaded: %s", type(err).__name__)
 
     async def cancel(self, handle: JobHandle) -> None:
-        await self._for(handle.name).cancel(handle)
+        await (await self._created_on(handle.name)).cancel(handle)
 
     async def ensure_gateway_up(self) -> None:
         return None  # no gateway VM: the exec subnet's route has no next hop (fail-closed)

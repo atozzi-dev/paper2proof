@@ -696,3 +696,95 @@ def test_sandboxes_are_for_the_hybrid_deploy_only(tmp_path: Path) -> None:
     settings = _settings(tmp_path, p2p_exec_backend="sandboxes")
     with pytest.raises(main.ConfigError, match="P2P_EXEC_BACKEND=sandboxes"):
         main.build_runtime(settings, adapters=main.dev_adapters)
+
+
+# --- GPU when needed (A-47, P2P_EXEC_BACKEND=auto) -----------------------------------------
+
+GPU_RUNNER = "cr.example/p2p-runner@sha256:" + "b" * 64
+
+
+def _auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **values: object) -> Settings:
+    fields: dict[str, object] = {
+        "p2p_exec_backend": "auto",
+        "p2p_subnet_exec": "vpcsubnet-exec",
+        "p2p_runner_image": GPU_RUNNER,
+        **values,
+    }
+    return _sandboxed(tmp_path, monkeypatch, **fields)
+
+
+def test_with_auto_exec_jobs_may_run_on_the_gpu_or_in_sandboxes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = main.execution_config(_auto(tmp_path, monkeypatch), prod=True)
+    assert (config.exec_platform, config.exec_preset) == ("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    assert config.exec_fallback == ("gpu-l40s-d", "1gpu-16vcpu-96gb")
+    assert config.cpu_exec == ("sandbox", "4vcpu-4gb")
+    assert (config.smoke_platform, config.smoke_preset) == config.cpu_exec
+    assert config.runner_image == GPU_RUNNER
+    assert config.runner_cpu_image.endswith("c" * 64)
+    assert config.subnet_exec == "vpcsubnet-exec"
+
+
+def test_with_auto_both_backends_are_built_and_exec_jobs_are_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    monkeypatch.setattr(main.S3ArtifactStore, "connect", lambda **_: LocalArtifactStore(tmp_path))
+    monkeypatch.setattr(main, "kms_signer", lambda *_: FakeSigner())
+    adapters = main.prod_adapters(_auto(tmp_path, monkeypatch))
+    assert isinstance(adapters.jobs, HybridJobBackend)
+    assert isinstance(adapters.jobs._sandbox, SandboxesJobBackend)
+    assert adapters.jobs._split_exec
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"p2p_runner_image": None}, "P2P_RUNNER_IMAGE"),
+        ({"p2p_subnet_exec": None}, "P2P_SUBNET_EXEC"),
+        ({"p2p_gpu_preemptible": None}, "P2P_GPU_PREEMPTIBLE"),
+        ({"smoke_executor": "sandboxes"}, "SMOKE_EXECUTOR=job"),
+        ({"tf_project_id": None}, "TF_PROJECT_ID"),
+        ({"p2p_runner_cpu_image": None}, "P2P_RUNNER_CPU_IMAGE"),
+    ],
+)
+def test_auto_refuses_a_missing_gpu_or_sandboxes_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], error: str
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    with pytest.raises(main.ConfigError, match=error):
+        main.prod_adapters(_auto(tmp_path, monkeypatch, **change))
+
+
+@pytest.mark.parametrize(("listed", "missing"), [("c", "b"), ("b", "c")])
+def test_with_auto_both_runners_must_know_the_time_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listed: str, missing: str
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    settings = _auto(tmp_path, monkeypatch)
+    (settings.config_dir / "runner_images.yaml").write_text(
+        f"time_target:\n  - sha256:{listed * 64}\n", encoding="utf-8"
+    )
+    with pytest.raises(main.ConfigError, match=rf"sha256:{missing}{{64}} .*runner_images\.yaml"):
+        main.prod_adapters(settings)
+
+
+def test_auto_is_for_the_hybrid_deploy_only(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, p2p_exec_backend="auto")
+    with pytest.raises(main.ConfigError, match="P2P_EXEC_BACKEND=auto"):
+        main.build_runtime(settings, adapters=main.dev_adapters)
+
+
+def test_planning_targets_follow_the_exec_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.orchestrator.steps.planning import PlanTargets, planning_targets
+
+    sandboxes = main.execution_config(_sandboxed(tmp_path, monkeypatch), prod=True)
+    auto = main.execution_config(_auto(tmp_path, monkeypatch), prod=True)
+    gpu = main.execution_config(_prod(tmp_path, monkeypatch, **HYBRID), prod=True)
+    cpu, l40s = ("sandbox", "4vcpu-4gb"), ("gpu-l40s-a", "1gpu-8vcpu-32gb")
+    assert planning_targets(sandboxes) == PlanTargets(cpu=cpu, gpu=None)
+    assert planning_targets(auto) == PlanTargets(cpu=cpu, gpu=l40s)
+    assert planning_targets(gpu) == PlanTargets(cpu=None, gpu=l40s)

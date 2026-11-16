@@ -1139,3 +1139,13 @@ def test_build_refuses_plain_http(tmp_path: Path) -> None:
             auth_key_file=key_file,
             gateway_instance_id=None,
         )
+
+
+@pytest.mark.parametrize(
+    ("watchdog_s", "timeout"),
+    [(2100, timedelta(hours=1)), (3900, timedelta(seconds=4500)), (3601, timedelta(minutes=71))],
+)
+def test_the_platform_timeout_outlives_our_watchdog(watchdog_s: int, timeout: timedelta) -> None:
+    """A 60-minute GPU budget has a 3900 s watchdog: the platform's own timeout (1 h at least)
+    must not cut the job first (A-47)."""
+    assert to_sdk_job_spec(spec(watchdog_s=watchdog_s), IDS).timeout == timeout
