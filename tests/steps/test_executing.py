@@ -300,6 +300,17 @@ async def test_the_budget_seconds_fit_the_per_run_gpu_minutes(store: Store, tmp_
     assert backend.specs[0].watchdog_s == ctx.limits.per_run.gpu_minutes * 60
 
 
+async def test_the_manifest_carries_the_time_target(store: Store, tmp_path: Path) -> None:
+    """A-46: after the verdict's minimum the runner starts a seed only while it should end
+    within the target (a plan of three seeds, as approved before A-46, still builds)."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    await _step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    manifest = _manifest_of(backend.specs[0])
+    assert manifest.seeds == [0, 1, 2] and manifest.min_seeds == 3
+    assert manifest.target_seconds == ctx.limits.per_run.seed_target_s == 600
+
+
 @pytest.mark.parametrize("sandbox", [True, False])
 async def test_in_sandboxes_the_experiment_gets_the_runs_whole_budget(
     store: Store, tmp_path: Path, sandbox: bool

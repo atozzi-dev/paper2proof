@@ -56,6 +56,7 @@ from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.steps.common import output_of, planned_claims
 from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job, stop_jobs, utcnow
+from app.orchestrator.steps.planning import MIN_SEEDS
 from app.storage.artifacts import ArtifactStore
 from app.verdict.results import MAX_RESULTS_BYTES
 
@@ -314,6 +315,10 @@ class ExecutingStep:
             args=[str(a) for a in smoke["args"]],
             seeds=plan.seeds,
             budget_seconds=budget,
+            # after the verdict's minimum, a seed starts only while it should end in time
+            # (A-46); a plan approved before A-46 lists three seeds: nothing more to start
+            min_seeds=min(MIN_SEEDS, len(plan.seeds)),
+            target_seconds=ctx.limits.per_run.seed_target_s,
             paths=ManifestPaths(
                 overlay="/mnt/run/staging/overlay.tar.zst",
                 repo="/mnt/run/staging/repo.tar.zst" if archives.repo else None,
