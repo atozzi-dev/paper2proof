@@ -379,8 +379,13 @@ class PlanningStep:
     ) -> PlanArtifact:
         """A GPU plan with the CPU one as its fallback, for a CPU plan that needs a GPU (A-47),
         while the run's invite has a GPU run left today; else the CPU plan, saying why."""
-        if not await ctx.store.consume_gpu_run(ctx.run_id, datetime.now(UTC)):
-            return cpu.model_copy(update={"gpu_skipped": GPU_SKIPPED_NO_QUOTA})
+        granted = f"runs/{ctx.run_id}/gpu_granted.json"  # one GPU run per run, not per try
+        try:
+            await asyncio.to_thread(self._artifacts.get_json, granted)
+        except FileNotFoundError:
+            if not await ctx.store.consume_gpu_run(ctx.run_id, datetime.now(UTC)):
+                return cpu.model_copy(update={"gpu_skipped": GPU_SKIPPED_NO_QUOTA})
+            await asyncio.to_thread(self._artifacts.put_json, granted, {"granted": True})
         limits = ctx.limits.per_run
         try:
             plan = await self._plan_for(

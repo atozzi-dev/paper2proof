@@ -747,6 +747,7 @@ def test_with_auto_both_backends_are_built_and_exec_jobs_are_split(
         ({"smoke_executor": "sandboxes"}, "SMOKE_EXECUTOR=job"),
         ({"tf_project_id": None}, "TF_PROJECT_ID"),
         ({"p2p_runner_cpu_image": None}, "P2P_RUNNER_CPU_IMAGE"),
+        ({"p2p_gpu_preemptible": True}, "P2P_GPU_PREEMPTIBLE=false"),
     ],
 )
 def test_auto_refuses_a_missing_gpu_or_sandboxes_setting(

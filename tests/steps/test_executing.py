@@ -35,7 +35,7 @@ from app.domain.models import (
 from app.execution.backend import JobHandle, JobKind, JobSpec, JobState
 from app.execution.config import ExecutionConfig
 from app.execution.fake_backend import FakeJobBackend
-from app.execution.nebius_backend import JobBackendError
+from app.execution.nebius_backend import JobBackendError, JobCreateFailed
 from app.execution.run_storage import FakeRunStorage
 from app.models.pricing import load_cloud_prices
 from app.orchestrator.budget import (
@@ -1059,7 +1059,7 @@ class RefusedCreate(ScriptedBackend):
     """The platform fails the creation without a reason (S5, 2026-10-27: code=13)."""
 
     async def submit(self, spec: JobSpec) -> JobHandle:
-        raise JobBackendError(f"{spec.name}: operation failed")
+        raise JobCreateFailed(f"{spec.name}: job creation failed")
 
 
 async def test_a_gpu_job_the_platform_fails_to_create_falls_back_and_alerts(
@@ -1212,3 +1212,74 @@ async def test_a_step_resumed_after_the_fallback_record_goes_back_to_provisionin
     result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
     assert (result.next, result.output_ref) == (StepName.PROVISIONING, FALLBACK_KEY)
     assert backend.specs == []
+
+
+async def test_a_gpu_job_running_when_the_step_resumes_after_the_window_is_kept(
+    store: Store, tmp_path: Path
+) -> None:
+    """A restart 30 minutes into a GPU run: the window is over, but the job left the queue
+    long ago; it is re-attached, never cancelled for a fallback (security review)."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    artifacts.put_json(WINDOW_KEY, {"started_at": NOW.isoformat()})
+    name = f"p2p-exec-{SLUG}-1"
+    backend = ScriptedBackend({1: [JobState.RUNNING, JobState.SUCCEEDED]})
+    await store.record_job(
+        RUN, "exec", name, "fakejob-0", "p2p-run-x", deadline=NOW + timedelta(hours=2), at=NOW,
+        platform="gpu-l40s-a", preset="1gpu-8vcpu-32gb",
+    )  # fmt: skip
+    await store.mark_job_active(name, deadline=NOW + timedelta(hours=1))
+    clock = FakeClock()
+    clock.t = 1800.0
+    storage.objects[(RUN, "results/1/results.json")] = _results(1)
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING
+    assert backend.cancelled == []
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+class StatusBreaks(ScriptedBackend):
+    """The job exists, but its status can't be trusted (a job id whose name differs)."""
+
+    async def status(self, handle: JobHandle) -> JobState:
+        raise JobBackendError(f"{handle.name}: the job id names another job")
+
+
+async def test_a_broken_status_fails_the_run_instead_of_falling_back(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    with pytest.raises(JobBackendError):
+        await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, StatusBreaks({})))
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+class CreatedButNotFound(ScriptedBackend):
+    """The creation may have made a job nobody can see yet: never a fallback."""
+
+    async def submit(self, spec: JobSpec) -> JobHandle:
+        raise JobBackendError(f"{spec.name}: created but not found")
+
+
+async def test_a_creation_that_may_have_made_a_job_never_falls_back(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    with pytest.raises(JobBackendError):
+        await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, CreatedButNotFound({})))
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+async def test_a_gpu_plan_without_a_cpu_plan_never_falls_back(store: Store, tmp_path: Path) -> None:
+    """A GPU plan from the designed deploy, resumed under auto: nothing to fall back to."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    stored = artifacts.get_json(PLAN_KEY)
+    artifacts.put_json(PLAN_KEY, {**stored, "cpu_plan": None})
+    backend = ScriptedBackend({1: [JobState.SUCCEEDED]})
+    backend.no_capacity = {"gpu-l40s-a": 99, "gpu-l40s-d": 99}
+    result = await _auto_step(artifacts, storage, FakeClock()).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING  # INCONCLUSIVE/CAPACITY, as before A-47
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)

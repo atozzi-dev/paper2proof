@@ -58,7 +58,7 @@ from app.execution.backend import (
 )
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
-from app.execution.nebius_backend import JobBackendError
+from app.execution.nebius_backend import JobCreateFailed
 from app.execution.run_storage import RunStorage
 from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 from app.models.pricing import CloudPrices
@@ -562,9 +562,10 @@ class ExecutingStep:
         `deadline` (a GPU target that can fall back, A-47) the tries stop at the end of the
         GPU window, and a refusal that a wait never helps is returned instead of raised."""
         places = await self._placements(ctx, manifest.attempt, target)
+        recorded = await ctx.store.get_job(job_name(JobKind.EXEC, ctx.run_id, manifest.attempt))
         for i, where in enumerate(places):
-            if deadline is not None and self._clock() >= deadline:
-                break
+            if deadline is not None and recorded is None and self._clock() >= deadline:
+                break  # a job created before a restart is re-attached instead
             if i > 0:
                 if where == places[i - 1]:
                     if deadline is not None and (
@@ -614,7 +615,7 @@ class ExecutingStep:
                 if deadline is None:
                     raise
                 return "quota"
-            except JobBackendError:
+            except JobCreateFailed:  # never one raised while polling, or uncertain
                 if deadline is None:
                     raise
                 log.warning("GPU job creation failed", extra={"run_id": ctx.run_id}, exc_info=True)
@@ -654,7 +655,7 @@ class ExecutingStep:
         ):
             raise P2PError(ErrorCode.TIMEOUT, "an earlier smoke job did not stop")
         # a GPU target with a CPU plan to fall back to gets a window to start in (A-47)
-        can_fall_back = active.target is ExecTarget.GPU and self._config.cpu_exec is not None
+        can_fall_back = active.can_fall_back and self._config.cpu_exec is not None
         if active.fallback is not None:
             previous, attempts = None, [FALLBACK_ATTEMPT]
         else:

@@ -592,3 +592,11 @@ def test_the_sandbox_platform_name_is_the_sandboxes_backends() -> None:
     from app.execution.sandbox_jobs import SANDBOX_PLATFORM
 
     assert hybrid.SANDBOX_PLATFORM == SANDBOX_PLATFORM  # mirrored: an import cycle otherwise
+
+
+async def test_with_auto_an_exec_job_on_an_unknown_platform_is_refused(tmp_path: Path) -> None:
+    """Only a Sandbox or a GPU: a CPU job never reaches Nebius (defence in depth, A-47)."""
+    backend, _, remote, sandbox = _split(tmp_path)
+    with pytest.raises(ValueError, match="cpu-d3"):
+        await backend.submit(_spec(JobKind.EXEC, name=f"p2p-exec-{SLUG}-1", platform="cpu-d3"))
+    assert not remote.jobs and not sandbox.jobs

@@ -300,6 +300,8 @@ def _check_hybrid(settings: Settings) -> None:
     if settings.p2p_local_jobs_dir is None:
         raise ConfigError("P2P_EXECUTION=hybrid needs P2P_LOCAL_JOBS_DIR")
     backend = exec_backend(settings)
+    if backend == "auto" and settings.p2p_gpu_preemptible:  # a retry would double the GPU
+        raise ConfigError("P2P_EXEC_BACKEND=auto needs P2P_GPU_PREEMPTIBLE=false")
     if backend in ("sandboxes", "auto"):  # auto: Sandboxes for CPU targets and smoke jobs
         name = f"P2P_EXEC_BACKEND={backend}"
         if settings.smoke_executor != "job":  # smoke jobs, in Sandboxes, with the overlay

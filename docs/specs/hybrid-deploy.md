@@ -191,6 +191,16 @@ target (`cuda` when available).
 `gpu_wait_s` (600 s) sends the run back through PROVISIONING and SMOKE_TESTING on the CPU plan,
 and the run's conditions and Proof Bundle say why.
 
+**What a hostile paper can do.** The two plan fields are the Planner's, read from paper text: a
+paper can push its CPU plan to `REDUCED` and so use up its invite's GPU run. That is bounded by
+the invite's `gpu_runs_per_day` (0 by default), the per-run caps and the owner's approval, and
+PLANNING takes at most one GPU run per run (`runs/<id>/gpu_granted.json`, kept across a
+restart). A script that kills its runner within one poll, writing nothing, looks like a platform
+failure and gets its one CPU fallback: a second execution within the same per-run caps (accepted).
+With `auto` GPU jobs run on demand only (`P2P_GPU_PREEMPTIBLE=false` is required), so
+`est_cost_max_usd` stays an upper bound; the fallback starts only on a creation the platform
+finished unsuccessfully, never on an uncertain one or on an error while polling.
+
 **Budget.** The ledger keeps one kind of experiment minutes (`gpu_minutes`, the per-run cap, 60);
 a CPU target is bounded by `budget_seconds ≤ cpu_minutes × 60`. A GPU run's money goes to
 `cloud_usd` at the platform's price, under the daily cap (15 USD).

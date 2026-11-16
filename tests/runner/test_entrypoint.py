@@ -916,3 +916,16 @@ def test_the_bundles_replay_flag_is_one_the_runner_accepts() -> None:
     script = render_reproduce(manifest, runner, run_id=manifest.run_id, seeds=seeds[:7]).decode()
     line = next(x for x in script.splitlines() if x.startswith('  "$RUNNER_IMAGE" --seeds '))
     assert entrypoint.parse_seeds(line.split()[-1]) == seeds[:7]
+
+
+def test_the_runner_takes_the_largest_budget_the_control_plane_sends() -> None:
+    """A-47: a GPU target gets up to an hour (the schema's bound and EXECUTING's MAX_BUDGET_S);
+    a runner that refused it would fail every GPU plan over 30 minutes at its start."""
+    from app.domain.contracts import ExecManifest
+    from app.orchestrator.steps.executing import MAX_BUDGET_S
+
+    hour = {**_fixture("manifest_valid.json"), "budget_seconds": MAX_BUDGET_S}
+    entrypoint.validate(hour)
+    ExecManifest.model_validate(hour)
+    with pytest.raises(entrypoint.ContractError):
+        entrypoint.validate({**hour, "budget_seconds": MAX_BUDGET_S + 1})

@@ -166,7 +166,7 @@ def _validate(manifest: Any) -> dict[str, Any]:
         and all(type(s) is int and s >= 0 for s in seeds) and len(set(seeds)) == len(seeds),
         "seeds",
     )  # fmt: skip
-    need(type(m["budget_seconds"]) is int and 60 <= m["budget_seconds"] <= 1800, "budget_seconds")
+    need(type(m["budget_seconds"]) is int and 60 <= m["budget_seconds"] <= 3600, "budget_seconds")
     timed = TIME_KEYS & set(m)
     need(timed in (set(), TIME_KEYS), "min_seeds and target_seconds go together")
     if timed:

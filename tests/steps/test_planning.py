@@ -104,6 +104,7 @@ async def _plan(
     repo: RepoRef | None = OFFICIAL,
     dataset: str = "CIFAR-10",
     popular: frozenset[str] = frozenset({"b"}),
+    runs: int = 1,
 ) -> tuple[Plan, StepName | RunStatus, list[object]]:
     artifacts = LocalArtifactStore(tmp_path)
     discovery = Discovery(repo=repo)
@@ -132,7 +133,8 @@ async def _plan(
         popular=popular,
         **({"targets": targets} if targets else {}),
     )
-    result = await step.run(ctx)
+    for _ in range(runs):  # more than once: the same attempt resumed after a restart
+        result = await step.run(ctx)
     assert result.output_ref is not None
     plan = Plan.model_validate(artifacts.get_json(result.output_ref)["plan"])
     events = [e.payload for e in await store.events_after(RUN, 0)]
@@ -1103,3 +1105,13 @@ async def test_the_designed_deploy_plans_once_for_the_gpu(store: Store, tmp_path
     assert (artifact.target, artifact.cpu_plan) == (ExecTarget.GPU, None)
     assert artifact.est_cost_max_usd is not None
     assert _planner_calls(models) == 1 and "NVIDIA L40S" in _prompt(models)
+
+
+async def test_planning_resumed_after_a_restart_takes_no_second_gpu_run(
+    store: Store, tmp_path: Path
+) -> None:
+    """The GPU run PLANNING took is recorded on the run: a resumed step uses it again instead
+    of taking another (security review, A-47)."""
+    await _plan(store, tmp_path, "gpu_needed_twice", targets=AUTO, gpu_runs=2, runs=2)
+    assert await _gpu_runs_used(store) == 1
+    assert _artifact(tmp_path).target is ExecTarget.GPU

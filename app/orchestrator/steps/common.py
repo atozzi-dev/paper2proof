@@ -55,6 +55,7 @@ class ActivePlan:
     plan: Plan
     target: ExecTarget
     fallback: GpuFallback | None
+    can_fall_back: bool = False  # a GPU target with a CPU plan, not fallen back yet
 
 
 async def active_plan(ctx: RunContext, read_json: Callable[[str], Awaitable[Any]]) -> ActivePlan:
@@ -64,7 +65,12 @@ async def active_plan(ctx: RunContext, read_json: Callable[[str], Awaitable[Any]
     try:
         raw = await read_json(fallback_key(ctx.run_id))
     except FileNotFoundError:
-        return ActivePlan(plan=artifact.plan, target=artifact.target, fallback=None)
+        return ActivePlan(
+            plan=artifact.plan,
+            target=artifact.target,
+            fallback=None,
+            can_fall_back=artifact.target is ExecTarget.GPU and artifact.cpu_plan is not None,
+        )
     if artifact.cpu_plan is None:
         raise P2PError(ErrorCode.INTERNAL_ERROR, "a GPU fallback without a CPU plan")
     return ActivePlan(

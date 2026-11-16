@@ -328,8 +328,14 @@ class HybridJobBackend:
     async def submit(self, spec: JobSpec) -> JobHandle:
         sandbox = self._split(spec.name)
         if sandbox is not None:
-            where = sandbox if spec.platform == SANDBOX_PLATFORM else self._remote
-            return await where.submit(spec)
+            if spec.platform == SANDBOX_PLATFORM:
+                return await sandbox.submit(spec)
+            if not spec.platform.startswith("gpu-"):  # never a CPU job on Nebius
+                raise ValueError(
+                    f"{spec.name}: an exec job runs in a Sandbox or on a GPU, "
+                    f"not on {spec.platform}"
+                )
+            return await self._remote.submit(spec)
         return await self._for(spec.name).submit(spec)
 
     async def status(self, handle: JobHandle) -> JobState:

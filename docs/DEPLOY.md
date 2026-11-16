@@ -180,7 +180,8 @@ within 10 minutes (`docs/specs/hybrid-deploy.md`, "GPU when needed"). Steps, all
    `P2P_RUNNER_IMAGE` (GPU runner, by digest), `P2P_SUBNET_EXEC` (the exec subnet of
    `network_sandbox`) and `P2P_GPU_PREEMPTIBLE=false` (on demand). Both runner digests must be in
    `config/runner_images.yaml` ("When the runner changes"): the control plane refuses to start
-   otherwise.
+   otherwise. Build both from A-47 or later: an older runner refuses the GPU's hour of budget
+   (it accepted at most 1800 s) and every GPU plan over 30 minutes would fail at its start.
 3. Give GPU runs only to the invites that should have them: `python -m app.admin_cli invite
    create --gpu N` (GPU runs a day; the default 0 keeps an invite on CPU, the eval's included).
 4. Update the About page copy (`web/src/pages/About.tsx`: the Execute step, the limits, the "Why

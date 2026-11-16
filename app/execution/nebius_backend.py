@@ -86,6 +86,11 @@ class JobBackendError(RuntimeError):
     """A Nebius request failed in a way the orchestrator can't recover by retrying."""
 
 
+class JobCreateFailed(JobBackendError):
+    """The platform finished the create operation unsuccessfully (S5, 2026-10-27: a bare
+    code=13): the job never ran. Anything less certain stays a JobBackendError."""
+
+
 class InputUploadError(JobBackendError):
     """A job's input could not be sent, before any job was created: trying again later is
     safe. Anything raised once a job may exist stays a plain JobBackendError."""
@@ -420,7 +425,7 @@ class NebiusJobBackend:
                 if status is not None and status.code.name == RESOURCE_EXHAUSTED:
                     await self._discard_refused(spec, op.resource_id)
                     raise _refusal(spec, status)
-                raise JobBackendError(f"{spec.name}: job creation failed")
+                raise JobCreateFailed(f"{spec.name}: job creation failed")
         job_id = op.resource_id
         if not job_id:
             found = await self._job_by_name(spec.name)
