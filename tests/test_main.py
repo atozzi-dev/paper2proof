@@ -241,7 +241,7 @@ def test_prod_refuses_a_runner_from_before_the_time_target(
     paper's experiment failing, after the models were paid for: stop the start instead."""
     monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
     old = "cr.example/p2p-runner@sha256:" + "d" * 64
-    with pytest.raises(main.ConfigError, match=r"P2P_RUNNER_IMAGE .*runner_images.yaml"):
+    with pytest.raises(main.ConfigError, match=r"sha256:d{64} .*runner_images\.yaml"):
         main.prod_adapters(_prod(tmp_path, monkeypatch, **PROD_STORAGE, p2p_runner_image=old))
 
 
@@ -251,7 +251,23 @@ def test_in_sandboxes_the_runner_cpu_must_know_the_time_target(
     monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
     settings = _sandboxed(tmp_path, monkeypatch)
     (settings.config_dir / "runner_images.yaml").write_text("time_target: []\n", encoding="utf-8")
-    with pytest.raises(main.ConfigError, match=r"P2P_RUNNER_CPU_IMAGE .*runner_images.yaml"):
+    with pytest.raises(main.ConfigError, match=r"sha256:c{64} .*runner_images\.yaml"):
+        main.prod_adapters(settings)
+
+
+def test_the_guard_checks_the_runner_the_manifests_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not hybrid, so the manifests name P2P_RUNNER_IMAGE even with P2P_EXEC_BACKEND=sandboxes
+    (a misconfiguration build_runtime also refuses): that image is the one to check."""
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    monkeypatch.setattr(main.S3ArtifactStore, "connect", lambda **_: LocalArtifactStore(tmp_path))
+    monkeypatch.setattr(main, "kms_signer", lambda *_: FakeSigner())
+    old = "cr.example/p2p-runner@sha256:" + "d" * 64
+    settings = _prod(
+        tmp_path, monkeypatch, **PROD_STORAGE, p2p_runner_image=old, p2p_exec_backend="sandboxes"
+    )
+    with pytest.raises(main.ConfigError, match=r"sha256:d{64} .*runner_images\.yaml"):
         main.prod_adapters(settings)
 
 

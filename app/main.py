@@ -278,14 +278,14 @@ def _check_runner(settings: Settings) -> None:
     refuses them all (exit 30), which users would read as the paper's experiment failing after
     the models were paid for: a stale digest stops the start instead (docs/DEPLOY.md, "When
     the runner changes")."""
-    if exec_backend(settings) == "sandboxes":
-        name, image = "P2P_RUNNER_CPU_IMAGE", settings.p2p_runner_cpu_image
-    else:
-        name, image = "P2P_RUNNER_IMAGE", settings.p2p_runner_image
-    if image and not has_time_target(settings.config_dir / "runner_images.yaml", image):
+    image = execution_config(settings, prod=True).runner_image  # the one every manifest names
+    if not has_time_target(settings.config_dir / "runner_images.yaml", image):
+        digest = image.rsplit("@", 1)[-1]
         raise ConfigError(
-            f"{name} predates the exec manifest's time target (A-46): rebuild the runner from "
-            "this commit and list its digest in config/runner_images.yaml (docs/DEPLOY.md)"
+            f"the exec runner {digest} (P2P_RUNNER_CPU_IMAGE with Sandboxes, else "
+            "P2P_RUNNER_IMAGE) predates the exec manifest's time target (A-46): rebuild the "
+            "runner from this commit and list its digest in config/runner_images.yaml "
+            "(docs/DEPLOY.md)"
         )
 
 
