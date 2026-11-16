@@ -35,7 +35,7 @@ from app.models.untrusted import UNTRUSTED_NOTICE, wrap_untrusted
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive
 from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
-from app.orchestrator.steps.common import output_of, planned_claims
+from app.orchestrator.steps.common import active_plan, output_of, planned_claims
 from app.storage.artifacts import ArtifactStore
 from app.verdict.config import DEFAULT_PATH, config_sha256, load_verdict_config
 from app.verdict.engine import decide
@@ -160,9 +160,7 @@ class VerdictStep:
             platform if isinstance(platform, str) else None,
             preset if isinstance(preset, str) else None,
         )
-        plan = Plan.model_validate(
-            (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
-        )
+        plan = (await active_plan(ctx, self._json)).plan  # A-47: CPU after a fallback
         smoke = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
         units, unmeasured = _declared(smoke)
         decided = [

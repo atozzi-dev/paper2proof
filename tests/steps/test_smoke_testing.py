@@ -1460,3 +1460,16 @@ async def test_a_setup_check_that_times_out_refuses_the_finish(
     assert any("the setup check timed out" in r for r in _tool_results(models))
     with pytest.raises(FileNotFoundError):  # nothing was recorded as finished
         artifacts.get_json(f"runs/{RUN}/smoke_result.json")
+
+
+def test_the_coder_is_told_where_the_full_run_executes() -> None:
+    """GPU when needed (A-47): a GPU target's script puts its tensors on `cuda` when there is
+    one; the smoke run stays on CPU, so an unconditional `cuda` fails there first."""
+    from app.domain.models import ExecTarget
+    from app.orchestrator.steps.smoke_testing import coder_system_prompt
+
+    gpu = coder_system_prompt(8, ExecTarget.GPU)
+    cpu = coder_system_prompt(8, ExecTarget.CPU)
+    assert "NVIDIA L40S" in gpu and "torch.cuda.is_available()" in gpu
+    assert "cuda" not in cpu and "executes on CPU" in cpu
+    assert "{{" not in gpu + cpu

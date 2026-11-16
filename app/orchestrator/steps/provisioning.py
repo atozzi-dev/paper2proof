@@ -31,8 +31,9 @@ from app.execution.run_storage import RunStorage
 from app.models.pricing import CloudPrices
 from app.orchestrator.context import RunContext
 from app.orchestrator.cost_estimate import PROVISION_PLATFORM, PROVISION_PRESET
+from app.orchestrator.fallback import package_requests
 from app.orchestrator.fsm import StepResult
-from app.orchestrator.steps.common import output_of
+from app.orchestrator.steps.common import active_plan, output_of
 from app.orchestrator.steps.jobs import run_job, stop_jobs, utcnow
 from app.storage.artifacts import ArtifactStore
 
@@ -193,7 +194,12 @@ class ProvisioningStep:
             requested = [PackageReq.model_validate(p) for p in raw] if isinstance(raw, list) else []
             decision = await self._policy.validate(
                 requested,
-                PolicyContext(repo_requirements=repo_requirements, requests_so_far=ctx.attempt - 2),
+                PolicyContext(
+                    repo_requirements=repo_requirements,
+                    requests_so_far=package_requests(
+                        await ctx.store.get_steps(ctx.run_id), ctx.attempt - 1
+                    ),
+                ),
             )
             if requested and not decision.accepted:
                 reasons = ", ".join(
@@ -206,9 +212,7 @@ class ProvisioningStep:
         return packages
 
     async def run(self, ctx: RunContext) -> StepResult:
-        plan = Plan.model_validate(
-            (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
-        )
+        plan = (await active_plan(ctx, self._json)).plan  # A-47: CPU after a fallback
         discovery = Discovery.model_validate(
             await self._json(await output_of(ctx, StepName.DISCOVERING))
         )

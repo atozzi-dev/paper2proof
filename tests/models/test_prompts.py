@@ -23,7 +23,7 @@ def test_the_coder_loads_bundled_data_in_code_and_has_a_smoke_subset_only_when_p
 
 def test_prompt_versions_moved_with_their_text() -> None:
     assert load_prompt("planner_experiment_plan").version == "10"
-    assert load_prompt("coder_system").version == "13"
+    assert load_prompt("coder_system").version == "14"
 
 
 def test_the_coder_is_told_which_key_is_the_method_and_that_seeds_are_the_runner_s() -> None:

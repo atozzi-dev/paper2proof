@@ -20,6 +20,7 @@ from app.execution.backend import CapacityError, JobBackend, QuotaExceeded
 from app.observability import metrics, tracing
 from app.orchestrator.budget import Budget, BudgetExceeded, BudgetLimits, KillSwitchActive
 from app.orchestrator.context import RunContext
+from app.orchestrator.fallback import package_requests
 from app.storage.store import StateConflict, Store
 
 log = logging.getLogger(__name__)
@@ -211,7 +212,10 @@ class Orchestrator:
             ended = None if target is RunStatus.COMPLETED else f"run ended: {target.value}"
             return _Ending(target, result.error_code, ended, result.output_ref)
         if ctx.step is S.SMOKE_TESTING and target is S.PROVISIONING:
-            requests_done = await self._next_attempt(ctx.run_id, S.PROVISIONING) - 2
+            requests_done = package_requests(  # not the GPU fallback's return (A-47)
+                await self._store.get_steps(ctx.run_id),
+                await self._next_attempt(ctx.run_id, S.PROVISIONING) - 1,
+            )
             if requests_done >= self._limits.per_run.package_requests:
                 message = "package request limit reached"
                 return _Ending(RunStatus.FAILED, ErrorCode.PACKAGE_REJECTED, message)

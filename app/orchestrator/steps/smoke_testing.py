@@ -29,6 +29,7 @@ from app.domain.models import (
     Claim,
     ClaimType,
     ErrorCode,
+    ExecTarget,
     PackageReq,
     Plan,
     SetupItem,
@@ -69,6 +70,7 @@ from app.orchestrator.coder_tools import (
     parse_args,
 )
 from app.orchestrator.context import RunContext
+from app.orchestrator.fallback import package_requests
 from app.orchestrator.fsm import StepResult
 from app.orchestrator.setup_check import (
     Declared,
@@ -78,6 +80,7 @@ from app.orchestrator.setup_check import (
 )
 from app.orchestrator.steps.common import (
     PAPER_EXCERPT_CHARS,
+    active_plan,
     ingested_paper,
     output_of,
     paper_excerpt,
@@ -171,6 +174,17 @@ class _State:
             "stand_in_flags": self.stand_in_flags,
             "swap_hints": self.swap_hints,
         }
+
+
+def coder_system_prompt(max_runs: int, target: ExecTarget) -> str:
+    """The Coder's system prompt, told where the full run executes (A-47): on one GPU it puts
+    its tensors on `cuda` when there is one; the smoke run stays on CPU either way."""
+    hardware = load_prompt(
+        "coder_hardware_gpu" if target is ExecTarget.GPU else "coder_hardware_cpu"
+    ).body.strip()
+    return load_prompt("coder_system").render(
+        max_runs=str(max_runs), untrusted_notice=UNTRUSTED_NOTICE, hardware=hardware
+    )
 
 
 def compact_history(messages: list[Message]) -> list[Message]:
@@ -291,12 +305,9 @@ class SmokeTestingStep:
             return _State(None)
 
     async def _package_requests_so_far(self, ctx: RunContext) -> int:
-        attempts = [
-            s.attempt
-            for s in await ctx.store.get_steps(ctx.run_id)
-            if s.name is StepName.PROVISIONING
-        ]
-        return max(attempts, default=1) - 1
+        steps = await ctx.store.get_steps(ctx.run_id)
+        attempts = [s.attempt for s in steps if s.name is StepName.PROVISIONING]
+        return package_requests(steps, max(attempts, default=1))
 
     # --- prompt -----------------------------------------------------------------------------
 
@@ -310,10 +321,9 @@ class SmokeTestingStep:
         reprovisioned: bool = False,
         paper: IngestedPaper | None = None,
         excerpt: str = "",
+        target: ExecTarget = ExecTarget.CPU,
     ) -> list[Message]:
-        system = load_prompt("coder_system").render(
-            max_runs=str(runs), untrusted_notice=UNTRUSTED_NOTICE
-        )
+        system = coder_system_prompt(runs, target)
         listed = [
             {**claim.model_dump(mode="json"), "planned_type": kind.value} for claim, kind in claims
         ]
@@ -413,9 +423,8 @@ class SmokeTestingStep:
     # --- the loop ---------------------------------------------------------------------------
 
     async def run(self, ctx: RunContext) -> StepResult:
-        plan = Plan.model_validate(
-            (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
-        )
+        active = await active_plan(ctx, self._json)  # A-47: CPU after a fallback
+        plan = active.plan
         claims = await planned_claims(ctx, plan)
         state = await self._state(ctx)
         ws = Workspace.from_snapshot(state.files, await self._repo(ctx))
@@ -429,7 +438,7 @@ class SmokeTestingStep:
             else ""
         )
         messages = self._messages(
-            claims, plan, ws, state, max_runs, ctx.attempt > 1, paper, excerpt
+            claims, plan, ws, state, max_runs, ctx.attempt > 1, paper, excerpt, active.target
         )
         given = "\n".join(  # what the paper gives the experiment, for extra_generator_options
             [excerpt, *(f"{c.text}\n{c.dataset}\n{c.setting}" for c, _ in claims)]

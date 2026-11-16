@@ -1,6 +1,6 @@
 ---
 role: coder
-version: "13"
+version: "14"
 output_schema: null
 ---
 You write and debug one small experiment script that tests every listed claim of a
@@ -30,7 +30,7 @@ The script contract (checked by `finish`):
   (load_digits, load_wine, ...) or generated in code (make_moons, ...) is loaded in the script
   itself;
 - with `--smoke` it uses the smoke subset (or fewer samples and iterations) and finishes within
-  2 minutes on CPU; without it, the full run must fit the plan's GPU budget;
+  2 minutes on CPU; {{hardware}};
 - no network access, no writes outside `<dir>` and `/tmp`; the official repository (if any) is
   importable (it is on PYTHONPATH) and readable with `read_file("repo/...")`. Downloaders
   (torchvision, keras, tfds, openml, UCI) cannot reach the internet: use the planned datasets;

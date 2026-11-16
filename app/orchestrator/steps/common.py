@@ -2,13 +2,26 @@
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
 
 from pydantic import ValidationError
 
 from app.domain.errors import P2PError
-from app.domain.models import Claim, ClaimType, ErrorCode, Plan, StepName
+from app.domain.models import (
+    Claim,
+    ClaimType,
+    ErrorCode,
+    ExecTarget,
+    GpuFallback,
+    Plan,
+    PlanArtifact,
+    StepName,
+)
 from app.domain.paper import IngestedPaper, Section
 from app.orchestrator.context import RunContext
+from app.orchestrator.fallback import fallback_key
 from app.storage.artifacts import ArtifactStore
 
 PAPER_EXCERPT_CHARS = 16_000  # what the Planner and the Coder read of the paper itself
@@ -32,6 +45,31 @@ async def output_of(ctx: RunContext, step: StepName) -> str:
     latest = max(done, key=lambda s: s.attempt)
     assert latest.output_ref is not None  # noqa: S101 (filtered above; narrows the type)
     return latest.output_ref
+
+
+@dataclass(frozen=True)
+class ActivePlan:
+    """The plan the run executes now (A-47): PLANNING's for its target, or after the GPU
+    fallback the CPU plan, with the record of why."""
+
+    plan: Plan
+    target: ExecTarget
+    fallback: GpuFallback | None
+
+
+async def active_plan(ctx: RunContext, read_json: Callable[[str], Awaitable[Any]]) -> ActivePlan:
+    """What PROVISIONING, SMOKE_TESTING, EXECUTING and VERDICT work on: plan.json, unless
+    EXECUTING fell back to its CPU plan (runs/<id>/gpu_fallback.json)."""
+    artifact = PlanArtifact.model_validate(await read_json(await output_of(ctx, StepName.PLANNING)))
+    try:
+        raw = await read_json(fallback_key(ctx.run_id))
+    except FileNotFoundError:
+        return ActivePlan(plan=artifact.plan, target=artifact.target, fallback=None)
+    if artifact.cpu_plan is None:
+        raise P2PError(ErrorCode.INTERNAL_ERROR, "a GPU fallback without a CPU plan")
+    return ActivePlan(
+        plan=artifact.cpu_plan, target=ExecTarget.CPU, fallback=GpuFallback.model_validate(raw)
+    )
 
 
 async def planned_claims(ctx: RunContext, plan: Plan) -> list[tuple[Claim, ClaimType]]:

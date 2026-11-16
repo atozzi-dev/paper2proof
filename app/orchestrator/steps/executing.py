@@ -54,7 +54,7 @@ from app.models.pricing import CloudPrices
 from app.orchestrator.budget import BudgetExceeded, KillSwitchActive, SpendKind
 from app.orchestrator.context import RunContext
 from app.orchestrator.fsm import StepResult
-from app.orchestrator.steps.common import output_of, planned_claims
+from app.orchestrator.steps.common import active_plan, output_of, planned_claims
 from app.orchestrator.steps.jobs import QUEUE_CAP_S, JobOutcome, run_job, stop_jobs, utcnow
 from app.orchestrator.steps.planning import MIN_SEEDS
 from app.storage.artifacts import ArtifactStore
@@ -496,9 +496,7 @@ class ExecutingStep:
         await ctx.emit(EventType.WARNING, {"code": "JOB_PREEMPTED", "message": message})
 
     async def run(self, ctx: RunContext) -> StepResult:
-        plan = Plan.model_validate(
-            (await self._json(await output_of(ctx, StepName.PLANNING)))["plan"]
-        )
+        plan = (await active_plan(ctx, self._json)).plan  # A-47: CPU after a fallback
         smoke = f"p2p-smoke-{run_slug(ctx.run_id)}-"  # left by a restart, before `finish`
         if not await stop_jobs(
             ctx, smoke, poll_s=self._poll_s, sleep=self._sleep, clock=self._clock
