@@ -724,6 +724,8 @@ def _seeds_plan(seeds: list[int]) -> Plan:
         ([1], [1, 0, 2, 3, 4, 5, 6, 7, 8, 9]),
         (list(range(20, 35)), list(range(20, 30))),
         (list(range(10)), list(range(10))),
+        # numpy, torch and random all take a seed below 2**31; the replay's --seeds too
+        ([2**31, 5, 2**31 - 1], [5, 2**31 - 1, 0, 1, 2, 3, 4, 6, 7, 8]),
     ],
 )
 def test_the_planners_seeds_come_first_then_the_smallest_unused(

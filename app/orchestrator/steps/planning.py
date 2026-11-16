@@ -53,6 +53,7 @@ from app.orchestrator.steps.common import (
 from app.storage.artifacts import ArtifactStore
 
 MIN_SEEDS = 3
+MAX_SEED = 2**31 - 1  # numpy, torch and random all take it; so does the replay's --seeds
 PackageCheck = Callable[[list[PackageReq]], Awaitable[list[PackageReq]]]
 DatasetCheck = Callable[[list[DatasetReq], RunCpu], Awaitable[DatasetReport]]
 
@@ -107,7 +108,8 @@ def correct_plan(
             "claim types follow the paper: "
             + ", ".join(f"{c} is tested as {selected[c].value}" for c in retyped)
         )
-    seeds = list(plan.seeds)[:max_seeds]  # a policy, not a deviation from the paper: no note
+    # a policy, not a deviation from the paper: no note
+    seeds = [s for s in plan.seeds if s <= MAX_SEED][:max_seeds]
     seeds += [s for s in range(max_seeds + len(seeds)) if s not in seeds][: max_seeds - len(seeds)]
     datasets: list[DatasetReq] = []
     repeated = 0
