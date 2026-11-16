@@ -1,0 +1,7 @@
+# Runner image digests (p2p-runner and p2p-runner-cpu) built with the exec manifest's time
+# target (A-46: min_seeds, target_seconds). Every new manifest carries it, and a runner from
+# before A-46 refuses such a manifest (exit 30, which users would read as a failed experiment),
+# so P2P_ENV=prod refuses to start with a runner digest that is not listed here.
+# Add a digest when its image is built from A-46 or later (docs/DEPLOY.md, "When the runner
+# changes"); never list one built before.
+time_target: []
