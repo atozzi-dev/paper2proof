@@ -176,7 +176,8 @@ for an ABSOLUTE one). `claim_ref` is unique; several claims may read the same ke
 claim and a RELATIVE one about the same method).
 
 `seeds` lists up to `per_run.max_seeds` seeds (`config/budgets.yaml`, 10): the Planner's, in its
-order, then the smallest unused integers. `min_seeds` and `target_seconds` (A-46, both or
+order, then the smallest unused integers, each from 0 to 2**31 - 1 (what numpy, torch and
+`random` all take; the schema, the model and the runner refuse more). `min_seeds` and `target_seconds` (A-46, both or
 neither) set the time rule of §7 step 3: `min_seeds` is the verdict's minimum (3, at most
 `len(seeds)`), `target_seconds` is `per_run.seed_target_s` (600). A manifest without them (one
 written before A-46) runs every seed within `budget_seconds`, as before, and is written without

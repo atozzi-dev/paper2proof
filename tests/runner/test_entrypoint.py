@@ -929,3 +929,9 @@ def test_the_runner_takes_the_largest_budget_the_control_plane_sends() -> None:
     ExecManifest.model_validate(hour)
     with pytest.raises(entrypoint.ContractError):
         entrypoint.validate({**hour, "budget_seconds": MAX_BUDGET_S + 1})
+
+
+def test_the_runner_refuses_a_seed_numpy_would_refuse() -> None:
+    entrypoint.validate({**_fixture("manifest_valid.json"), "seeds": [0, 2**31 - 1]})
+    with pytest.raises(entrypoint.ContractError):
+        entrypoint.validate({**_fixture("manifest_valid.json"), "seeds": [0, 2**31]})

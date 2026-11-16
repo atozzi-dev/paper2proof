@@ -27,6 +27,9 @@ MAX_CLAIMS_PER_JOB = 5
 RUNNER_FLAG = re.compile(r"^(--(s|se|see|seed|sm|smo|smok|smoke|o|ou|out)(=.*)?$|-[A-Za-z]*[so]|@)")
 
 
+MAX_SEED = 2**31 - 1  # the largest seed numpy, torch and random all take
+
+
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -146,8 +149,8 @@ class ExecManifest(_Strict):
     @field_validator("seeds")
     @classmethod
     def _unique_seeds(cls, seeds: list[int]) -> list[int]:
-        if len(set(seeds)) != len(seeds) or any(s < 0 for s in seeds):
-            raise ValueError("seeds must be unique non-negative integers")
+        if len(set(seeds)) != len(seeds) or any(s < 0 or s > MAX_SEED for s in seeds):
+            raise ValueError(f"seeds must be unique integers from 0 to {MAX_SEED}")
         return seeds
 
     @model_validator(mode="after")

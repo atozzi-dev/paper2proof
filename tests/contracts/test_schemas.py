@@ -291,3 +291,15 @@ def test_a_manifest_may_ask_for_an_hour_and_no_more() -> None:
     assert not _schema_ok(_schema("manifest.schema.json"), data)
     with pytest.raises(ValidationError):
         ExecManifest.model_validate(data)
+
+
+def test_a_seed_beyond_what_numpy_and_torch_take_is_refused() -> None:
+    """2**31 - 1 is the largest seed numpy, torch and random all accept (the plan keeps to it)."""
+    data = _fixture("manifest_valid.json")
+    data["seeds"] = [0, 2**31 - 1]
+    assert _schema_ok(_schema("manifest.schema.json"), data)
+    ExecManifest.model_validate(data)
+    data["seeds"] = [0, 2**31]
+    assert not _schema_ok(_schema("manifest.schema.json"), data)
+    with pytest.raises(ValidationError):
+        ExecManifest.model_validate(data)

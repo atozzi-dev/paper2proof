@@ -163,7 +163,8 @@ def _validate(manifest: Any) -> dict[str, Any]:
     seeds = m["seeds"]
     need(
         isinstance(seeds, list) and 1 <= len(seeds) <= 20
-        and all(type(s) is int and s >= 0 for s in seeds) and len(set(seeds)) == len(seeds),
+        and all(type(s) is int and 0 <= s <= 2**31 - 1 for s in seeds)
+        and len(set(seeds)) == len(seeds),
         "seeds",
     )  # fmt: skip
     need(type(m["budget_seconds"]) is int and 60 <= m["budget_seconds"] <= 3600, "budget_seconds")
