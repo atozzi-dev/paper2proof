@@ -146,6 +146,7 @@ async def test_every_new_admin_route_needs_the_token(client: httpx.AsyncClient) 
         ("POST", "/admin/invites", {}),
         ("POST", "/admin/invites/revoke", {"id": "ab" * 6}),
         ("POST", f"/admin/gallery/{run_id}", {"listed": False}),
+        ("POST", "/admin/titles/backfill", None),
     ]
     for method, path, body in calls:
         response = await client.request(method, path, json=body, headers={"X-Admin-Token": "x"})
@@ -277,9 +278,31 @@ async def test_titles_are_backfilled_from_the_ingested_paper(
     state.artifacts.put_json(f"runs/{old}/ingested.json", paper)
     response = await client.post("/admin/titles/backfill", headers=HEAD)
     assert response.status_code == 200
-    assert response.json() == {"updated": 1}
+    assert response.json() == {"updated": 1, "failed": 0}
     titles = {r: (await store.get_run(r)).title for r in (old, new, none)}  # type: ignore[union-attr]
     from app.ingestion.title import display_title
 
     assert titles == {old: display_title(paper["title"], None), new: "Already Set", none: None}
     assert titles[old] and "emph" not in titles[old]
+
+
+async def test_a_backfill_skips_what_it_cannot_read_and_counts_it(
+    client: httpx.AsyncClient, store: Store, state: AppState, tmp_path: Any
+) -> None:
+    """A paper file that isn't an object, a storage error: counted, never a half-done 500."""
+    from app.storage.artifacts import LocalArtifactStore
+
+    class Flaky(LocalArtifactStore):
+        def get_json(self, key: str) -> Any:
+            if "r_01jb7z0000000000000000000i" in key:
+                raise OSError("throttled")
+            return super().get_json(key)
+
+    state.artifacts = Flaky(tmp_path / "artifacts")
+    runs = ("r_01jb7z0000000000000000000h", "r_01jb7z0000000000000000000i")
+    for run_id in runs:
+        await store.create_run(run_id, "2106.09685", created_by=None, claim_hint=None, budget={})
+    state.artifacts.put_json(f"runs/{runs[0]}/ingested.json", ["not", "a", "paper"])  # type: ignore[arg-type]
+    response = await client.post("/admin/titles/backfill", headers=HEAD)
+    assert response.status_code == 200
+    assert response.json() == {"updated": 0, "failed": 1}

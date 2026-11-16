@@ -287,11 +287,19 @@ class ExecutingStep:
         return await asyncio.to_thread(self._artifacts.get_json, key)
 
     async def _created(self, ctx: RunContext, attempt: int) -> bool:
-        """Whether the attempt's job was ever created (recorded, or listed by its name)."""
+        """Whether the attempt's job may have been created: recorded, known to a backend (a
+        Sandboxes spawn intent), or listed by its name. Fails closed: a listing error says yes."""
         name = job_name(JobKind.EXEC, ctx.run_id, attempt)
         if await ctx.store.get_job(name) is not None:
             return True
-        return any(h.name == name for h, _, _ in await ctx.jobs.list_jobs(name))
+        knows = getattr(ctx.jobs, "knows", None)
+        if knows is not None and await knows(name):
+            return True
+        try:
+            return any(h.name == name for h, _, _ in await ctx.jobs.list_jobs(name))
+        except Exception:
+            log.warning("exec job listing failed", extra={"run_id": ctx.run_id}, exc_info=True)
+            return True
 
     async def _exists(self, key: str) -> bool:
         try:
@@ -479,7 +487,10 @@ class ExecutingStep:
                 "results_key": f"results/{manifest.attempt}/results.json" if has_results else None,
                 "exit_reason": None if has_results else exit_reason,
                 "job_state": None if state is None else state.value,
-                "runner_image": image,
+                # the runner's repository with the digest the manifest names (what it pulled)
+                "runner_image": None
+                if image is None
+                else f"{image.rsplit('@', 1)[0]}@{manifest.image_digest}",
                 "hardware": None  # how the judged job ran (the verdict's conditions)
                 if where is None
                 else {

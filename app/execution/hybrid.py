@@ -306,6 +306,11 @@ class HybridJobBackend:
             return self._sandbox
         return None
 
+    async def knows(self, name: str) -> bool:
+        """Whether Sandboxes has this job, a spawn intent included (A-48: a manifest's job may
+        exist even while it can't be listed)."""
+        return self._sandbox is not None and await self._sandbox.knows(name)
+
     async def _created_on(self, name: str) -> JobBackend | SandboxJobs:
         """Where the job with this name was created: status and cancel carry only the name, so
         a split exec job is in Sandboxes iff its host index has it (written before the spawn,

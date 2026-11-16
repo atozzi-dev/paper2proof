@@ -14,6 +14,7 @@ import httpx
 from app.discovery.hf_datasets import DatasetProblem, DatasetReport, RunCpu
 from app.discovery.known_datasets import KnownDataset, named_in
 from app.discovery.pypi_project import authors_package
+from app.domain.contracts import MAX_SEED  # numpy, torch and random all take it
 from app.domain.discovery import (
     HF_DATASET_ID,
     HF_SPLIT,
@@ -62,7 +63,6 @@ from app.storage.artifacts import ArtifactStore
 
 log = logging.getLogger(__name__)
 MIN_SEEDS = 3
-MAX_SEED = 2**31 - 1  # numpy, torch and random all take it; so does the replay's --seeds
 PackageCheck = Callable[[list[PackageReq]], Awaitable[list[PackageReq]]]
 DatasetCheck = Callable[[list[DatasetReq], RunCpu], Awaitable[DatasetReport]]
 

@@ -1456,3 +1456,26 @@ async def test_a_manifest_kept_before_a_runner_change_names_the_runner_that_runs
     assert _manifest_of(backend.specs[0]).image_digest == "sha256:" + "c" * 64
     kept = artifacts.get_json(f"runs/{RUN}/exec_manifest_1.json")
     assert kept["image_digest"] == "sha256:" + "c" * 64
+
+
+class KnowsAnIntent(ScriptedBackend):
+    """A spawn intent the backend knows of (a Sandboxes index entry) but cannot list yet."""
+
+    async def knows(self, name: str) -> bool:
+        return name == f"p2p-exec-{SLUG}-1"
+
+
+async def test_a_manifest_whose_job_may_exist_keeps_its_digest(
+    store: Store, tmp_path: Path
+) -> None:
+    """Fail closed: a job that may have been spawned with the old image keeps its manifest."""
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    step = _step(artifacts, storage, FakeClock())
+    plan = Plan.model_validate(artifacts.get_json(PLAN_KEY)["plan"])
+    old = await step._manifest(ctx, plan, 1, step._where(ExecTarget.CPU))
+    assert old is not None
+    stale = old.model_copy(update={"image_digest": "sha256:" + "9" * 64})
+    key = f"runs/{RUN}/exec_manifest_1.json"
+    artifacts.put_json(key, stale.model_dump(mode="json", by_alias=True))
+    kept = await step._manifest(_with(ctx, KnowsAnIntent({})), plan, 1, step._where(ExecTarget.CPU))
+    assert kept is not None and kept.image_digest == "sha256:" + "9" * 64

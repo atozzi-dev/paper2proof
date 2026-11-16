@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import RUN_ID, client_ip, get_state
 from app.domain.models import RunStatus, VerdictKind
-from app.domain.paper import IngestedPaper
 from app.ingestion.title import display_title
 from app.settings import MIN_SECRET_LEN
 from app.verdict.summary import kinds_summary
@@ -78,6 +77,7 @@ class RevokeInvite(BaseModel):
 
 class TitleBackfill(BaseModel):
     updated: int
+    failed: int  # papers that could not be read (a storage error, not a paper)
 
 
 class AdminRun(BaseModel):
@@ -194,15 +194,20 @@ async def backfill_titles(request: Request) -> TitleBackfill:
     state = get_state(request)
     if state.artifacts is None:
         raise HTTPException(503, "no artifact store")
-    updated = 0
+    artifacts = state.artifacts
+    updated = failed = 0
     for run_id in await state.store.runs_without_title():
+        key = f"runs/{run_id}/ingested.json"
         try:
-            raw = await asyncio.to_thread(state.artifacts.get_json, f"runs/{run_id}/ingested.json")
-            paper = IngestedPaper.model_validate(raw)
-        except (FileNotFoundError, ValueError):  # ValidationError included
+            raw = await asyncio.to_thread(artifacts.get_json, key)
+        except FileNotFoundError:
             continue
-        title = display_title(paper.title, None)
+        except Exception:
+            failed += 1
+            continue
+        found = raw.get("title") if isinstance(raw, dict) else None  # only the title is read
+        title = display_title(found, None) if isinstance(found, str) else None
         if title:
             await state.store.set_title(run_id, title)
             updated += 1
-    return TitleBackfill(updated=updated)
+    return TitleBackfill(updated=updated, failed=failed)

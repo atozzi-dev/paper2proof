@@ -369,3 +369,24 @@ async def test_the_gpu_quota_of_a_run_s_invite(store: Store) -> None:
     assert await store.gpu_quota(RUN) == 2
     await _gpu_run(store, "r_01jb7z0000000000000000000c", invite=None)
     assert await store.gpu_quota("r_01jb7z0000000000000000000c") == 0
+
+
+async def test_a_gpu_run_refused_by_the_invite_leaves_the_run_without_a_grant(
+    store: Store,
+) -> None:
+    await store.create_invite(GPU_INVITE, 3, None)  # no GPU runs
+    await _gpu_run(store)
+    assert not await store.consume_gpu_run(RUN, GPU_DAY)
+    await store.create_invite("8e" * 32, 3, None, gpu_runs_per_day=1)
+    run = await store.get_run(RUN)
+    assert run is not None
+    assert not await store.consume_gpu_run(RUN, GPU_DAY)  # still refused: no grant was kept
+
+
+async def test_two_tries_of_one_run_racing_take_one_gpu_run(store: Store) -> None:
+    await store.create_invite(GPU_INVITE, 3, None, gpu_runs_per_day=2)
+    await _gpu_run(store)
+    got = await asyncio.gather(*(store.consume_gpu_run(RUN, GPU_DAY) for _ in range(4)))
+    assert all(got)
+    [invite] = [i for i in await store.list_invites() if i.code_hash == GPU_INVITE]
+    assert invite.gpu_used_today == 1
