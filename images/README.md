@@ -76,3 +76,7 @@ an arm64 machine. It needs BuildKit with Dockerfile frontend 1.6 or later (`COPY
 
 Pushing to the Nebius registry is a human step (deploy, H-04). Jobs and the endpoint always
 reference the pushed digest, never a tag.
+
+A change to `runner/entrypoint.py` needs new `p2p-runner-cpu` and `p2p-runner` images, switched
+together with the control plane: `docs/DEPLOY.md`, "When the runner changes". Since A-46 the
+control plane refuses to start with a runner digest missing from `config/runner_images.yaml`.

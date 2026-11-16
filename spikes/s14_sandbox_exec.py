@@ -201,6 +201,9 @@ def _manifest(workspace_sha: str, overlay_sha: str, data_sha: str, budget_s: int
             "schema": "p2p.manifest/v2", "run_id": "r_01jb7z00000000000000000000", "attempt": 1,
             "image_digest": "sha256:" + "ab" * 32, "entrypoint": "workspace/train.py",
             "args": ["--steps", "3"], "seeds": [0, 1, 2], "budget_seconds": budget_s,
+            # the time target every manifest carries since A-46: an image from before it
+            # refuses the keys (exit 30), so a stale import fails this gate
+            "min_seeds": 3, "target_seconds": 60,
             "paths": {
                 "overlay": "/mnt/run/staging/overlay.tar.zst", "repo": None,
                 "data_dir": "/mnt/run/staging/data",
@@ -290,6 +293,8 @@ def job_phase(sbx: Sandboxes, r: Report, image: str) -> None:
             r.fail(f"job {label}: results.json refused: {analysis.problem}")
         elif (analysis.exit_reason, analysis.used_seeds) != (want_reason, want_seeds):
             r.fail(f"job {label}: expected {want_reason} with seeds {want_seeds}")
+        elif analysis.seeds_not_started:  # three seeds, a minimum of three: none left out
+            r.fail(f"job {label}: seeds not started {analysis.seeds_not_started}")
 
 
 def main() -> int:

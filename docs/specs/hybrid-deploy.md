@@ -91,8 +91,9 @@ the GPU path for when the gate passes (`P2P_EXEC_BACKEND=gpu`).
 **What changes for a run.** The experiment runs on CPU, in a disposable Sandboxes microVM with
 no network interface (spike S3), at most 1 hour per instance. The runner, the manifest, the
 results contract, the verdict and the bundle are the same. The image is `p2p-runner-cpu`: the
-same entrypoint and package versions as `p2p-runner`, with PyTorch CPU wheels, imported once
-into Sandboxes (`config/sandbox_images.yaml`, digest → image UUID). The judged hardware the
+same entrypoint and package versions as `p2p-runner`, with PyTorch CPU wheels, imported into
+Sandboxes once per runner change (`config/sandbox_images.yaml`, digest → image UUID; the steps
+are in `docs/DEPLOY.md`, "When the runner changes"). The judged hardware the
 bundle records is the Sandboxes platform (`sandbox`), never a GPU. The exec job's
 `budget_seconds` is `min(1800, floor((gpu_minutes - spent) * 60) - 300)`, the run's whole
 remaining allowance (1500 s with today's 30 minutes), not the Planner's estimate; the job is

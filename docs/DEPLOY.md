@@ -347,3 +347,42 @@ Use a dedicated VPS with nothing else on it. Keep the checkout owned by root (re
    - One canary paper runs end to end before anything else. Its provision job must appear in
      `docker ps -a` on the host, and its smoke and exec jobs in
      `/var/lib/p2p/jobs/sandbox-jobs/` (Sandboxes) or in `nebius ai job list` (GPU).
+
+## When the runner changes
+
+`images/runner/entrypoint.py` runs inside the exec job, so a change to it reaches users only with
+a new `p2p-runner-cpu` (and `p2p-runner`) image. The control plane and the runner must switch
+together. Since A-46 every new exec manifest carries the time target (`min_seeds`,
+`target_seconds`), and a runner image from before A-46 refuses such a manifest (exit 30). Users
+would see that as the paper's experiment failing, after the models were paid for. So
+`P2P_ENV=prod` refuses to start unless the configured runner digest (`P2P_RUNNER_CPU_IMAGE` with
+Sandboxes, `P2P_RUNNER_IMAGE` with GPU jobs) is listed in `config/runner_images.yaml`. In the
+other direction, a new runner under an older control plane works: it writes `results.json` as
+before when the manifest has no time target.
+
+Do these steps in order. Each one that changes the cloud or spends money is the human's.
+
+1. Rebuild `p2p-runner-cpu` from the commit to deploy, plus `p2p-runner` if
+   `P2P_EXEC_BACKEND=gpu` may ever be used: `make images` builds them and checks their size,
+   then `make test-docker` tests them.
+2. Push both to the `p2p-sandbox` registry and note their digests.
+3. Import the runner-cpu digest into Sandboxes with `scripts/sandbox_import.py --pull-tag`
+   (cloud step 4 above), then run spike S14 on the new UUID from the same checkout: its canary
+   manifest carries the time target, so a stale import fails it.
+4. On the branch to deploy, commit the new `config/sandbox_images.yaml` entry and the new
+   digests in `config/runner_images.yaml`. Never list a digest built before A-46.
+5. In `/etc/p2p/p2p.env`, update `P2P_RUNNER_CPU_IMAGE` (and `P2P_RUNNER_IMAGE`). Deploy the
+   code in the same restart (host step 4).
+6. Run one canary paper end to end.
+
+**Rollback.**
+- Roll the env digests back together with the code.
+- An API from before A-46 cannot read the manifests of runs started under A-46 (`extra` keys are
+  refused). Let in-flight runs finish before you roll back. Finished A-46 runs then show no
+  conditions panel, so a NOT_REPRODUCED would lose the conditions shown next to it (invariant
+  10): roll back that far only in an emergency, and roll forward as soon as you can.
+- Keep old runner digests in the registry: old Proof Bundles' `reproduce.sh` pulls them.
+
+**Expect slower first runs.** The runner digest is part of the provision `cache_salt`, so every
+package overlay is rebuilt once after the switch. `p2p-provisioner` and `p2p-api` do not copy
+`entrypoint.py` and need no rebuild for a runner change.
