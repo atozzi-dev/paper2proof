@@ -88,13 +88,15 @@ def correct_plan(
     *,
     selected: Mapping[str, ClaimType],
     gpu_cap: float,
+    max_seeds: int,
     named: Mapping[str, Sequence[KnownDataset]] | None = None,
 ) -> tuple[Plan, list[str]]:
     """Deterministic post-checks. Returns the corrected plan and what was changed. `selected`
     maps each selected claim to the type the paper gives it: the Planner picks which claims to
     test, never their type (the verdict judges the claim as extracted). `named` maps a claim to
     the known datasets it names (`named_in`): the plan gets their Hugging Face copies when it
-    has none of them and they fit the caps."""
+    has none of them and they fit the caps. The plan lists `max_seeds` seeds, the Planner's
+    first: how many of them run is the runner's time rule (A-46), never the Planner's."""
     notes: list[str] = []
     claim_ids = [c for c in plan.claim_ids if c in selected]
     if len(claim_ids) != len(plan.claim_ids):
@@ -105,11 +107,8 @@ def correct_plan(
             "claim types follow the paper: "
             + ", ".join(f"{c} is tested as {selected[c].value}" for c in retyped)
         )
-    seeds = list(plan.seeds)
-    if len(seeds) < MIN_SEEDS:
-        extra = [s for s in range(100) if s not in seeds][: MIN_SEEDS - len(seeds)]
-        seeds += extra
-        notes.append(f"seeds raised to {MIN_SEEDS} (the verdict needs at least {MIN_SEEDS})")
+    seeds = list(plan.seeds)[:max_seeds]  # a policy, not a deviation from the paper: no note
+    seeds += [s for s in range(max_seeds + len(seeds)) if s not in seeds][: max_seeds - len(seeds)]
     datasets: list[DatasetReq] = []
     repeated = 0
     for dataset in plan.datasets:  # the provisioner would refuse anything else (fail early)
@@ -292,7 +291,13 @@ class PlanningStep:
         named = {  # curated names only; paper text, so bounded before the regexes
             c.id: named_in(c.dataset[:NAMED_CHARS], c.text[:NAMED_CHARS]) for c in claims
         }
-        plan, _ = correct_plan(proposed, selected=selected, gpu_cap=limits.gpu_minutes, named=named)
+        plan, _ = correct_plan(
+            proposed,
+            selected=selected,
+            gpu_cap=limits.gpu_minutes,
+            max_seeds=limits.max_seeds,
+            named=named,
+        )
         if self._dataset_check is not None and plan.datasets:
             history = [*messages, _said(proposed)]
             plan = await self._fetchable(ctx, self._dataset_check, plan, history, selected, named)
@@ -425,7 +430,13 @@ class PlanningStep:
             except P2PError:  # no usable second plan: keep the first, minus what cannot run
                 plan = plan.model_copy(update={"datasets": report.kept})
             else:
-                plan, _ = correct_plan(retried, selected=selected, gpu_cap=gpu_cap, named=named)
+                plan, _ = correct_plan(
+                    retried,
+                    selected=selected,
+                    gpu_cap=gpu_cap,
+                    max_seeds=ctx.limits.per_run.max_seeds,
+                    named=named,
+                )
                 kept = {d.id for d in plan.datasets}
                 notes += [
                     f"dataset {d.id} replaced: {d.reason}"

@@ -38,6 +38,7 @@ from app.orchestrator.cost_estimate import estimate_plan_cost
 from app.orchestrator.steps.awaiting_approval import AwaitingApprovalStep
 from app.orchestrator.steps.planning import (
     CPU_HARDWARE,
+    MIN_SEEDS,
     DatasetCheck,
     PackageCheck,
     PlanningStep,
@@ -45,6 +46,7 @@ from app.orchestrator.steps.planning import (
 )
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
+from app.verdict.config import load_verdict_config
 from tests.steps.conftest import LLM_FIXTURES, ROOT, RUN, ctx_at
 
 DISCOVERY = f"runs/{RUN}/discovery.json"
@@ -141,10 +143,13 @@ async def test_in_sandboxes_the_planner_plans_for_a_cpu(store: Store, tmp_path: 
     assert CPU_HARDWARE in prompt and "L40S" not in prompt
 
 
-async def test_two_seeds_are_raised_to_three_and_noted(store: Store, tmp_path: Path) -> None:
+async def test_the_plan_lists_up_to_max_seeds_seeds(store: Store, tmp_path: Path) -> None:
+    """The Planner proposed two: the plan lists ten (config/budgets.yaml per_run.max_seeds),
+    the runner runs as many as fit in the time target (A-46). A policy, not a deviation from
+    the paper: no note, so no Limitations line."""
     plan, nxt, events = await _plan(store, tmp_path, "two_seeds")
-    assert len(plan.seeds) == 3
-    assert any("seeds" in n for n in plan.notes)
+    assert len(plan.seeds) == 10
+    assert not any("seeds" in n for n in plan.notes)
     ready = [p for p in events if isinstance(p, PlanReadyPayload)]
     assert ready and not ready[0].needs_approval
     assert nxt is StepName.PROVISIONING  # cheap: auto-approved
@@ -264,7 +269,9 @@ def test_plan_datasets_are_validated_and_capped() -> None:
         datasets=datasets,
         gpu_minutes_est=10,
     )
-    corrected, notes = correct_plan(plan, selected={"c1": ClaimType.RELATIVE}, gpu_cap=30)
+    corrected, notes = correct_plan(
+        plan, selected={"c1": ClaimType.RELATIVE}, gpu_cap=30, max_seeds=3
+    )
     assert [d.id for d in corrected.datasets] == ["org/d0", "org/d1"]  # a third breaks 20 GiB
     assert any("dataset" in n for n in notes)
 
@@ -282,10 +289,10 @@ def test_a_claim_keeps_the_type_the_paper_gives_it() -> None:
         gpu_minutes_est=10,
     )
     paper = {"c1": ClaimType.ABSOLUTE, "c2": ClaimType.RELATIVE}
-    corrected, notes = correct_plan(plan, selected=paper, gpu_cap=30)
+    corrected, notes = correct_plan(plan, selected=paper, gpu_cap=30, max_seeds=3)
     assert corrected.claim_types == paper
     assert notes == ["claim types follow the paper: c1 is tested as ABSOLUTE"]
-    unchanged, none = correct_plan(corrected, selected=paper, gpu_cap=30)
+    unchanged, none = correct_plan(corrected, selected=paper, gpu_cap=30, max_seeds=3)
     assert unchanged.claim_types == paper and none == []
 
 
@@ -699,10 +706,48 @@ MNIST = named_in("MNIST", "")
 RELATIVE = {"c1": ClaimType.RELATIVE, "c2": ClaimType.RELATIVE}
 
 
+def _seeds_plan(seeds: list[int]) -> Plan:
+    return Plan(
+        mode=PlanMode.FROM_SCRATCH,
+        claim_ids=["c1"],
+        claim_types={"c1": ClaimType.RELATIVE},
+        scale=Scale.REDUCED,
+        seeds=seeds,
+        gpu_minutes_est=10,
+    )
+
+
+@pytest.mark.parametrize(
+    ("proposed", "planned"),
+    [
+        ([42, 7, 13], [42, 7, 13, 0, 1, 2, 3, 4, 5, 6]),
+        ([1], [1, 0, 2, 3, 4, 5, 6, 7, 8, 9]),
+        (list(range(20, 35)), list(range(20, 30))),
+        (list(range(10)), list(range(10))),
+    ],
+)
+def test_the_planners_seeds_come_first_then_the_smallest_unused(
+    proposed: list[int], planned: list[int]
+) -> None:
+    corrected, notes = correct_plan(
+        _seeds_plan(proposed), selected=RELATIVE, gpu_cap=30, max_seeds=10
+    )
+    assert corrected.seeds == planned
+    assert notes == []
+
+
+def test_the_minimum_seeds_are_the_verdicts() -> None:
+    """The runner's minimum before the time rule is the verdict's: fewer would decide
+    INSUFFICIENT_SEEDS on a run that stopped by design."""
+    assert load_verdict_config(ROOT / "config" / "verdict.yaml").min_seeds == MIN_SEEDS
+
+
 @pytest.mark.parametrize("planned", ["ylecun/mnist", "YLeCun/MNIST", "mnist"])
 def test_a_known_dataset_already_planned_is_not_added_again(planned: str) -> None:
     plan = _plan_with(DatasetReq(kind="hf", id=planned, split="test"))
-    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c1": MNIST})
+    corrected, notes = correct_plan(
+        plan, selected=RELATIVE, gpu_cap=30, max_seeds=3, named={"c1": MNIST}
+    )
     assert corrected.datasets == plan.datasets and notes == []
 
 
@@ -714,7 +759,7 @@ def test_a_dataset_planned_twice_is_kept_once_with_its_first_split() -> None:
         DatasetReq(kind="hf", id="uoft-cs/cifar10"),
         DatasetReq(kind="hf", id="YLeCun/MNIST", split="test"),  # Hugging Face ids ignore case
     )
-    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30)
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, max_seeds=3)
     assert [(d.id, d.split) for d in corrected.datasets] == [
         ("ylecun/mnist", "train"),
         ("uoft-cs/cifar10", None),
@@ -728,13 +773,15 @@ def test_a_dataset_planned_twice_is_kept_once_with_its_first_split() -> None:
 def test_two_claims_on_one_known_dataset_add_it_once() -> None:
     plan = _plan_with(claims=("c1", "c2"))
     named = {"c1": MNIST, "c2": MNIST}
-    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named=named)
+    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, max_seeds=3, named=named)
     assert [d.id for d in corrected.datasets] == ["ylecun/mnist"] and len(notes) == 1
 
 
 def test_only_the_claims_the_plan_tests_add_known_datasets() -> None:
     plan = _plan_with()  # c2 is selected but the Planner does not test it
-    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c2": MNIST})
+    corrected, notes = correct_plan(
+        plan, selected=RELATIVE, gpu_cap=30, max_seeds=3, named={"c2": MNIST}
+    )
     assert corrected.datasets == [] and notes == []
 
 
@@ -748,7 +795,9 @@ def test_only_the_claims_the_plan_tests_add_known_datasets() -> None:
 )
 def test_known_datasets_respect_the_caps(planned: list[DatasetReq]) -> None:
     plan = _plan_with(*planned)
-    corrected, notes = correct_plan(plan, selected=RELATIVE, gpu_cap=30, named={"c1": MNIST})
+    corrected, notes = correct_plan(
+        plan, selected=RELATIVE, gpu_cap=30, max_seeds=3, named={"c1": MNIST}
+    )
     assert corrected.datasets == planned
     assert len(notes) == 1 and "MNIST" in notes[0] and "not added" in notes[0]
 
@@ -832,7 +881,7 @@ async def test_a_plan_that_lists_matching_conditions_stays_full(
 
 def test_the_code_never_raises_the_scale() -> None:
     corrected, notes = correct_plan(
-        _setup_plan(Scale.REDUCED), selected={"c1": ClaimType.RELATIVE}, gpu_cap=30
+        _setup_plan(Scale.REDUCED), selected={"c1": ClaimType.RELATIVE}, gpu_cap=30, max_seeds=3
     )
     assert corrected.scale is Scale.REDUCED and notes == []
     assert [i.id for i in corrected.setup] == ["s1"]
@@ -841,17 +890,22 @@ def test_the_code_never_raises_the_scale() -> None:
 def test_a_reduced_plan_without_conditions_gets_no_extra_note() -> None:
     """It is reduced already: the missing list changes nothing, so there is nothing to say."""
     corrected, notes = correct_plan(
-        _setup_plan(Scale.REDUCED, listed=False), selected={"c1": ClaimType.RELATIVE}, gpu_cap=30
+        _setup_plan(Scale.REDUCED, listed=False),
+        selected={"c1": ClaimType.RELATIVE},
+        gpu_cap=30,
+        max_seeds=3,
     )
     assert corrected.scale is Scale.REDUCED and notes == []
 
 
 def test_correcting_a_corrected_setup_changes_nothing() -> None:
     selected = {"c1": ClaimType.RELATIVE}
-    once, notes = correct_plan(_setup_plan(Scale.FULL, planned="20"), selected=selected, gpu_cap=30)
+    once, notes = correct_plan(
+        _setup_plan(Scale.FULL, planned="20"), selected=selected, gpu_cap=30, max_seeds=3
+    )
     assert once.scale is Scale.REDUCED
     assert notes == ["scale REDUCED: epochs planned 20, the paper uses 200"]
-    twice, again = correct_plan(once, selected=selected, gpu_cap=30)
+    twice, again = correct_plan(once, selected=selected, gpu_cap=30, max_seeds=3)
     assert twice == once and again == []
 
 
@@ -870,6 +924,8 @@ def test_a_reduction_stated_on_a_condition_code_cannot_keep_still_reduces_the_pl
     plan = _setup_plan(Scale.FULL)
     garbage = SetupItem(id="y", name="optimizer", kind=SetupKind.CHOICE, paper="—", planned="Adam")
     plan = plan.model_copy(update={"setup": [*plan.setup, garbage]})
-    corrected, notes = correct_plan(plan, selected={"c1": ClaimType.RELATIVE}, gpu_cap=30)
+    corrected, notes = correct_plan(
+        plan, selected={"c1": ClaimType.RELATIVE}, gpu_cap=30, max_seeds=3
+    )
     assert corrected.scale is Scale.REDUCED
     assert any("could not be kept planned something else" in n for n in notes)
