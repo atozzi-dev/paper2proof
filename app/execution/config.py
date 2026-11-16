@@ -1,11 +1,25 @@
 """Execution-plane settings: image digests and subnets (filled from infra outputs, A-03/H-04)."""
 
+from pathlib import Path
+
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 DIGEST_REF = r"^[a-z0-9.\-/:]+@sha256:[0-9a-f]{64}$"  # invariant 8: images by digest only
 EXEC_PLATFORM, EXEC_PRESET = "gpu-l40s-a", "1gpu-8vcpu-32gb"  # execution-contracts §8
 # Where the exec job goes when gpu-l40s-a has no capacity (execution-contracts §8).
 EXEC_FALLBACK = ("gpu-l40s-d", "1gpu-16vcpu-96gb")
+
+
+def has_time_target(path: Path, image: str) -> bool:
+    """Whether this runner image's digest is listed as built with the exec manifest's time
+    target (config/runner_images.yaml, A-46). A missing file lists nothing."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return False
+    listed = data.get("time_target") if isinstance(data, dict) else None
+    return isinstance(listed, list) and image.rsplit("@", 1)[-1] in listed
 
 
 class ExecutionConfig(BaseModel):

@@ -40,7 +40,7 @@ from app.discovery.tavily import TavilyClient
 from app.domain.errors import P2PError
 from app.domain.models import ErrorCode, PackageReq, StepName
 from app.execution.backend import JobBackend
-from app.execution.config import ExecutionConfig
+from app.execution.config import ExecutionConfig, has_time_target
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
 from app.execution.hybrid import HybridJobBackend, HybridRunStorage, upload_run_dir
@@ -216,6 +216,7 @@ def prod_adapters(settings: Settings) -> Adapters:
     hybrid = settings.p2p_execution == "hybrid"
     if hybrid:
         _check_hybrid(settings)
+    _check_runner(settings)  # after: an image not imported into Sandboxes says so first
     keys = settings.p2p_var_dir / "keys"  # written only once everything else is in place
     launcher_key = key_file(settings.job_launcher_auth_key, None, keys / "launcher.json")
     runtime_key = key_file(settings.runtime_auth_key, None, keys / "runtime.json")
@@ -270,6 +271,22 @@ def _sandbox_image(settings: Settings) -> str | None:
     return load_sandbox_image(
         settings.config_dir / "sandbox_images.yaml", settings.p2p_runner_cpu_image
     )
+
+
+def _check_runner(settings: Settings) -> None:
+    """Every new exec manifest carries the time target (A-46). A runner image from before it
+    refuses them all (exit 30), which users would read as the paper's experiment failing after
+    the models were paid for: a stale digest stops the start instead (docs/DEPLOY.md, "When
+    the runner changes")."""
+    if exec_backend(settings) == "sandboxes":
+        name, image = "P2P_RUNNER_CPU_IMAGE", settings.p2p_runner_cpu_image
+    else:
+        name, image = "P2P_RUNNER_IMAGE", settings.p2p_runner_image
+    if image and not has_time_target(settings.config_dir / "runner_images.yaml", image):
+        raise ConfigError(
+            f"{name} predates the exec manifest's time target (A-46): rebuild the runner from "
+            "this commit and list its digest in config/runner_images.yaml (docs/DEPLOY.md)"
+        )
 
 
 def _check_hybrid(settings: Settings) -> None:

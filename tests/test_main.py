@@ -195,7 +195,22 @@ def test_readyz_reports_the_build_commit(tmp_path: Path) -> None:
     assert asyncio.run(check())["commit"] == "abc123"
 
 
+RUNNER_DIGESTS = ("sha256:" + "b" * 64, "sha256:" + "c" * 64)  # _prod's runner and runner-cpu
+
+
+def _config(tmp_path: Path) -> Path:
+    """The repo's config, with _prod's runner digests listed as built with the time target."""
+    config = tmp_path / "config"
+    if not config.exists():
+        shutil.copytree(ROOT / "config", config)
+        listed = "".join(f"  - {d}\n" for d in RUNNER_DIGESTS)
+        (config / "runner_images.yaml").write_text(f"time_target:\n{listed}", encoding="utf-8")
+    return config
+
+
 def _prod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **values: object) -> Settings:
+    if "config_dir" not in values:
+        values["config_dir"] = _config(tmp_path)
     monkeypatch.setenv("NEBIUS_API_KEY", "k" * 20)
     monkeypatch.setenv("SESSION_KEY", SECRET_A)
     monkeypatch.setenv("ADMIN_TOKEN", SECRET_B)
@@ -209,6 +224,43 @@ def _prod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **values: object) -> 
         "p2p_bundle_key_id": "kms-key",
     }
     return _settings(tmp_path, p2p_env="prod", **{**execution, **values})
+
+
+# --- the runner must know the exec manifest's time target (A-46) -------------------------
+
+PRE_A46 = {  # the runner-cpu digests imported into Sandboxes before A-46
+    "sha256:4f4c1deb33969065aa534a4bfaefb4061d3d690e5f99f86da0478433befc6f52",
+    "sha256:95285e3553c63bb45c0723cd1bc1eccecb3cf290d7e9130b869dfb295d020803",
+}
+
+
+def test_prod_refuses_a_runner_from_before_the_time_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Such a runner refuses every new manifest (exit 30), which users would read as the
+    paper's experiment failing, after the models were paid for: stop the start instead."""
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    old = "cr.example/p2p-runner@sha256:" + "d" * 64
+    with pytest.raises(main.ConfigError, match=r"P2P_RUNNER_IMAGE .*runner_images.yaml"):
+        main.prod_adapters(_prod(tmp_path, monkeypatch, **PROD_STORAGE, p2p_runner_image=old))
+
+
+def test_in_sandboxes_the_runner_cpu_must_know_the_time_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    settings = _sandboxed(tmp_path, monkeypatch)
+    (settings.config_dir / "runner_images.yaml").write_text("time_target: []\n", encoding="utf-8")
+    with pytest.raises(main.ConfigError, match=r"P2P_RUNNER_CPU_IMAGE .*runner_images.yaml"):
+        main.prod_adapters(settings)
+
+
+def test_no_runner_from_before_the_time_target_is_listed() -> None:
+    import yaml
+
+    data = yaml.safe_load((ROOT / "config" / "runner_images.yaml").read_text(encoding="utf-8"))
+    assert isinstance(data["time_target"], list)
+    assert not set(data["time_target"]) & PRE_A46
 
 
 def test_prod_refuses_unsigned_bundles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -559,7 +611,7 @@ CPU_DIGEST = "sha256:" + "c" * 64
 def _sandboxed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **values: object) -> Settings:
     config = tmp_path / "config"
     if not config.exists():
-        shutil.copytree(ROOT / "config", config)
+        _config(tmp_path)
         image = f"  {CPU_DIGEST}: 11111111-2222-3333-4444-555555555555"
         (config / "sandbox_images.yaml").write_text(f"images:\n{image}\n", encoding="utf-8")
     fields: dict[str, object] = {
