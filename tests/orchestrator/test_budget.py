@@ -71,7 +71,7 @@ def test_the_gpu_policy_loads_with_the_per_run_limits() -> None:
     [
         {"cpu_minutes": 0},
         {"gpu_wait_s": 59},
-        {"gpu_wait_s": 3601},
+        {"gpu_wait_s": 1201},  # the queue allowance
         {"gpu_when_cpu_estimate_over": 0},
         {"gpu_when_cpu_estimate_over": 1.5},
     ],

@@ -290,7 +290,7 @@ reason `NOT_MEASURED`, decided by code.
 | Image | `p2p-provisioner@sha256:…` | `p2p-provisioner@sha256:…` | `p2p-runner@sha256:…` | `p2p-runner-cpu@sha256:…` |
 | Platform / preset | `cpu-d3` / `4vcpu-16gb` | `cpu-d3` / `4vcpu-16gb` | `gpu-l40s-a` / `1gpu-8vcpu-32gb` (fallback `gpu-l40s-d` / `1gpu-16vcpu-96gb`) | `cpu-d3` / `4vcpu-16gb` |
 | Disk | 50Gi | 50Gi | 100Gi | 30Gi |
-| Timeout (platform) | 1h (minimum allowed) | 1h | 1h, or the watchdog + 10 min when longer (A-47: a 60-minute GPU budget) | 1h |
+| Timeout (platform) | 1h (minimum allowed) | 1h | 1h, or 20 min of queue + the watchdog + 5 min when longer (A-47: a 60-minute GPU budget; to verify with S12, `TIMEOUT=90m`) | 1h |
 | Our watchdog | 20 min from submission (provisioner deadline 18 min) | what is left of the provision job's 20 min (same deadline) | `budget_seconds + 300` from the end of the queue | `timeout_s + 300` s from the end of the queue (S12: 218 s from create to start) |
 | Queue cap | none (the watchdog covers it) | none | 20 min (`QUEUE_CAP_S`); with `auto`, what is left of `gpu_wait_s` | 10 min |
 | Subnet | `provision` | `provision` | `exec` | `exec` |
@@ -401,11 +401,16 @@ else stays `CapacityError`, as above:
 `plan.json` (`PlanArtifact`): `cpu` (a Sandboxes exec job, `budget_seconds` at most
 `cpu_minutes × 60`) or `gpu` (the GPU job above, `budget_seconds` at most 3600, the manifest's
 upper bound), with the CPU plan as `cpu_plan`. A GPU target's exec job has `gpu_wait_s` (600 s),
-counted from its first creation and kept in `runs/<run_id>/gpu_window.json`, to be seen
-`RUNNING`. Whatever keeps it from running falls back to the CPU plan: no capacity on either
-platform, still queued at the end of the window, `QuotaExceeded`, a creation that fails
-(`JobBackendError`, e.g. S5's `code=13`), a job that ends `FAILED` before it ran, or the daily
-`cloud_usd` cap refusing it; the kill switch stops the run as usual. Before the fallback every
+counted from its first creation and kept in `runs/<run_id>/gpu_window.json`, to leave the
+platform's queue (PROVISIONING; a re-attached job after a restart counts from its first
+creation too). A job seen out of the queue, pulling its image or running, is kept: its own
+watchdog bounds it, so a slow pull is never read as no GPU. Whatever keeps it from leaving the
+queue falls back to the CPU plan: no capacity on either platform, still queued at the end of
+the window, `QuotaExceeded`, a creation the platform finished unsuccessfully or refused outright
+(`JobCreateFailed`: S5's `code=13`, an invalid argument, not found, permission denied, a failed
+precondition), a job that ends `FAILED` or `CANCELLED` without ever leaving the queue and with no
+results, or the daily `cloud_usd` cap refusing it. An error while polling, or a creation that
+may have made a job, fails the run as before; the kill switch stops it as usual. Before the fallback every
 `p2p-exec-<slug>-*` job is stopped; then `runs/<run_id>/gpu_fallback.json` (`GpuFallback`: the
 reason, the message shown, the attempt) is written once, a `NO_GPU_FALLBACK_CPU` warning is
 emitted (an alert log for a platform error), and the run goes back to PROVISIONING and

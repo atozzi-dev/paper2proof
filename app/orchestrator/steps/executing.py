@@ -607,6 +607,7 @@ class ExecutingStep:
                     gpu=True,
                     on_poll=tail,
                     queue_cap_s=queue_cap_s,
+                    requeue=deadline is not None,
                 )
             except CapacityError:
                 log.info("no GPU capacity", extra={"run_id": ctx.run_id, "platform": where[0]})
@@ -724,11 +725,17 @@ class ExecutingStep:
             reason, wall = await self._exit_info(ctx, attempt)
             if (
                 deadline is not None
-                and outcome.state is JobState.FAILED
+                and outcome.state in (JobState.FAILED, JobState.CANCELLED)
                 and not outcome.ran
                 and reason is None
-            ):  # never seen running and nothing written: the platform failed it (A-47)
-                return await self._fall_back(ctx, FallbackReason.PLATFORM_ERROR, attempt)
+            ):  # never left the queue, nothing written: the platform failed it, or it was
+                # cancelled from the queue (ours, before a restart) (A-47)
+                why = (
+                    FallbackReason.PLATFORM_ERROR
+                    if outcome.state is JobState.FAILED
+                    else FallbackReason.QUEUE_TIMEOUT
+                )
+                return await self._fall_back(ctx, why, attempt)
             preempted = reason is None or (
                 reason == "budget_timeout"
                 and (wall is None or wall < manifest.budget_seconds - PREEMPT_SLACK_S)

@@ -23,10 +23,11 @@ need_cmd "$PY"
 IMAGE="${IMAGE:-pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime@sha256:c8268a92a69bd500f8be0e665b2630ee006dadaf7bfbc24249141b15ff622755}"
 PLATFORM="${PLATFORM:-gpu-l40s-a}"
 PRESET="${PRESET:-1gpu-8vcpu-32gb}"
+TIMEOUT="${TIMEOUT:-1h}"  # A-47: 90m checks that the API takes a GPU hour's job timeout
 NAME="p2p-spike-s12-$(date +%s)"
 PROBE_FILE="$(mktemp)"
 echo "import torch; print('TORCH', torch.__version__, torch.cuda.is_available(), flush=True)" >"$PROBE_FILE"
-ARGS=(--image "$IMAGE" --platform "$PLATFORM" --preset "$PRESET" --disk-size 100Gi --timeout 1h
+ARGS=(--image "$IMAGE" --platform "$PLATFORM" --preset "$PRESET" --disk-size 100Gi --timeout "$TIMEOUT"
       --restart-policy never --container-command python --args /etc/p2p/s12.py
       --inject-file "$PROBE_FILE:/etc/p2p/s12.py")
 [ -n "${SUBNET_ID:-}" ] && ARGS+=(--subnet-id "$SUBNET_ID")

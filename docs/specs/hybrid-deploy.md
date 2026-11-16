@@ -187,9 +187,10 @@ target's estimate, and covers the fallback (cheaper).
 `gpu-*` to Nebius. Smoke jobs stay in Sandboxes on CPU; the Coder writes the script for the
 target (`cuda` when available).
 
-**Fallback.** See execution-contracts §8, "GPU when needed": a GPU job that is not running within
-`gpu_wait_s` (600 s) sends the run back through PROVISIONING and SMOKE_TESTING on the CPU plan,
-and the run's conditions and Proof Bundle say why.
+**Fallback.** See execution-contracts §8, "GPU when needed": a GPU job still in the platform's
+queue after `gpu_wait_s` (600 s, at most 1200: the queue allowance of the job's own timeout)
+sends the run back through PROVISIONING and SMOKE_TESTING on the CPU plan, and the run's
+conditions and Proof Bundle say why. A job already pulling its image or running is kept.
 
 **What a hostile paper can do.** The two plan fields are the Planner's, read from paper text: a
 paper can push its CPU plan to `REDUCED` and so use up its invite's GPU run. That is bounded by

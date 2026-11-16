@@ -15,7 +15,7 @@ from app.execution.fake_backend import FakeJobBackend
 from app.execution.naming import bucket_name, job_name
 from app.models.pricing import load_cloud_prices
 from app.orchestrator.budget import Budget, SpendKind, load_budget_limits
-from app.orchestrator.reaper import Reaper, reaper_rates
+from app.orchestrator.reaper import JOB_GRACE, PLATFORM_TIMEOUT, Reaper, reaper_rates
 from app.storage.artifacts import LocalArtifactStore
 from app.storage.store import Store
 from tests.observability.fakes import Telemetry
@@ -243,7 +243,10 @@ async def test_ledger_gap_is_capped_at_the_platform_timeout(world: World) -> Non
     handle = add_job(world.backend, JobKind.PROVISION, RUN, JobState.CANCELLED, started)
     await world.record(handle, "prov", RUN, started)
     await world.reaper.tick()
-    assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(RATES["prov"])
+    hours = PLATFORM_TIMEOUT.total_seconds() / 3600  # the longest any job may run (A-47)
+    assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(
+        RATES["prov"] * hours
+    )
     assert await world.budget.run_spend(RUN, SpendKind.GPU_MINUTES) == 0
 
 
@@ -279,9 +282,12 @@ async def test_a_vanished_job_is_settled_after_the_platform_timeout(world: World
     handle = JobHandle(name=job_name(JobKind.EXEC, RUN, 1), nebius_id="aijob-gone")
     await world.record(handle, "exec", RUN, started)  # not in the backend: status UNKNOWN
     assert (await world.reaper.tick())["ledger_reconciled"] == 0
-    world.clock.now = started + timedelta(minutes=71)  # platform timeout + grace
+    world.clock.now = started + PLATFORM_TIMEOUT + JOB_GRACE + timedelta(minutes=1)
     assert (await world.reaper.tick())["ledger_reconciled"] == 1
-    assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(RATES["exec"])
+    hours = PLATFORM_TIMEOUT.total_seconds() / 3600
+    assert await world.budget.run_spend(RUN, SpendKind.CLOUD_USD) == pytest.approx(
+        RATES["exec"] * hours
+    )
     record = await world.store.get_job(handle.name)
     assert record is not None
     assert record.status == "CANCELLED"
@@ -592,3 +598,13 @@ async def test_the_reaper_exports_the_age_of_the_oldest_running_job(
     oldest = telemetry.points("p2p_job_oldest_running_seconds")
     assert oldest[(("kind", "exec"),)] == pytest.approx(3000.0)
     assert oldest[(("kind", "prov"),)] == 0
+
+
+def test_the_reaper_expects_the_longest_job_the_platform_may_run() -> None:
+    """A-47: an hour of GPU budget makes a job's own timeout longer than 1 h; the reaper
+    charges and waits up to that, never less."""
+    from app.execution.nebius_backend import platform_timeout
+    from app.orchestrator import reaper
+    from app.orchestrator.steps.executing import EXEC_MARGIN_S, MAX_BUDGET_S
+
+    assert platform_timeout(MAX_BUDGET_S + EXEC_MARGIN_S) <= reaper.PLATFORM_TIMEOUT

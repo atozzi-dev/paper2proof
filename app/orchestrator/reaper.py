@@ -18,6 +18,7 @@ from app.domain.models import StepName
 from app.execution.backend import JobBackend, JobHandle, JobKind, JobState
 from app.execution.job_smoke import SMOKE_PLATFORM, SMOKE_PRESET
 from app.execution.naming import bucket_name
+from app.execution.nebius_backend import platform_timeout
 from app.models.pricing import CloudPrices
 from app.observability import metrics
 from app.orchestrator.budget import Budget, SpendKind
@@ -29,6 +30,7 @@ from app.orchestrator.cost_estimate import (
     PROVISION_PLATFORM,
     PROVISION_PRESET,
 )
+from app.orchestrator.steps.executing import EXEC_MARGIN_S, MAX_BUDGET_S
 from app.storage.store import TERMINAL_STEP_STATUSES, JobRecord, Store
 
 log = logging.getLogger(__name__)
@@ -36,7 +38,8 @@ log = logging.getLogger(__name__)
 INTERVAL_S = 300
 JOB_GRACE = timedelta(seconds=600)  # past the job's own watchdog
 FALLBACK_WATCHDOG = timedelta(minutes=45)  # a job with no `jobs` row (architecture §7)
-PLATFORM_TIMEOUT = timedelta(hours=1)  # the platform kills every job by then (§8)
+# the platform kills every job by then (§8): over 1 h for an hour on the GPU (A-47)
+PLATFORM_TIMEOUT = platform_timeout(MAX_BUDGET_S + EXEC_MARGIN_S)
 BUCKET_MAX_AGE = timedelta(hours=24)
 GATEWAY_IDLE_MINUTES = 30
 GATEWAY_STEPS = frozenset({StepName.PROVISIONING, StepName.SMOKE_TESTING, StepName.EXECUTING})

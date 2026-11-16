@@ -69,6 +69,7 @@ from app.execution.naming import bucket_name, job_name
 from app.execution.nebius_backend import (
     GatewayUnavailable,
     JobBackendError,
+    JobCreateFailed,
     NebiusJobBackend,
     build_nebius_execution,
     check_no_credentials,
@@ -1149,3 +1150,36 @@ def test_the_platform_timeout_outlives_our_watchdog(watchdog_s: int, timeout: ti
     """A 60-minute GPU budget has a 3900 s watchdog: the platform's own timeout (1 h at least,
     and it may count the 20-minute queue) must not cut the job first (A-47)."""
     assert to_sdk_job_spec(spec(watchdog_s=watchdog_s), IDS).timeout == timeout
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        StatusCode.INVALID_ARGUMENT,
+        StatusCode.NOT_FOUND,
+        StatusCode.PERMISSION_DENIED,
+        StatusCode.FAILED_PRECONDITION,
+    ],
+)
+async def test_a_create_refused_outright_is_a_failed_creation(
+    world: World, code: StatusCode
+) -> None:
+    """An unknown preset or platform, a timeout the API won't take, a missing permission: no
+    job exists afterwards, so the GPU target may fall back to its CPU plan (A-47)."""
+    mount_buckets(world)
+    world.jobs.create_error = code
+    world.jobs.create_leaves_job = False
+    with pytest.raises(JobCreateFailed, match=spec().name):
+        await world.backend.submit(spec())
+
+
+@pytest.mark.parametrize("code", [StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXCEEDED])
+async def test_a_create_that_may_have_made_a_job_is_not_a_failed_creation(
+    world: World, code: StatusCode
+) -> None:
+    mount_buckets(world)
+    world.jobs.create_error = code
+    world.jobs.create_leaves_job = False
+    with pytest.raises(Exception) as err:
+        await world.backend.submit(spec())
+    assert not isinstance(err.value, JobCreateFailed)

@@ -174,24 +174,44 @@ design (architecture §8.3).
 must PASS first. With `auto`, runs stay on CPU in Sandboxes unless their CPU plan would be cut;
 those get one L40S for up to 60 minutes, and fall back to their CPU plan when no GPU starts
 within 10 minutes (`docs/specs/hybrid-deploy.md`, "GPU when needed"). Steps, all the human's:
-1. Measure the real runner's pull time with spike S12 (`IMAGE=<registry>/p2p-runner@sha256:...`).
-   If create-to-start is over about 5 minutes, raise `gpu_wait_s` in `config/budgets.yaml`.
+1. Run spike S12 with the real GPU runner and the longest job timeout the control plane sets:
+   `IMAGE=<registry>/p2p-runner@sha256:... TIMEOUT=90m spikes/s12_pull_time.sh`. It shows the
+   pull time and whether the API takes a timeout over 1 h (a 60-minute GPU budget makes the
+   job's own timeout 90 minutes: 20 of queue, 65 of watchdog, 5 of margin). Record both in
+   `docs/spikes/RESULTS.md`. If the timeout is refused, the creation fails outright and every
+   GPU plan over 30 minutes falls back to its CPU plan: lower `gpu_minutes` until it is taken.
+   The window counts only the platform's queue (PROVISIONING); a job pulling its image is
+   kept, and its own watchdog bounds it. Raise `gpu_wait_s` (at most 1200 s) only if jobs wait
+   long in the queue.
 2. In `/etc/p2p/p2p.env` set `P2P_EXEC_BACKEND=auto`, keep everything Sandboxes needs, and set
    `P2P_RUNNER_IMAGE` (GPU runner, by digest), `P2P_SUBNET_EXEC` (the exec subnet of
    `network_sandbox`) and `P2P_GPU_PREEMPTIBLE=false` (on demand). Both runner digests must be in
    `config/runner_images.yaml` ("When the runner changes"): the control plane refuses to start
    otherwise. Build both from A-47 or later: an older runner refuses the GPU's hour of budget
    (it accepted at most 1800 s) and every GPU plan over 30 minutes would fail at its start.
-3. Give GPU runs only to the invites that should have them: `python -m app.admin_cli invite
-   create --gpu N` (GPU runs a day; the default 0 keeps an invite on CPU, the eval's included).
+3. Give GPU runs only to the invites that should have them: `uv run python -m app.admin_cli
+   invite create --gpu N` (GPU runs a day; the default 0 keeps an invite on CPU, the eval's
+   included). An existing invite can't be changed: create a new one.
 4. Update the About page copy (`web/src/pages/About.tsx`: the Execute step, the limits, the "Why
-   only CPU" answer): until `auto` is on it truthfully says CPU only.
-5. Run one paper that needs a GPU end to end (it costs money), then one forced fallback.
+   only CPU" answer) in its own commit, deployed in the same restart that sets `auto`: until
+   then it truthfully says CPU only.
+5. Run one paper that needs a GPU end to end (it costs money). Then force one fallback:
+   while that run's GPU job is still queued, cancel it (`nebius ai job cancel <id>`); the run
+   goes on with its CPU plan and says so next to the verdict.
 
-Rollback: set `P2P_EXEC_BACKEND=sandboxes` and restart. Runs that ran on a GPU stay readable,
-and their Proof Bundles name the runner they ran. A run planned for the GPU and not executed yet
-would then run its GPU plan in a Sandbox, on CPU, within the CPU minutes (likely cut short): let
-in-flight runs finish before switching.
+Rollback to `sandboxes`: drain first. With `sandboxes` the control plane no longer watches Nebius
+exec jobs, so a GPU job still alive would run unwatched until its own timeout.
+1. `uv run python -m app.admin_cli drain on`.
+2. Wait until `uv run python -m app.admin_cli runs` shows no active run and `nebius ai job list
+   --parent-id <project>` shows no `p2p-exec-*` job still running.
+3. Set `P2P_EXEC_BACKEND=sandboxes` and restart; then `drain off`.
+
+Runs that ran on a GPU stay readable. Build their Proof Bundles before the switch: a bundle built
+afterwards names `p2p-runner-cpu` with the GPU digest.
+
+Rolling the code back to before A-47 also needs the schema back: from the A-47 checkout,
+`uv run alembic downgrade 0008` (it drops the invites' GPU quotas and the runs' invite), then
+deploy the older code. `start.sh` runs `alembic upgrade head`, and older code does not know 0009.
 
 A first run before the registry exists can only be PARTIAL, because the image does not come
 from the Nebius registry. That is a preliminary result, enough to apply the network. The final
@@ -394,7 +414,8 @@ Do these steps in order. Each one that changes the cloud or spends money is the 
    (cloud step 4 above), then run spike S14 on the new UUID from the same checkout: its canary
    manifest carries the time target, so a stale import fails it.
 4. On the branch to deploy, commit the new `config/sandbox_images.yaml` entry and the new
-   digests in `config/runner_images.yaml`. Never list a digest built before A-46.
+   digests in `config/runner_images.yaml`. Never list a digest built before A-47 (an A-46
+   runner takes the time target but refuses a GPU budget over 1800 s).
 5. In `/etc/p2p/p2p.env`, update `P2P_RUNNER_CPU_IMAGE` (and `P2P_RUNNER_IMAGE`). Deploy the
    code in the same restart (host step 4).
 6. Run one canary paper end to end.

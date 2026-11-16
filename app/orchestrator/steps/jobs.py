@@ -149,6 +149,7 @@ async def run_job(
     started: datetime | None = None,
     on_poll: Callable[[], Awaitable[None]] | None = None,
     queue_cap_s: float = QUEUE_CAP_S,
+    requeue: bool = False,
 ) -> JobOutcome:
     """Submit (get-by-name first, so a resumed step finds its job) and wait for the job.
     `started` anchors a new job's watchdog when the caller already put a deadline derived from
@@ -174,6 +175,8 @@ async def run_job(
             anchor = existing.deadline - watchdog
         usd_since = gpu_since = now if existing.status in _SETTLED else submitted
         mark = not fixed and existing.status == "SUBMITTED"
+        if requeue and existing.status == "SUBMITTED":  # never left the queue: its cap holds
+            anchor, gpu_since = None, None
     gpu_reserve_s = (
         float(spec.watchdog_s)
         if anchor is None
@@ -239,7 +242,7 @@ async def run_job(
     was_blind = False  # a poll failed (only read while the job was never seen)
     start_hidden = False  # first seen only after an outage: when it began is unknown
     last_queued: datetime | None = None
-    ran = False
+    ran = existing is not None and existing.status == JOB_ACTIVE  # left the queue before
 
     async def observe() -> tuple[JobState, datetime]:
         """One poll; GPU time starts at the last poll that still saw the job queued."""
@@ -305,6 +308,8 @@ async def run_job(
             elif anchor is None and seen - submitted >= queue_cap + watchdog:
                 timed_out = True  # blind all along: the latest it could legitimately run
             if cancelled or timed_out or queue_timed_out:
+                if queue_timed_out:  # CANCELLING reads RUNNING: never mark our cancel a start
+                    mark = False
                 try:
                     await ctx.jobs.cancel(handle)
                     unconfirmed = queue_timed_out or blind

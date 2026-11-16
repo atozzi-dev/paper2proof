@@ -1283,3 +1283,108 @@ async def test_a_gpu_plan_without_a_cpu_plan_never_falls_back(store: Store, tmp_
     assert result.next is StepName.ANALYZING  # INCONCLUSIVE/CAPACITY, as before A-47
     with pytest.raises(FileNotFoundError):
         artifacts.get_json(FALLBACK_KEY)
+
+
+async def _recorded_gpu_job(store: Store, backend: ScriptedBackend) -> str:
+    """Attempt 1's GPU job, created and recorded before a restart (it never left the queue)."""
+    spec = _spec_named(f"p2p-exec-{SLUG}-1")
+    handle = await backend.submit(spec)
+    await store.record_job(
+        RUN, "exec", spec.name, handle.nebius_id, "p2p-run-x", deadline=NOW + timedelta(hours=2),
+        at=NOW, platform="gpu-l40s-a", preset="1gpu-8vcpu-32gb",
+    )  # fmt: skip
+    return spec.name
+
+
+def _spec_named(name: str) -> JobSpec:
+    return JobSpec(
+        name=name, kind=JobKind.EXEC, image_digest_ref=DIGEST.format("p2p-runner"),
+        platform="gpu-l40s-a", preset="1gpu-8vcpu-32gb", disk_gib=100,
+        subnet_id="vpcsubnet-exec", volumes=[], inject_files={}, env={}, preemptible=False,
+        watchdog_s=2700,
+    )  # fmt: skip
+
+
+async def test_a_queued_gpu_job_resumed_after_a_restart_still_gets_only_its_window(
+    store: Store, tmp_path: Path
+) -> None:
+    """Final review, Critical 1: re-attached by name, the queued job still gets only what is
+    left of the window counted from its first creation, then the run falls back."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    artifacts.put_json(WINDOW_KEY, {"started_at": NOW.isoformat()})
+    backend = ScriptedBackend({1: [JobState.PENDING]})
+    await _recorded_gpu_job(store, backend)
+    clock = FakeClock()
+    clock.t = 300.0  # restarted half-way through the window
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.QUEUE_TIMEOUT)
+    assert backend.created == 1  # re-attached: no second job
+    assert clock.t < ctx.limits.per_run.gpu_wait_s + 120
+
+
+async def test_a_gpu_job_cancelled_from_the_queue_before_a_restart_falls_back(
+    store: Store, tmp_path: Path
+) -> None:
+    """Final review, Important 3: the queue-timeout cancel happened, then a crash before the
+    fallback was recorded (or the platform cancelled it): never ran, so the CPU plan runs."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    artifacts.put_json(WINDOW_KEY, {"started_at": NOW.isoformat()})
+    backend = ScriptedBackend({1: [JobState.PENDING]})
+    name = await _recorded_gpu_job(store, backend)
+    backend.cancelled.append(name)
+    await store.update_job(name, "CANCELLED", gpu_seconds=0.0, cost_usd=0.0)
+    clock = FakeClock()
+    clock.t = 700.0  # after the window
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    await _fell_back_with(store, result, artifacts, FallbackReason.QUEUE_TIMEOUT)
+
+
+async def test_a_gpu_job_that_ran_before_a_restart_and_then_failed_is_its_result(
+    store: Store, tmp_path: Path
+) -> None:
+    """Final review, Important 4: its row says it left the queue before the restart; failing
+    without results.json afterwards is the experiment's outcome, not a platform failure."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    artifacts.put_json(WINDOW_KEY, {"started_at": NOW.isoformat()})
+    backend = ScriptedBackend({1: [JobState.FAILED]})
+    name = await _recorded_gpu_job(store, backend)
+    await store.mark_job_active(name, deadline=NOW + timedelta(hours=1))
+    clock = FakeClock()
+    clock.t = 1500.0
+    result = await _auto_step(artifacts, storage, clock).run(_with(ctx, backend))
+    assert result.next is StepName.ANALYZING
+    assert result.output_ref is not None
+    assert artifacts.get_json(result.output_ref)["exit_reason"] == "experiment_error"
+    with pytest.raises(FileNotFoundError):
+        artifacts.get_json(FALLBACK_KEY)
+
+
+class CancelsSlowly(ScriptedBackend):
+    """After our cancel the job reports RUNNING (Nebius CANCELLING) once, then CANCELLED."""
+
+    async def status(self, handle: JobHandle) -> JobState:
+        if handle.name in self.cancelled:
+            self.after_cancel = getattr(self, "after_cancel", 0) + 1
+            return JobState.RUNNING if self.after_cancel == 1 else JobState.CANCELLED
+        return await super().status(handle)
+
+
+async def test_our_own_cancel_of_a_queued_gpu_job_never_marks_it_as_started(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CANCELLING maps to RUNNING: the row must not say the job left the queue, or a restart
+    would take the cancelled job for one that ran."""
+    ctx, artifacts, storage = await _gpu_target(store, tmp_path)
+    marked: list[str] = []
+    original = store.mark_job_active
+
+    async def spy(name: str, **kwargs: Any) -> None:
+        marked.append(name)
+        await original(name, **kwargs)
+
+    monkeypatch.setattr(store, "mark_job_active", spy)
+    result = await _auto_step(artifacts, storage, FakeClock()).run(
+        _with(ctx, CancelsSlowly({1: [JobState.PENDING]}))
+    )
+    await _fell_back_with(store, result, artifacts, FallbackReason.QUEUE_TIMEOUT)
+    assert marked == []

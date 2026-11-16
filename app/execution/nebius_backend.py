@@ -86,6 +86,11 @@ class JobBackendError(RuntimeError):
     """A Nebius request failed in a way the orchestrator can't recover by retrying."""
 
 
+# create errors after which no job exists: an unknown platform or preset, a spec the API won't
+# take (e.g. its timeout), a missing permission (A-47); UNAVAILABLE and the like stay uncertain
+_NO_JOB = frozenset({"INVALID_ARGUMENT", "NOT_FOUND", "PERMISSION_DENIED", "FAILED_PRECONDITION"})
+
+
 class JobCreateFailed(JobBackendError):
     """The platform finished the create operation unsuccessfully (S5, 2026-10-27: a bare
     code=13): the job never ran. Anything less certain stays a JobBackendError."""
@@ -407,6 +412,8 @@ class NebiusJobBackend:
             if _code(err) == RESOURCE_EXHAUSTED:
                 await self._discard_refused(spec, "")
                 raise _refusal(spec, err.status) from None
+            if _code(err) in _NO_JOB:  # refused outright: no job exists afterwards (A-47)
+                raise JobCreateFailed(f"{spec.name}: job creation refused ({_code(err)})") from err
             if _code(err) != ALREADY_EXISTS:
                 raise
             existing = await self._job_by_name(spec.name)  # a concurrent submit won
