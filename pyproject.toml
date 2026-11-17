@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.14",
+    "anyio>=4.4",
     "boto3>=1.35,<2",
     "cryptography>=43",
     "defusedxml>=0.7.1",

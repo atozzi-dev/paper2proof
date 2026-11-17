@@ -1,9 +1,11 @@
 """Persistence API used by the orchestrator, API and reaper. One writer process (the endpoint)."""
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
+import anyio
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import Update, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -164,8 +166,16 @@ class Store:
         self.engine = engine
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
 
-    def _session(self) -> AsyncSession:
-        return self._sessions()
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[AsyncSession]:
+        """A session no cancellation can cut off halfway. Starlette ends an SSE stream whose
+        client went away with an anyio cancel scope, and that scope cancels every await inside
+        it, the pool's own cleanup included: the connection was then left dead in the pool
+        ("no active connection" on the next request) or its close hung. A store call is short
+        (busy_timeout bounds a write at 5 s), so the cancellation lands right after it."""
+        with anyio.CancelScope(shield=True):
+            async with self._sessions() as session:
+                yield session
 
     # --- runs ------------------------------------------------------------------------
 

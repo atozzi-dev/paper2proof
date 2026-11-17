@@ -390,3 +390,18 @@ async def test_two_tries_of_one_run_racing_take_one_gpu_run(store: Store) -> Non
     assert all(got)
     [invite] = [i for i in await store.list_invites() if i.code_hash == GPU_INVITE]
     assert invite.gpu_used_today == 1
+
+
+async def test_a_read_cut_off_by_a_cancel_scope_leaves_the_pool_usable(store: Store) -> None:
+    """Starlette stops an SSE stream with an anyio cancel scope when the client goes away, and
+    that scope cancels every await inside it, the pool's own cleanup included. A cut-off read
+    must neither leave a dead connection in the pool ("no active connection" on the next
+    request) nor hang."""
+    import anyio
+
+    await store.create_run(RUN, "2106.09685", created_by=None, claim_hint=None, budget={})
+    for i in range(200):
+        with anyio.move_on_after((i % 40) * 0.0001):
+            await store.events_after(RUN, 0)
+        with anyio.fail_after(3):
+            assert await store.get_run(RUN) is not None
