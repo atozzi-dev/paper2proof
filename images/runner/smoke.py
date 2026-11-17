@@ -186,6 +186,8 @@ def run(
 
     def write_result(result: dict[str, Any]) -> int:
         result["nonce"] = manifest["nonce"]
+        if "smoke_folder" in manifest:  # A-50: the control plane checks where the subset went
+            result["data_folder"] = manifest["smoke_folder"]
         out_dir.mkdir(parents=True, exist_ok=True)
         tmp = out_dir / "result.json.tmp"
         tmp.write_text(

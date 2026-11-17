@@ -539,6 +539,29 @@ _BUILTIN_TYPES = {
 _NEWER = "it was removed or renamed in a newer release than you may know"
 
 
+# PyTorch's warning for a loss whose target and input differ in shape (F.mse_loss and the
+# like): they broadcast to a matrix and the loss is wrong while the run passes. NAU
+# (2001.05016, 2026-10-30): target [500] against input [500, 1], success rates of 0.
+_SHAPE = r"\[[0-9, ]{0,80}\]"
+_BROADCAST = re.compile(
+    rf"Using a target size \(torch\.Size\(({_SHAPE})\)\) that is different to the input "
+    rf"size \(torch\.Size\(({_SHAPE})\)\)"
+)
+
+
+def loss_broadcast(stderr: str) -> str | None:
+    """A note when a smoke run's stderr has PyTorch's broadcasting warning for a loss: only the
+    two shapes (digits, commas) reach it. Pure."""
+    match = _BROADCAST.search(stderr)
+    if match is None:
+        return None
+    return (
+        f"warning: a loss got a target of size {match.group(1)} and an input of size "
+        f"{match.group(2)}: PyTorch broadcasts them and the loss is wrong, even when the run "
+        "passes. Give both the same shape (for example output.squeeze(-1)) and run_smoke again"
+    )
+
+
 def error_hints(files: dict[str, bytes], stderr: str) -> list[str]:
     """A note when the last error names something the installed library lacks: Super VL read
     "unexpected keyword argument 'multi_class'" as a wrong value and changed it 4 times before

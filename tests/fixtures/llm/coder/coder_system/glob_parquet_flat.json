@@ -4,7 +4,7 @@
    {
     "id": "call_1",
     "name": "write_file",
-    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"import glob, os\\nfiles = glob.glob(os.path.join(os.environ['P2P_DATA_DIR'], 'uoft-cs__cifar10', '*.parquet'))\\n\"}"
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"import glob, os\\nfiles = glob.glob(os.path.join(os.environ['P2P_DATA_DIR'], 'uoft-cs__cifar10', '*.parquet'))\\nimport argparse, json, os\\nc = argparse.ArgumentParser(); c.add_argument('--seed', type=int); c.add_argument('--out')\\nc = c.parse_known_args()[0]\\njson.dump({'seed': c.seed}, open(os.path.join(c.out, 'metrics.json'), 'w'))\\n\"}"
    }
   ]
  },
@@ -22,7 +22,7 @@
    {
     "id": "call_3",
     "name": "write_file",
-    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"import os\\nfrom pathlib import Path\\nfiles = sorted(Path(os.environ['P2P_DATA_DIR'], 'uoft-cs__cifar10').rglob('*.parquet'))\\n\"}"
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"import os\\nfrom pathlib import Path\\nfiles = sorted(Path(os.environ['P2P_DATA_DIR'], 'uoft-cs__cifar10').rglob('*.parquet'))\\nimport argparse, json, os\\nc = argparse.ArgumentParser(); c.add_argument('--seed', type=int); c.add_argument('--out')\\nc = c.parse_known_args()[0]\\njson.dump({'seed': c.seed}, open(os.path.join(c.out, 'metrics.json'), 'w'))\\n\"}"
    }
   ]
  },

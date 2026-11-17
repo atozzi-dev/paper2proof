@@ -4,7 +4,7 @@
    {
     "id": "call_1",
     "name": "write_file",
-    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('ok')\\n\"}"
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('ok')\\nimport argparse, json, os\\nc = argparse.ArgumentParser(); c.add_argument('--seed', type=int); c.add_argument('--out')\\nc = c.parse_known_args()[0]\\njson.dump({'seed': c.seed}, open(os.path.join(c.out, 'metrics.json'), 'w'))\\n\"}"
    }
   ]
  },
@@ -22,7 +22,7 @@
    {
     "id": "call_3",
     "name": "write_file",
-    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('changed')\\n\"}"
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"print('changed')\\nimport argparse, json, os\\nc = argparse.ArgumentParser(); c.add_argument('--seed', type=int); c.add_argument('--out')\\nc = c.parse_known_args()[0]\\njson.dump({'seed': c.seed}, open(os.path.join(c.out, 'metrics.json'), 'w'))\\n\"}"
    }
   ]
  },

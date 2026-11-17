@@ -20,6 +20,8 @@ from datetime import datetime
 from typing import Any
 
 from app.domain.contracts import ARCHIVE_NAME_PATTERN, ArchiveDigests
+from app.domain.errors import P2PError
+from app.domain.models import ErrorCode
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -46,7 +48,8 @@ SMOKE_QUEUE_CAP_S = 600  # waiting for CPU capacity: the Coder loop waits on eve
 MAX_RESULT_BYTES = 256 * 1024
 
 
-def _parse(raw: bytes, nonce: str) -> SmokeResult:
+def _parse(raw: bytes, nonce: str) -> tuple[SmokeResult, object]:
+    """The result, and the folder the runner says it extracted the subset to (A-50)."""
     try:
         data: Any = json.loads(raw)
     except (ValueError, RecursionError):
@@ -54,7 +57,7 @@ def _parse(raw: bytes, nonce: str) -> SmokeResult:
     if not isinstance(data, dict) or data.get("nonce") != nonce:
         raise SmokeUnavailable("the smoke result does not belong to this job")
     try:
-        return parse_smoke_result(data)
+        return parse_smoke_result(data), data.get("data_folder")
     except SmokeContractError as err:
         raise SmokeUnavailable(f"the smoke job left an invalid result: {err}") from None
 
@@ -200,7 +203,15 @@ class JobSmokeExecutor:
             raw = None
         if not raw:
             raise SmokeUnavailable("the smoke job succeeded without a result")
-        result = await ctx.run_cpu(_parse, raw, nonce)
+        result, folder = await ctx.run_cpu(_parse, raw, nonce)
+        if self._folder is not None and folder != self._folder:
+            # A runner from before A-50 put the subset in data/smoke, where no script looks:
+            # every smoke run would fail the same way, so the run stops here (infra review).
+            raise P2PError(
+                ErrorCode.INTERNAL_ERROR,
+                "the runner-cpu image predates the smoke data folder (A-50): deploy its new "
+                "digest with this control plane",
+            )
         if result.duration_s == 0.0:
             result = result.model_copy(update={"duration_s": time.monotonic() - started})
         return result

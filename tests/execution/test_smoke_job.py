@@ -51,7 +51,9 @@ class Clock:
         self.t += seconds
 
 
-def _writes_result(storage: FakeRunStorage, echo: bool = True, **result: Any) -> Any:
+def _writes_result(
+    storage: FakeRunStorage, echo: bool = True, old_runner: bool = False, **result: Any
+) -> Any:
     def on_submit(spec: JobSpec) -> None:
         manifest = json.loads(spec.inject_files["/etc/p2p/smoke.json"])
         iteration = manifest["iteration"]
@@ -59,6 +61,8 @@ def _writes_result(storage: FakeRunStorage, echo: bool = True, **result: Any) ->
                 "metrics": {"acc": 0.5}, **result}  # fmt: skip
         if echo:
             body["nonce"] = manifest["nonce"]
+        if "smoke_folder" in manifest and not old_runner:  # A-50: where the subset went
+            body["data_folder"] = manifest["smoke_folder"]
         storage.objects[(RUN, f"smoke/{iteration}/result.json")] = json.dumps(body).encode()
 
     return on_submit
@@ -449,3 +453,28 @@ async def test_an_invalid_folder_is_refused(store: Store, folder: str) -> None:
             cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
             smoke_folder=folder,
         )
+
+
+async def test_a_runner_from_before_the_folder_stops_the_run(store: Store) -> None:
+    """Infra review of A-50: an old runner-cpu image ignores smoke_folder and extracts the
+    subset to data/smoke, where no script looks; every smoke run would fail the same way."""
+    from app.domain.errors import P2PError
+    from app.domain.models import ErrorCode
+
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_result(storage, old_runner=True))
+    ctx = await ctx_at(store, StepName.SMOKE_TESTING, previous=[(StepName.PROVISIONING, "p")])
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    smoke = JobSmokeExecutor(
+        ctx,
+        archives=ARCHIVES,
+        storage=storage,
+        config=CFG,
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+        smoke_folder="ylecun__mnist",
+    )
+    env = await smoke.prepare(RUN, {"train.py": b"x"})
+    with pytest.raises(P2PError) as err:
+        await smoke.run(env, ARGV, {}, 60)
+    assert err.value.code is ErrorCode.INTERNAL_ERROR
+    assert "runner-cpu image" in str(err.value)

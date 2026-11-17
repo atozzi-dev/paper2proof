@@ -278,9 +278,37 @@ def test_without_a_folder_the_subset_stays_where_it_was(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "folder", ["..", "../etc", "a/b", "", ".hidden", "x" * 300, 7, None, "a\nb"]
-)
+    "folder",
+    [
+        "..", ".", "../etc", "a/b", "a\\b", "", ".hidden", "x" * 202, 7, None, "a\nb", "abc\n",
+        # non-ASCII lookalikes: an e with an accent, an Arabic-Indic digit, the Kelvin sign,
+        # a fullwidth m and a zero-width space (built with chr: the source stays ASCII)
+        "caf" + chr(0xE9), chr(0x661), chr(0x212A), chr(0xFF4D) + "nist", "mnist" + chr(0x200B),
+    ],
+)  # fmt: skip
 def test_an_invalid_smoke_folder_is_a_contract_error(tmp_path: Path, folder: object) -> None:
+    calls: list[Path] = []
     path, mnt = _smoke_data(tmp_path, smoke_folder=folder)
-    code = smoke.run(path, mnt=mnt, work=tmp_path / "work", extract=lambda a, d, s: None)
+    code = smoke.run(path, mnt=mnt, work=tmp_path / "work", extract=lambda a, d, s: calls.append(d))
     assert code == 30
+    assert calls == []  # refused before any extraction
+    assert not (mnt / "smoke" / "3" / "result.json").exists()
+
+
+def test_the_longest_folder_name_is_accepted(tmp_path: Path) -> None:
+    path, mnt = _smoke_data(tmp_path, smoke_folder="x" * 201)
+    assert _run(path, mnt, tmp_path)["exit_code"] == 0
+
+
+def test_the_runner_reports_where_the_subset_went(tmp_path: Path) -> None:
+    """The control plane stops the run when a runner from before A-50 ignored the folder."""
+    path, mnt = _smoke_data(tmp_path, smoke_folder="ylecun__mnist")
+    assert _run(path, mnt, tmp_path)["data_folder"] == "ylecun__mnist"
+    path, mnt = _smoke_data(tmp_path / "old")
+    assert "data_folder" not in _run(path, mnt, tmp_path / "old")
+
+
+def test_the_folder_pattern_is_the_control_plane_s() -> None:
+    from app.domain.contracts import ARCHIVE_NAME_PATTERN
+
+    assert smoke.FOLDER.pattern == ARCHIVE_NAME_PATTERN

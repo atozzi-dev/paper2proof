@@ -4,7 +4,7 @@
    {
     "id": "call_1",
     "name": "write_file",
-    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"from sklearn.datasets import make_classification\\nX, y = make_classification(n_samples=2000, n_features=20, n_informative=6,\\n    n_redundant=2, n_clusters_per_class=1, flip_y=0.05, class_sep=1.0, random_state=0)\\n\"}"
+    "arguments": "{\"path\": \"workspace/train.py\", \"content\": \"from sklearn.datasets import make_classification\\nX, y = make_classification(n_samples=2000, n_features=20, n_informative=6,\\n    n_redundant=2, n_clusters_per_class=1, flip_y=0.05, class_sep=1.0, random_state=0)\\nimport argparse, json, os\\nc = argparse.ArgumentParser(); c.add_argument('--seed', type=int); c.add_argument('--out')\\nc = c.parse_known_args()[0]\\njson.dump({'seed': c.seed}, open(os.path.join(c.out, 'metrics.json'), 'w'))\\n\"}"
    }
   ]
  },

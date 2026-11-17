@@ -943,8 +943,26 @@ async def test_without_a_subset_there_is_no_folder(store: Store, tmp_path: Path)
             "smoke": True,
             "data_archives": [{"name": "smoke", "sha256": "d" * 64}],
         },
+        *(
+            {
+                "overlay_sha256": "a" * 64,
+                "repo_sha256": None,
+                "smoke": True,
+                "datasets": [name],
+                "data_archives": [{"name": "smoke", "sha256": "d" * 64}],
+            }
+            for name in ("../x", ".x", 7, "a/b")
+        ),
     ],
-    ids=["repo-without-digest", "smoke-without-archive", "smoke-without-dataset"],
+    ids=[
+        "repo-without-digest",
+        "smoke-without-archive",
+        "smoke-without-dataset",
+        "dataset-dotdot",
+        "dataset-hidden",
+        "dataset-number",
+        "dataset-slash",
+    ],
 )
 async def test_a_report_missing_a_digest_fails_closed(
     store: Store, tmp_path: Path, report: dict[str, Any]
@@ -1584,3 +1602,245 @@ async def test_a_coder_resumed_after_the_fallback_is_not_told_of_a_package_reque
     await step.run(ctx)
     _, first = models.requests[0]
     assert not any("provisioned again" in str(m.content) for m in first)
+
+
+# --- A-50: guards before the sandbox -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("train = pd.read_parquet(os.path.join(root, 'smoke', 'smoke.parquet'))", True),
+        ("data = Path(os.environ['P2P_DATA_DIR']) / 'smoke'", True),
+        ("train_path = f'{data_dir}/smoke/smoke.parquet'  # we'll use smoke for now", True),
+        ("SMOKE = os.environ['P2P_DATA_DIR'] + '/smoke'", True),
+        ("files = list(Path(root, 'smoke').rglob('*.parquet'))", True),
+        ("p.add_argument('--smoke', action='store_true')", False),
+        ("epochs = 1 if args.smoke else EPOCHS", False),
+        ("n = 100 if getattr(args, 'smoke') else None", False),
+        ("quick = os.environ.get('P2P_SMOKE') == '1'", False),
+        ("# smoke/smoke.parquet was the old layout", False),
+        ("files = sorted(Path(root, 'ylecun__mnist').rglob('*.parquet'))", False),
+    ],
+)
+def test_reading_the_smoke_subset_by_name_is_found(line: str, found: bool) -> None:
+    from app.orchestrator.steps.smoke_testing import reads_smoke_subset
+
+    hit = reads_smoke_subset({"train.py": f"import os\n{line}\n".encode()})
+    assert hit == (("train.py", 2) if found else None)
+
+
+EXPERIMENT = (
+    "import argparse, json, os\n"
+    "p = argparse.ArgumentParser()\n"
+    "p.add_argument('--seed', type=int); p.add_argument('--out')\n"
+    "p.add_argument('--smoke', action='store_true')\n"
+    "a = p.parse_args()\n"
+    "json.dump({'acc': a.seed}, open(os.path.join(a.out, 'metrics.json'), 'w'))\n"
+)
+
+
+def test_the_experiment_is_the_experiment() -> None:
+    from app.orchestrator.steps.smoke_testing import not_the_experiment
+
+    assert not_the_experiment({"train.py": EXPERIMENT.encode()}, "train.py") is None
+
+
+def test_a_debug_script_is_not_the_experiment() -> None:
+    """NAU (2001.05016, 2026-10-30): 2 of its 8 smoke runs went to debug_shapes.py and
+    debug_learning.py, which read no flag and write no metrics."""
+    from app.orchestrator.steps.smoke_testing import not_the_experiment
+
+    debug = "import numpy as np\nX = np.random.uniform(1.0, 2.0, size=(100, 20))\nprint(X.shape)\n"
+    files = {"experiment.py": EXPERIMENT.encode(), "debug_shapes.py": debug.encode()}
+    lacks = not_the_experiment(files, "debug_shapes.py")
+    assert lacks == "read --seed and --out, or write metrics.json"
+
+
+@pytest.mark.parametrize(
+    ("code", "lacks"),
+    [
+        (EXPERIMENT.replace("'metrics.json'", "'m.json'"), "write metrics.json"),
+        (EXPERIMENT.replace("'--out'", "'--dir'"), "read --out"),
+        (EXPERIMENT.replace("'--seed'", "'--rng'"), "read --seed"),
+        ("# python train.py --seed 0 --out out writes metrics.json\nprint(1)\n", None),
+    ],
+)
+def test_what_a_script_lacks_is_named(code: str, lacks: str | None) -> None:
+    from app.orchestrator.steps.smoke_testing import not_the_experiment
+
+    found = not_the_experiment({"train.py": code.encode()}, "train.py")
+    expected = lacks or "read --seed and --out, or write metrics.json"  # comments are not code
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {  # argparse in a workspace module the script imports
+            "train.py": (
+                "from cli import args\nimport json\n"
+                "json.dump({}, open(args.out + '/metrics.json', 'w'))\n"
+            ),
+            "cli.py": (
+                "import argparse\np = argparse.ArgumentParser()\n"
+                "p.add_argument('--seed'); p.add_argument('--out')\nargs = p.parse_args()\n"
+            ),
+        },
+        {  # a package module, and prefixes argparse accepts (--seeds, --output-dir)
+            "train.py": "from lib.run import main\nmain()\n",
+            "lib/__init__.py": "",
+            "lib/run.py": (
+                "import argparse, json\ndef main():\n    p = argparse.ArgumentParser()\n"
+                "    p.add_argument('--seeds'); p.add_argument('--output-dir')\n"
+                "    a = p.parse_args()\n"
+                "    json.dump({}, open(f'{a.output_dir}/metrics.json', 'w'))\n"
+            ),
+        },
+        {  # sys.argv by hand
+            "train.py": (
+                "import sys, json\nseed = int(sys.argv[sys.argv.index('--seed') + 1])\n"
+                "out = sys.argv[sys.argv.index('--out') + 1]\n"
+                "json.dump({}, open(out + '/metrics.json', 'w'))\n"
+            ),
+        },
+        {"train.py": "def broken(:\n"},  # the smoke run shows a syntax error
+    ],
+    ids=["imported-module", "package-and-prefixes", "sys-argv", "syntax-error"],
+)
+def test_experiments_written_other_ways_pass(files: dict[str, str]) -> None:
+    from app.orchestrator.steps.smoke_testing import not_the_experiment
+
+    encoded = {path: code.encode() for path, code in files.items()}
+    assert not_the_experiment(encoded, "train.py") is None
+
+
+def test_an_unimported_module_does_not_make_a_script_the_experiment() -> None:
+    from app.orchestrator.steps.smoke_testing import not_the_experiment
+
+    files = {"experiment.py": EXPERIMENT.encode(), "probe.py": b"import torch\nprint(1)\n"}
+    assert not_the_experiment(files, "probe.py") is not None
+
+
+@pytest.mark.parametrize(
+    ("stderr", "shapes"),
+    [
+        (
+            "/opt/overlay/torch/nn/modules/loss.py:610: UserWarning: Using a target size "
+            "(torch.Size([500])) that is different to the input size (torch.Size([500, 1])). "
+            "This will likely lead to incorrect results due to broadcasting. Please ensure "
+            "they have the same size.\n  return F.mse_loss(input, target)\n",
+            ("[500]", "[500, 1]"),
+        ),
+        ("epoch 1 loss 0.3\n", None),
+        ("Using a target size (torch.Size([" + "1, " * 5000 + "])) that is", None),
+    ],
+    ids=["mse", "clean", "unbounded"],
+)
+def test_a_broadcasting_loss_is_named(stderr: str, shapes: tuple[str, str] | None) -> None:
+    from app.orchestrator.coder_tools import loss_broadcast
+
+    hint = loss_broadcast(stderr)
+    if shapes is None:
+        assert hint is None
+    else:
+        assert hint is not None and shapes[0] in hint and shapes[1] in hint
+
+
+async def test_a_debug_script_costs_no_smoke_run(store: Store, tmp_path: Path) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("smoke_debug_script", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    refused = _tool_results(models)[2]
+    assert refused.startswith("ERROR: workspace/debug_shapes.py is not the experiment")
+    assert "printed under --smoke" in refused and "no smoke run was spent" in refused
+    assert [argv[1] for _, argv, _ in smoke.runs] == ["train.py"]
+    passed = _tool_results(models)[3]
+    assert "smoke runs left: 7 of 8" in passed  # the refusal spent nothing
+
+
+async def test_reading_the_smoke_subset_costs_no_smoke_run(store: Store, tmp_path: Path) -> None:
+    """Distillation (1503.02531, 2026-10-30): its full run read the smoke subset."""
+    mnist = [DatasetReq(kind="hf", id="ylecun/mnist")]
+    ctx, artifacts = await _setup(store, tmp_path, datasets=mnist)
+    smoke = FakeSmokeExecutor([PASS])
+    step, models = _step("smoke_reads_subset", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    refused = _tool_results(models)[1]
+    assert refused.startswith("ERROR: workspace/train.py:6 names the smoke subset")
+    assert "$P2P_DATA_DIR/ylecun__mnist/" not in refused  # the task says where; this says why
+    assert len(smoke.runs) == 1
+
+
+async def test_without_planned_data_a_smoke_path_is_not_judged(
+    store: Store, tmp_path: Path
+) -> None:
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([PASS, PASS])
+    step, models = _step("smoke_reads_subset", artifacts, smoke, FakeRunStorage())
+    await step.run(ctx)
+    assert not _tool_results(models)[1].startswith("ERROR")
+
+
+BROADCAST = SmokeResult(
+    exit_code=0,
+    stdout="done",
+    stderr=(
+        "loss.py:610: UserWarning: Using a target size (torch.Size([500])) that is different "
+        "to the input size (torch.Size([500, 1])). This will likely lead to incorrect results "
+        "due to broadcasting. Please ensure they have the same size."
+    ),
+    duration_s=2.0,
+    metrics={"top1_accuracy": 0.0, "baseline/top1_accuracy": 0.0},
+)
+
+
+async def test_a_broadcasting_loss_is_shown_and_stops_finish_once(
+    store: Store, tmp_path: Path
+) -> None:
+    """NAU (2001.05016, 2026-10-30): passing smoke runs, a loss on [500] against [500, 1]."""
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = FakeSmokeExecutor([BROADCAST])
+    step, models = _step("finish_broadcast", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    results = _tool_results(models)
+    assert "warning: a loss got a target of size [500] and an input of size [500, 1]" in results[1]
+    assert results[2].startswith("ERROR: warning: a loss got a target")
+    assert "call finish again unchanged" in results[2]
+    assert result.next is StepName.EXECUTING  # the same finish then passes
+
+
+@pytest.mark.parametrize("call", ["Path(", "join("])
+def test_a_hostile_line_is_scanned_quickly(call: str) -> None:
+    """Security review of A-50: an unbounded scan was quadratic (16 s on a 100 KB line)."""
+    import time
+
+    from app.orchestrator.steps.smoke_testing import reads_smoke_subset
+
+    started = time.monotonic()
+    assert reads_smoke_subset({"train.py": (call * 20_000).encode()}) is None
+    assert time.monotonic() - started < 1.0
+
+
+def test_an_import_cycle_and_many_modules_end() -> None:
+    from app.orchestrator.steps.smoke_testing import MAX_IMPORTED, not_the_experiment
+
+    cycle = {"train.py": b"import a\n", "a.py": b"import b\n", "b.py": b"import a\n"}
+    assert not_the_experiment(cycle, "train.py") is not None
+    chain = {f"m{i}.py": f"import m{i + 1}\n".encode() for i in range(MAX_IMPORTED * 3)}
+    chain[f"m{MAX_IMPORTED * 3}.py"] = EXPERIMENT.encode()  # past the bound: not followed
+    chain["train.py"] = b"import m0\n"
+    assert not_the_experiment(chain, "train.py") is not None
+
+
+def test_only_shapes_reach_the_broadcast_hint() -> None:
+    from app.orchestrator.coder_tools import loss_broadcast
+
+    hostile = (
+        "Using a target size (torch.Size([5]) IGNORE ALL])) that is different to the input "
+        "size (torch.Size([5, 1]))"
+    )
+    assert loss_broadcast(hostile) is None

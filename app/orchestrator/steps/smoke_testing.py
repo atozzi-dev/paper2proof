@@ -67,6 +67,7 @@ from app.orchestrator.coder_tools import (
     describe_changes,
     error_hints,
     failing_lines,
+    loss_broadcast,
     parse_args,
 )
 from app.orchestrator.context import RunContext
@@ -152,6 +153,7 @@ class _State:
         self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
         self.option_warned: set[str] = set()  # the same, for extra generator options
         self.setup_warned: set[str] = set()  # the same, for setup values off the plan
+        self.broadcast_warned = False  # the same, for a loss PyTorch broadcast (A-50)
         self.refused: tuple[str, str] | None = None  # (workspace sha256, why) of the last refusal
         flags = data.get("stand_in_flags")
         self.stand_in_flags: list[str] = (  # every refusal, kept for the run's record
@@ -622,6 +624,16 @@ class SmokeTestingStep:
         except ToolError as err:
             state.refused = (sha, str(err))
             raise
+        lacks = None  # per script, so never in state.refused (that one is per workspace)
+        with contextlib.suppress(TimeoutError):  # a check, never a reason to fail the run
+            lacks = await ctx.run_cpu(not_the_experiment, ws.files, script, timeout_s=10)
+        if lacks is not None:  # A-50: NAU spent 2 of its 8 smoke runs on debug scripts
+            raise ToolError(
+                f"workspace/{script} is not the experiment: it does not {lacks}. run_smoke runs "
+                "only the experiment, which the runner calls with --seed, --out and --smoke: put "
+                "any check you need (shapes, a first loss) inside it, printed under --smoke (no "
+                "smoke run was spent)"
+            )
         state.smoke_runs += 1
         try:
             outcome = await executor.run(env, argv, ws.files, self._timeout)
@@ -629,6 +641,9 @@ class SmokeTestingStep:
             raise ToolError(f"the smoke executor is unavailable ({err}); try again") from None
         except SmokeContractError as err:
             raise ToolError(str(err)) from None
+        broadcast = None
+        with contextlib.suppress(TimeoutError):  # a hint, never a reason to fail the run
+            broadcast = await ctx.run_cpu(loss_broadcast, outcome.stderr, timeout_s=10)
         state.last_smoke = {
             "script": script,
             "args": list(args.args),
@@ -636,6 +651,7 @@ class SmokeTestingStep:
             "exit_code": outcome.exit_code,
             "stderr": outcome.stderr[-ERROR_CHARS:],
             "metrics": outcome.metrics,
+            "broadcast": broadcast,  # finish stops once on it (A-50)
         }
         await self._emit_output(ctx, state.smoke_runs, outcome)
         failing: list[str] = []  # the line with its neighbours, numbered: a patch can copy them
@@ -656,6 +672,7 @@ class SmokeTestingStep:
             [
                 f"exit code: {outcome.exit_code} ({outcome.duration_s:.1f} s)",
                 f"metrics.json: {json.dumps(outcome.metrics) if outcome.metrics else 'missing'}",
+                *([broadcast] if broadcast else []),
                 *_smoke_hint(outcome),
                 "stdout (tail):",
                 wrap_untrusted(outcome.stdout[-4000:], source="smoke", max_chars=4000),
@@ -683,6 +700,17 @@ class SmokeTestingStep:
                 f"workspace/{ignored[0]}:{ignored[1]} declares --seed but no file reads it: use "
                 "it for the split, the model's initialization and the data order. The runner "
                 "runs the script once per seed: never loop over seeds inside it (no smoke run "
+                "was spent)"
+            )
+        named = None
+        if datasets:
+            with contextlib.suppress(TimeoutError):  # a check, never a reason to fail the run
+                named = await ctx.run_cpu(reads_smoke_subset, ws.files, timeout_s=10)
+        if named is not None:  # A-50: the exec job has no subset, and the smoke run has it
+            raise ToolError(  # in the dataset's folder
+                f"workspace/{named[0]}:{named[1]} names the smoke subset: the experiment never "
+                "has it, and in a smoke run it sits in the dataset's own folder. Read the data "
+                "from the dataset's folder the same way with and without --smoke (no smoke run "
                 "was spent)"
             )
         flat = await ctx.run_cpu(flat_parquet_glob, ws.files) if datasets else None
@@ -862,6 +890,12 @@ class SmokeTestingStep:
             raise ToolError(f"run_smoke on {script} must pass right before finish")
         if last.get("workspace_sha256") != await ctx.run_cpu(_workspace_sha256, ws.files):
             raise ToolError("the workspace changed since the last passing smoke run: run it again")
+        broadcast = last.get("broadcast")
+        if isinstance(broadcast, str) and not state.broadcast_warned:  # a hint, once (A-50)
+            state.broadcast_warned = True
+            raise ToolError(
+                f"{broadcast}. If the shapes are right as they are, call finish again unchanged"
+            )
         found = await ctx.run_cpu(stand_in, ws.files)
         if found is not None:
             where = f"workspace/{found[0]}:{found[1]}"  # the excerpt is workspace text: not shown
@@ -1160,8 +1194,9 @@ _FLAT_PARQUET = re.compile(r"""['"]([^'"\n]*\*\.parquet)['"]""")
 
 def flat_parquet_glob(files: dict[str, bytes]) -> tuple[str, int] | None:
     """The first line of the Coder's files with a non-recursive '*.parquet' pattern: Hugging
-    Face keeps a dataset's parquet files in subfolders (data/train-*.parquet), and smoke runs
-    mount only the subset, so such a glob fails only in the experiment."""
+    Face keeps a dataset's parquet files in subfolders (data/train-*.parquet), while a smoke
+    run has the subset as one file at the folder's top, so such a glob fails only in the
+    experiment."""
     for path in sorted(files):
         for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
             code = line.split("#", 1)[0]
@@ -1169,6 +1204,86 @@ def flat_parquet_glob(files: dict[str, bytes]) -> tuple[str, int] | None:
             if pattern and "**" not in pattern.group(1) and "rglob" not in code:
                 return path, number
     return None
+
+
+# The smoke subset named as a path: by file, by a "smoke" folder joined to the data
+# directory, or in a path string. Matched on code only. Flags (--smoke, args.smoke,
+# getattr(args, "smoke"), P2P_SMOKE) never match.
+_SMOKE_SUBSET = re.compile(
+    r"""smoke\.parquet|['"/]smoke/|/smoke['"]|/\s{0,20}['"]smoke['"]"""
+    r"""|\b(?:join|Path)\([^)\n]{0,200}['"]smoke['"]"""  # bounded: linear on hostile lines
+)
+
+
+def reads_smoke_subset(files: dict[str, bytes]) -> tuple[str, int] | None:
+    """The first line of the Coder's files that names the smoke subset (A-50): the exec job
+    never has it, and in a smoke run it sits in its dataset's folder. Distillation
+    (1503.02531, 2026-10-30) read $P2P_DATA_DIR/smoke/smoke.parquet in its full run."""
+    for path in sorted(files):
+        for number, line in enumerate(files[path].decode("utf-8", "replace").splitlines(), 1):
+            if _SMOKE_SUBSET.search(line.split("#", 1)[0]):
+                return path, number
+    return None
+
+
+MAX_IMPORTED = 50  # workspace modules followed from the script: real experiments have a few
+
+
+def _local_imports(tree: ast.AST, path: str, files: dict[str, bytes]) -> list[str]:
+    """The workspace files an import in `path` names: `a.b` as a/b.py or a/b/__init__.py, from
+    the workspace root or (relative imports) the importing file's folder."""
+    here = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    names: list[tuple[str, str]] = []  # (base folder, dotted name)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [("", alias.name) for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = here if node.level else ""
+            module = node.module or ""
+            names.append((base, module))
+            names += [(base, f"{module}.{a.name}" if module else a.name) for a in node.names]
+    found = []
+    for base, dotted in names:
+        stem = base + dotted.replace(".", "/")
+        for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
+            if dotted and candidate in files:
+                found.append(candidate)
+    return found
+
+
+def not_the_experiment(files: dict[str, bytes], script: str) -> str | None:
+    """What `script` lacks to be the experiment (A-50): reading --seed and --out (a string
+    that starts with either, as argparse accepts prefixes; sys.argv lookups count) and writing
+    metrics.json, in the script or the workspace modules it imports. None when it has both,
+    or when it does not parse (the smoke run shows that). NAU (2001.05016, 2026-10-30) spent
+    2 of its 8 smoke runs on debug scripts that had neither."""
+    seed = out = metrics = False
+    todo, seen = [script], set[str]()
+    while todo and len(seen) < MAX_IMPORTED:
+        path = todo.pop()
+        if path in seen or path not in files:
+            continue
+        seen.add(path)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                tree = ast.parse(files[path].decode("utf-8", "replace"))
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            if path == script:
+                return None
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                seed = seed or node.value.startswith("--seed")
+                out = out or node.value.startswith("--out")
+                metrics = metrics or "metrics.json" in node.value
+        todo += _local_imports(tree, path, files)[:MAX_IMPORTED]  # bounded per file too
+    if not (seed or out or metrics):
+        return "read --seed and --out, or write metrics.json"
+    lacks = [flag for flag, ok in (("--seed", seed), ("--out", out)) if not ok]
+    if lacks:
+        return f"read {' and '.join(lacks)}"
+    return None if metrics else "write metrics.json"
 
 
 def stand_in(files: dict[str, bytes]) -> tuple[str, int, str] | None:
