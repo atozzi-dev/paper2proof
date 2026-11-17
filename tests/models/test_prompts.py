@@ -18,12 +18,15 @@ def test_the_planner_plans_no_dataset_for_bundled_or_generated_data() -> None:
 def test_the_coder_loads_bundled_data_in_code_and_has_a_smoke_subset_only_when_planned() -> None:
     body = load_prompt("coder_system").body
     assert "load_digits" in body and "make_" in body
-    assert "only when the plan has datasets" in body
+    text = " ".join(body.split())
+    assert "the same way with and without `--smoke`" in text  # A-50: one path to the data
+    assert "$P2P_DATA_DIR/smoke" not in text
+    assert "inside the experiment, printed under `--smoke`" in text  # no debug scripts
 
 
 def test_prompt_versions_moved_with_their_text() -> None:
     assert load_prompt("planner_experiment_plan").version == "10"
-    assert load_prompt("coder_system").version == "14"
+    assert load_prompt("coder_system").version == "15"
 
 
 def test_the_coder_is_told_which_key_is_the_method_and_that_seeds_are_the_runner_s() -> None:

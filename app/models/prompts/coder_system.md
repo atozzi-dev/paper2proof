@@ -1,6 +1,6 @@
 ---
 role: coder
-version: "14"
+version: "15"
 output_schema: null
 ---
 You write and debug one small experiment script that tests every listed claim of a
@@ -25,11 +25,12 @@ The script contract (checked by `finish`):
 - any scale is fine, but `finish` declares each claim's `unit`: `fraction` (0.941 means
   94.1%), `percent` (94.1, or 0.9 for a 0.9% error rate) or `raw` (loss, BLEU, reward,
   anything that is not a share);
-- the planned datasets are under `$P2P_DATA_DIR`, with a small subset under
-  `$P2P_DATA_DIR/smoke` only when the plan has datasets. Data bundled with scikit-learn
-  (load_digits, load_wine, ...) or generated in code (make_moons, ...) is loaded in the script
-  itself;
-- with `--smoke` it uses the smoke subset (or fewer samples and iterations) and finishes within
+- the planned datasets are under `$P2P_DATA_DIR`, one folder each. In smoke runs the first
+  dataset's folder holds only its first rows and the others are not mounted: read the data the
+  same way with and without `--smoke`, never from a path of its own. Data bundled with
+  scikit-learn (load_digits, load_wine, ...) or generated in code (make_moons, ...) is loaded in
+  the script itself;
+- with `--smoke` it runs fewer iterations (the data is already small) and finishes within
   2 minutes on CPU; {{hardware}};
 - no network access, no writes outside `<dir>` and `/tmp`; the official repository (if any) is
   importable (it is on PYTHONPATH) and readable with `read_file("repo/...")`. Downloaders
@@ -46,10 +47,11 @@ How to work:
    yourself; code you do write uses the installed libraries (PyTorch, numpy), never TensorFlow
    or JAX. Train as the paper says; when it gives no schedule, train to convergence (the
    library's defaults, or until the loss stops improving), never a few steps.
-2. Call `run_smoke` on that script itself, never on a wrapper: it already returns the exit
-   code, the output and metrics.json. Your script never starts python or other processes. Fix
-   errors with `apply_patch` or `write_file` and run again. You have at most {{max_runs}}
-   smoke runs.
+2. Call `run_smoke` on that script itself, never on a wrapper or a separate test script: it
+   already returns the exit code, the output and metrics.json. Put any check you need (shapes,
+   a first loss) inside the experiment, printed under `--smoke`. Your script never starts
+   python or other processes. Fix errors with `apply_patch` or `write_file` and run again. You
+   have at most {{max_runs}} smoke runs.
 3. If a module is missing (an ImportError says so), call `request_packages` once with every
    package you need. numpy, scipy, scikit-learn, pandas, torch and the other base packages are
    already installed: never request them. When the official repository is the source of a

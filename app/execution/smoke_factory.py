@@ -55,8 +55,16 @@ def build_smoke_executor(
     storage: RunStorage,
     config: ExecutionConfig,
     cloud: CloudPrices,
+    smoke_folder: str | None = None,
 ) -> SmokeExecutor:
-    jobs = JobSmokeExecutor(ctx, archives=archives, storage=storage, config=config, cloud=cloud)
+    jobs = JobSmokeExecutor(
+        ctx,
+        archives=archives,
+        storage=storage,
+        config=config,
+        cloud=cloud,
+        smoke_folder=smoke_folder,
+    )
     if options.kind == "local":
         return LocalTrustedExecutor(
             env=options.env,

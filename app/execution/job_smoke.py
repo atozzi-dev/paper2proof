@@ -12,13 +12,14 @@ control plane never reuses a name), and a smoke job left running by a restart is
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
-from app.domain.contracts import ArchiveDigests
+from app.domain.contracts import ARCHIVE_NAME_PATTERN, ArchiveDigests
 from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
@@ -67,12 +68,17 @@ class JobSmokeExecutor:
         storage: RunStorage,
         config: ExecutionConfig,
         cloud: CloudPrices,
+        smoke_folder: str | None = None,
         poll_s: float = 5,
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._ctx = ctx
         self._archives = archives  # what the smoke runner may extract, with digests
+        # the subset's dataset folder (A-50), an archive name: checked here and by the runner
+        if smoke_folder is not None and not re.fullmatch(ARCHIVE_NAME_PATTERN, smoke_folder):
+            raise ValueError("invalid smoke folder")
+        self._folder = smoke_folder if archives.data else None
         self._storage = storage
         self._config = config
         self.usd_per_hour = cloud.hourly(config.smoke_platform, config.smoke_preset)
@@ -139,6 +145,8 @@ class JobSmokeExecutor:
             "nonce": nonce,
             "archives": self._archives.model_dump(mode="json"),
         }
+        if self._folder is not None:  # never null: a runner from before A-50 ignores the key
+            manifest["smoke_folder"] = self._folder
         bucket = await ctx.jobs.ensure_run_bucket(env_id)
         spec = JobSpec(
             name=job_name(JobKind.SMOKE, env_id, iteration),

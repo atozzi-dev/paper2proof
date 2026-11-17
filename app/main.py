@@ -697,13 +697,14 @@ def build_runtime(
             lm,
             artifacts,
             storage,
-            lambda ctx, archives: build_smoke_executor(
+            lambda ctx, archives, folder: build_smoke_executor(
                 smoke_options,
                 ctx,
                 archives=archives,
                 storage=storage,
                 config=execution,
                 cloud=cloud,
+                smoke_folder=folder,
             ),
             tavily=tavily,
         ),

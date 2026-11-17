@@ -240,3 +240,47 @@ def test_an_unlisted_repo_archive_is_ignored(tmp_path: Path) -> None:
     EXTRACTED.clear()
     _run(path, mnt, tmp_path)
     assert [name for name, _ in EXTRACTED] == ["overlay.tar.zst"]
+
+
+def _smoke_data(tmp_path: Path, **overrides: Any) -> tuple[Path, Path]:
+    archives = {"overlay": "a" * 64, "repo": None, "data": [{"name": "smoke", "sha256": "c" * 64}]}
+    path, mnt = _setup(tmp_path, archives=archives, **overrides)
+    (mnt / "staging" / "data").mkdir()
+    (mnt / "staging" / "data" / "smoke.tar.zst").write_bytes(b"")
+    return path, mnt
+
+
+def test_the_subset_goes_to_its_dataset_folder(tmp_path: Path) -> None:
+    """A-50: the smoke run reads the subset where the exec job reads the whole dataset."""
+    seen: list[Path] = []
+    path, mnt = _smoke_data(tmp_path, smoke_folder="ylecun__mnist")
+    code = smoke.run(
+        path,
+        mnt=mnt,
+        work=tmp_path / "work",
+        extract=lambda archive, dest, sha: seen.append(dest) or dest.mkdir(parents=True),
+    )
+    assert code == 0
+    assert seen[-1] == tmp_path / "work" / "data" / "ylecun__mnist"
+    assert not (tmp_path / "work" / "data" / "smoke").exists()
+
+
+def test_without_a_folder_the_subset_stays_where_it_was(tmp_path: Path) -> None:
+    seen: list[Path] = []
+    path, mnt = _smoke_data(tmp_path)
+    smoke.run(
+        path,
+        mnt=mnt,
+        work=tmp_path / "work",
+        extract=lambda archive, dest, sha: seen.append(dest) or dest.mkdir(parents=True),
+    )
+    assert seen[-1] == tmp_path / "work" / "data" / "smoke"
+
+
+@pytest.mark.parametrize(
+    "folder", ["..", "../etc", "a/b", "", ".hidden", "x" * 300, 7, None, "a\nb"]
+)
+def test_an_invalid_smoke_folder_is_a_contract_error(tmp_path: Path, folder: object) -> None:
+    path, mnt = _smoke_data(tmp_path, smoke_folder=folder)
+    code = smoke.run(path, mnt=mnt, work=tmp_path / "work", extract=lambda a, d, s: None)
+    assert code == 30

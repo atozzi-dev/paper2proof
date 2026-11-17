@@ -49,6 +49,9 @@ MAX_TIMEOUT_S = 240
 TAIL_BYTES = 48 * 1024  # per stream, as encoded in result.json (< 256 KiB in total)
 METRICS = "out/metrics.json"
 NONCE = re.compile(r"^[0-9a-f]{32}$")
+# The dataset folder the subset goes to (A-50): an archive name (app/domain/contracts.py), one
+# path component that never starts with a dot.
+FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
 
 
 class SmokeContractError(Exception):
@@ -101,6 +104,10 @@ def validate(manifest: Any) -> dict[str, Any]:
             raise SmokeContractError("smoke jobs only extract the smoke subset")
         if not isinstance(entry.get("sha256"), str) or not SHA256.fullmatch(entry["sha256"]):
             raise SmokeContractError("invalid smoke digest")
+    if "smoke_folder" in manifest:
+        folder = manifest["smoke_folder"]
+        if not isinstance(folder, str) or not FOLDER.fullmatch(folder):
+            raise SmokeContractError("invalid smoke folder")
     return manifest
 
 
@@ -201,7 +208,9 @@ def run(
         for entry in digests["data"]:
             if not (staging / "data" / "smoke.tar.zst").is_file():
                 raise ContractError("smoke data archive missing")
-            extract(staging / "data" / "smoke.tar.zst", data / "smoke", entry["sha256"])
+            # where the exec job has the whole dataset: one path for the script to read (A-50)
+            folder = manifest.get("smoke_folder", "smoke")
+            extract(staging / "data" / "smoke.tar.zst", data / folder, entry["sha256"])
         extract_workspace(out_dir / "workspace.tar", workspace, manifest["workspace_sha256"])
         (work / "home").mkdir(parents=True, exist_ok=True)
     except (ContractError, OSError, subprocess.SubprocessError, Terminated) as err:

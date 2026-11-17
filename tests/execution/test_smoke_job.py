@@ -396,3 +396,56 @@ async def test_a_backend_error_after_the_inputs_still_fails_the_step(
     env = await smoke.prepare(RUN, {"train.py": b"a"})
     with pytest.raises(JobBackendError, match=message[:20]):
         await smoke.run(env, ARGV, {}, 60)
+
+
+async def test_the_manifest_names_the_subset_s_dataset_folder(store: Store) -> None:
+    """A-50: the runner extracts the subset where the exec job has the whole dataset."""
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_result(storage))
+    ctx = await ctx_at(store, StepName.SMOKE_TESTING, previous=[(StepName.PROVISIONING, "p")])
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    smoke = JobSmokeExecutor(
+        ctx,
+        archives=ARCHIVES,
+        storage=storage,
+        config=CFG,
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+        smoke_folder="ylecun__mnist",
+    )
+    env = await smoke.prepare(RUN, {"train.py": b"x"})
+    await smoke.run(env, ARGV, {}, 60)
+    ((_, _, _, spec),) = jobs.jobs.values()
+    assert json.loads(spec.inject_files["/etc/p2p/smoke.json"])["smoke_folder"] == "ylecun__mnist"
+
+
+async def test_no_subset_no_folder(store: Store) -> None:
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_result(storage))
+    ctx = await ctx_at(store, StepName.SMOKE_TESTING, previous=[(StepName.PROVISIONING, "p")])
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    smoke = JobSmokeExecutor(
+        ctx,
+        archives=ArchiveDigests(overlay="a" * 64, repo=None, data=[]),
+        storage=storage,
+        config=CFG,
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+        smoke_folder="ylecun__mnist",
+    )
+    env = await smoke.prepare(RUN, {"train.py": b"x"})
+    await smoke.run(env, ARGV, {}, 60)
+    ((_, _, _, spec),) = jobs.jobs.values()
+    assert "smoke_folder" not in json.loads(spec.inject_files["/etc/p2p/smoke.json"])
+
+
+@pytest.mark.parametrize("folder", ["../etc", "a/b", ".x", ""])
+async def test_an_invalid_folder_is_refused(store: Store, folder: str) -> None:
+    ctx = await ctx_at(store, StepName.SMOKE_TESTING, previous=[(StepName.PROVISIONING, "p")])
+    with pytest.raises(ValueError, match="smoke folder"):
+        JobSmokeExecutor(
+            ctx,
+            archives=ARCHIVES,
+            storage=FakeRunStorage(),
+            config=CFG,
+            cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+            smoke_folder=folder,
+        )

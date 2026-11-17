@@ -253,7 +253,7 @@ async def test_sandboxes_down_switches_the_smoke_runs_to_cpu_jobs(
     jobs = FakeSmokeExecutor([PASS])  # stands in for JobSmokeExecutor (CPU smoke jobs)
     smoke = FallbackSmokeExecutor(sandboxes, jobs, threshold=FALLBACK_AFTER)
     models = FakeModelClient(LLM_FIXTURES, case="sandboxes_down")
-    step = SmokeTestingStep(models, artifacts, FakeRunStorage(), lambda c, a: smoke)
+    step = SmokeTestingStep(models, artifacts, FakeRunStorage(), lambda c, a, f: smoke)
 
     result = await step.run(ctx)
 

@@ -22,7 +22,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.discovery.tavily import TavilyClient, TavilyUnavailable
-from app.domain.contracts import ArchiveDigests
+from app.domain.contracts import ARCHIVE_NAME_PATTERN, ArchiveDigests
 from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import (
@@ -231,7 +231,7 @@ class SmokeTestingStep:
         models: ModelClient,
         artifacts: ArtifactStore,
         storage: RunStorage,
-        smoke: Callable[[RunContext, ArchiveDigests], SmokeExecutor],
+        smoke: Callable[[RunContext, ArchiveDigests, str | None], SmokeExecutor],
         *,
         tavily: TavilyClient | None = None,
         smoke_timeout_s: int = SMOKE_TIMEOUT_S,
@@ -274,8 +274,10 @@ class SmokeTestingStep:
             )
         return snapshot
 
-    async def _archives(self, ctx: RunContext) -> ArchiveDigests:
-        """Digests of what smoke jobs extract, from the validated provision report artifact."""
+    async def _archives(self, ctx: RunContext) -> tuple[ArchiveDigests, str | None]:
+        """Digests of what smoke jobs extract, from the validated provision report artifact,
+        and the folder the subset goes to (A-50): its dataset's, the first one fetched
+        (provisioning cuts the subset from the plan's first dataset, and fetches in order)."""
         report = await self._json(await output_of(ctx, StepName.PROVISIONING))
         report = report if isinstance(report, dict) else {}
         smoke = [
@@ -298,7 +300,13 @@ class SmokeTestingStep:
             raise failed  # fail closed: never a smoke run silently without the repository
         if report.get("smoke") is True and not archives.data:
             raise failed
-        return archives
+        if not archives.data:
+            return archives, None
+        datasets = report.get("datasets")
+        folder = datasets[0] if isinstance(datasets, list) and datasets else None
+        if not isinstance(folder, str) or not re.fullmatch(ARCHIVE_NAME_PATTERN, folder):
+            raise failed  # a subset with no folder would sit where the script cannot find it
+        return archives, folder
 
     async def _state(self, ctx: RunContext) -> _State:
         try:
@@ -453,7 +461,7 @@ class SmokeTestingStep:
             state.smoke_runs, state.last_smoke, state.fallback = 0, None, True
         ws = Workspace.from_snapshot(state.files, await self._repo(ctx))
         max_runs = ctx.limits.per_run.fix_iterations
-        executor = self._smoke(ctx, await self._archives(ctx))
+        executor = self._smoke(ctx, *await self._archives(ctx))
         env: str | None = None
         paper = await ingested_paper(ctx, self._artifacts)
         excerpt = (
@@ -1194,9 +1202,11 @@ def _data_layout(plan: Plan) -> list[str]:
             "pandas.read_parquet; image columns hold encoded bytes). When the paper evaluates on "
             "another split, hold out part of this one and say so in a comment."
         )
-    lines.append(
-        f"- with --smoke only the first rows of {plan.datasets[0].id} are there, as "
-        "$P2P_DATA_DIR/smoke/smoke.parquet (the dataset folders are not mounted in smoke runs)."
+    first = plan.datasets[0].id.replace("/", "__")
+    lines.append(  # A-50: the same path in both, so the smoke run tests the experiment's
+        f"- with --smoke, $P2P_DATA_DIR/{first}/ holds only the first rows of "
+        f"{plan.datasets[0].id} (one parquet file) and the other folders are not mounted: read "
+        "the data the same way in both."
     )
     return lines
 
