@@ -164,7 +164,10 @@ iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce, archives[, smoke_
 `datasets` name, the same name as its archive): the runner extracts the subset there,
 `$P2P_DATA_DIR/<smoke_folder>/smoke.parquet`, so a smoke run reads its data through the same path
 as the exec job, which never has the subset. Without it (a manifest from before A-50) the subset
-goes to `$P2P_DATA_DIR/smoke`. `archives` (also in the exec
+goes to `$P2P_DATA_DIR/smoke`. The runner echoes the field as `data_folder` in `result.json`; when
+the control plane sent it and the echo is missing, the runner image predates A-50 (it put the subset
+in `$P2P_DATA_DIR/smoke`, where no script looks) and the run stops with `INTERNAL_ERROR` instead of
+spending its smoke runs. `archives` (also in the exec
 manifest) lists the sha256 of the overlay, repo and data archives the runner may extract, taken from
 the validated provision report; the runners hash the bytes they read and discard anything that
 doesn't match, and never glob `staging/data`. `argv` is
