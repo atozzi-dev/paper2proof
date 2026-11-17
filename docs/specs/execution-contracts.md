@@ -159,7 +159,12 @@ requested names) passes the denylist and the same typosquat check (§4 rule 4), 
 already provides.
 
 The smoke manifest (`/etc/p2p/smoke.json`, CPU smoke jobs): `{schema: "p2p.smoke/v1", run_id,
-iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce, archives}`. `archives` (also in the exec
+iteration, argv, timeout_s (≤ 240), workspace_sha256, nonce, archives[, smoke_folder]}`. `smoke_folder`
+(A-50) is the folder of the dataset the smoke subset was cut from (the provision report's first
+`datasets` name, the same name as its archive): the runner extracts the subset there,
+`$P2P_DATA_DIR/<smoke_folder>/smoke.parquet`, so a smoke run reads its data through the same path
+as the exec job, which never has the subset. Without it (a manifest from before A-50) the subset
+goes to `$P2P_DATA_DIR/smoke`. `archives` (also in the exec
 manifest) lists the sha256 of the overlay, repo and data archives the runner may extract, taken from
 the validated provision report; the runners hash the bytes they read and discard anything that
 doesn't match, and never glob `staging/data`. `argv` is
@@ -192,7 +197,9 @@ python <entrypoint> --seed <int> --out <dir> [--smoke] [--config <path>]
 - Writes `<dir>/metrics.json`: a flat object of finite numbers, one key per measured value,
   named by the Coder (e.g. `{"forest/accuracy": 0.97, "logreg/accuracy": 0.91}`). Keys match
   `^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$`.
-- `--smoke` uses `data/smoke` and finishes in ≤ 120 s on CPU.
+- `--smoke` finishes in ≤ 120 s on CPU. Its data is read from the same dataset folder as the
+  full run, which in a smoke run holds only the first rows of the plan's first dataset (the
+  plan's other datasets are not mounted); a script never names the smoke subset itself.
 - No network. No writes outside `<dir>` and `/tmp`.
 - Exit code 0 on success.
 
