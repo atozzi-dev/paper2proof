@@ -291,3 +291,12 @@ def test_a_heavy_package_without_a_version_gets_its_cpu_build() -> None:
     ]
     assert swapped == [("XGBoost", "xgboost-cpu")]
     assert cpu_substitutes(requested, {}) == (requested, [])
+
+
+@pytest.mark.parametrize("name", ["XGBoost ", "xgboost!", "xgb" + chr(0x212A)])
+def test_a_name_the_policy_would_refuse_is_never_substituted(name: str) -> None:
+    """Security review of A-51: the swap must not turn an invalid name into a valid one."""
+    from app.execution.package_policy import cpu_substitutes
+
+    requested = [PackageReq.model_construct(name=name, specifier=None)]
+    assert cpu_substitutes(requested, {"xgboost": "xgboost-cpu"}) == (requested, [])

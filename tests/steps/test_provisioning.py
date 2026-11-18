@@ -1329,3 +1329,17 @@ async def test_on_gpu_the_packages_stay_as_asked(store: Store, tmp_path: Path) -
     await _step(store, artifacts, storage, clock).run(ctx)
     assert _manifest(ctx)["packages"] == ["xgboost"]
     assert not [w for w in await _warnings(store) if w.code == "PACKAGE_SUBSTITUTED"]
+
+
+@respx.mock
+async def test_a_substitute_the_policy_refuses_is_not_said_to_be_installed(
+    store: Store, tmp_path: Path
+) -> None:
+    """Security review of A-51: the warning names only what is installed."""
+    respx.get("https://pypi.org/pypi/xgboost-cpu/json").mock(return_value=httpx.Response(404))
+    ctx, artifacts = await _setup(store, tmp_path, packages=["xgboost"])
+    storage, clock = FakeRunStorage(), FakeClock()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, clock).run(ctx)
+    codes = [w.code for w in await _warnings(store)]
+    assert "PACKAGE_SUBSTITUTED" not in codes and "PACKAGE_REJECTED" in codes

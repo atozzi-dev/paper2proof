@@ -789,7 +789,7 @@ class ExecutingStep:
                     ErrorCode.PROVISION_FAILED,
                     "the sandbox ran out of disk before the experiment finished: the installed "
                     "packages, the official repository and the data do not fit in a Token "
-                    "Factory Sandbox",
+                    "Factory Sandbox, or the experiment wrote too much",
                 )
             if (
                 deadline is not None

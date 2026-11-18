@@ -94,7 +94,8 @@ def cpu_substitutes(
     packages: list[PackageReq] = []
     swapped: list[tuple[str, str]] = []
     for req in requested:
-        target = table.get(normalize(req.name)) if req.specifier is None else None
+        plain = req.specifier is None and _NAME.fullmatch(req.name) is not None  # rule 1 first
+        target = table.get(normalize(req.name)) if plain else None
         if target is None:
             packages.append(req)
             continue

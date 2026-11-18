@@ -466,6 +466,7 @@ class SmokeTestingStep:
         fallback = active.fallback is not None and not state.fallback
         if fallback:  # A-47: the CPU plan is a new task for the script, with its own allowance
             state.smoke_runs, state.last_smoke, state.fallback = 0, None, True
+            state.disk_full = 0  # the CPU plan's inputs are its own (A-51)
         ws = Workspace.from_snapshot(state.files, await self._repo(ctx))
         max_runs = ctx.limits.per_run.fix_iterations
         executor = self._smoke(ctx, *await self._archives(ctx))
@@ -569,12 +570,14 @@ class SmokeTestingStep:
                             )
                         if env is None:
                             env = await executor.prepare(ctx.run_id, ws.files)
-                        result = await self._run_smoke(
-                            ctx, executor, env, ws, state, args, datasets=bool(plan.datasets)
-                        )
+                        try:
+                            result = await self._run_smoke(
+                                ctx, executor, env, ws, state, args, datasets=bool(plan.datasets)
+                            )
+                        finally:  # a refusal's counters too: a full disk survives a restart
+                            await save()
                         left = max_runs - state.smoke_runs
                         result += f"\nsmoke runs left: {left} of {max_runs}"
-                        await save()
                     elif isinstance(args, SearchDocs):
                         result = await self._search(ctx, state, args)
                         await save()
@@ -650,7 +653,7 @@ class SmokeTestingStep:
                     ErrorCode.PROVISION_FAILED,
                     "the sandbox ran out of disk twice in a row before the script finished: "
                     "the installed packages, the official repository and the data do not fit "
-                    "in a Token Factory Sandbox",
+                    "in a Token Factory Sandbox, or the script wrote too much",
                 ) from None
             raise ToolError(
                 "the sandbox ran out of disk before the script finished (no smoke run was "

@@ -38,6 +38,7 @@ from app.execution.naming import job_name, run_slug
 from app.execution.package_policy import (
     PackagePolicy,
     PolicyContext,
+    PolicyDecision,
     cpu_substitutes,
     parse_repo_requirements,
 )
@@ -192,14 +193,23 @@ class ProvisioningStep:
         files = {str(k): v for k, v in raw.items() if isinstance(v, str)}
         return await ctx.run_cpu(parse_repo_requirements, files)
 
-    async def _cpu_builds(
-        self, ctx: RunContext, requested: list[PackageReq], target: ExecTarget
-    ) -> list[PackageReq]:
-        """On CPU, heavy packages as their CPU builds (A-51), each one said in a warning."""
-        if target is not ExecTarget.CPU:
-            return requested
-        packages, swapped = cpu_substitutes(requested, self._policy.config.cpu_substitutes)
+    async def _validated_cpu_builds(
+        self,
+        ctx: RunContext,
+        requested: list[PackageReq],
+        target: ExecTarget,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        """The policy's decision on the requests, with heavy packages as their CPU builds on
+        CPU (A-51); each substitute the policy accepted is said in a warning."""
+        swapped: list[tuple[str, str]] = []
+        if target is ExecTarget.CPU:
+            requested, swapped = cpu_substitutes(requested, self._policy.config.cpu_substitutes)
+        decision = await self._policy.validate(requested, context)
+        accepted = {p.name for p in decision.accepted}
         for asked, installed in swapped:
+            if installed not in accepted:  # its rejection is warned about as any other
+                continue
             await ctx.emit(
                 EventType.WARNING,
                 {
@@ -209,7 +219,7 @@ class ProvisioningStep:
                     "Sandbox has a small disk)",
                 },
             )
-        return packages
+        return decision
 
     async def _packages(
         self,
@@ -218,12 +228,11 @@ class ProvisioningStep:
         discovery: Discovery,
         *,
         package_request: bool,
-        target: ExecTarget = ExecTarget.CPU,
+        target: ExecTarget,
     ) -> list[PackageReq]:
         repo_requirements = await self._repo_requirements(ctx, discovery)
-        planned = await self._policy.validate(
-            await self._cpu_builds(ctx, plan.packages, target),
-            PolicyContext(repo_requirements=repo_requirements),
+        planned = await self._validated_cpu_builds(
+            ctx, plan.packages, target, PolicyContext(repo_requirements=repo_requirements)
         )
         for rejected in planned.rejected:
             why = f"{rejected.package.name}: {rejected.reason.value} {rejected.detail}"
@@ -233,8 +242,10 @@ class ProvisioningStep:
             request = await self._json(await output_of(ctx, StepName.SMOKE_TESTING))
             raw = request.get("requested_packages")
             requested = [PackageReq.model_validate(p) for p in raw] if isinstance(raw, list) else []
-            decision = await self._policy.validate(
-                await self._cpu_builds(ctx, requested, target),
+            decision = await self._validated_cpu_builds(
+                ctx,
+                requested,
+                target,
                 PolicyContext(
                     repo_requirements=repo_requirements,
                     requests_so_far=package_requests(

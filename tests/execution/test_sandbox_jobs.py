@@ -1083,3 +1083,19 @@ async def test_a_program_that_filled_the_disk_itself_has_no_reason(
     api.ops[handle.nebius_id]["error"] = DISK_FULL
     assert await backend.status(handle) is JobState.FAILED
     assert await backend.failure_reason(handle) is None
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        ({"type": "OSError", "message": "No space left on device"}, "disk_full"),  # not a string
+        (None, None),
+        ("x" * 5000 + "No space left on device", None),  # past what is read: as before A-51
+    ],
+    ids=["object", "none", "far"],
+)
+def test_the_failure_is_read_from_a_bounded_error(error: object, reason: str | None) -> None:
+    from app.execution.sandbox_jobs import _failure
+
+    op = {"status": "FAILED", "error": error, "metadata": {"result": {}}}
+    assert _failure(op) == reason
