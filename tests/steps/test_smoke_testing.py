@@ -1844,3 +1844,69 @@ def test_only_shapes_reach_the_broadcast_hint() -> None:
         "size (torch.Size([5, 1]))"
     )
     assert loss_broadcast(hostile) is None
+
+
+# --- A-51: a sandbox whose disk is full -------------------------------------------------------
+
+
+class DiskFullSmoke(FakeSmokeExecutor):
+    """Scripted results where an exception is raised in its turn."""
+
+    def __init__(self, script: list[SmokeResult | Exception]) -> None:
+        super().__init__([])
+        self.script = list(script)
+
+    async def run(
+        self, env_id: str, argv: list[str], files: dict[str, bytes], timeout_s: int
+    ) -> SmokeResult:
+        self.calls += 1
+        self.runs.append((env_id, argv, files))
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+async def test_a_full_sandbox_disk_costs_no_smoke_run_the_first_time(
+    store: Store, tmp_path: Path
+) -> None:
+    from app.execution.smoke import SmokeDiskFull
+
+    ctx, artifacts = await _setup(store, tmp_path)
+    smoke = DiskFullSmoke([SmokeDiskFull("the sandbox ran out of disk"), PASS])
+    step, models = _step("smoke_disk_full", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)
+    assert result.next is StepName.EXECUTING
+    first, second = _tool_results(models)[1:3]
+    assert first.startswith("ERROR: the sandbox ran out of disk")
+    assert "no smoke run was spent" in first and "write less" in first
+    assert "smoke runs left: 7 of 8" in second  # only the passing run counted
+
+
+async def test_a_full_sandbox_disk_twice_in_a_row_stops_the_step(
+    store: Store, tmp_path: Path
+) -> None:
+    """InterpretML (1909.09223, 2026-10-30): 8 smoke runs spent on a disk the overlay filled."""
+    from app.execution.smoke import SmokeDiskFull
+
+    ctx, artifacts = await _setup(store, tmp_path)
+    full = SmokeDiskFull("the sandbox ran out of disk")
+    smoke = DiskFullSmoke([full, full, PASS])
+    step, _ = _step("smoke_disk_full_twice", artifacts, smoke, FakeRunStorage())
+    with pytest.raises(P2PError) as err:
+        await step.run(ctx)
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert "packages, the official repository and the data" in str(err.value)
+    assert smoke.calls == 2
+
+
+async def test_a_result_in_between_resets_the_disk_count(store: Store, tmp_path: Path) -> None:
+    from app.execution.smoke import SmokeDiskFull
+
+    ctx, artifacts = await _setup(store, tmp_path)
+    full = SmokeDiskFull("the sandbox ran out of disk")
+    smoke = DiskFullSmoke([full, FAIL, full, PASS])
+    step, _ = _step("smoke_disk_full_reset", artifacts, smoke, FakeRunStorage())
+    result = await step.run(ctx)  # full, a failing run, full again: never twice in a row
+    assert result.next is StepName.EXECUTING
+    assert smoke.calls == 4

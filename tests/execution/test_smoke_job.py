@@ -478,3 +478,28 @@ async def test_a_runner_from_before_the_folder_stops_the_run(store: Store) -> No
         await smoke.run(env, ARGV, {}, 60)
     assert err.value.code is ErrorCode.INTERNAL_ERROR
     assert "runner-cpu image" in str(err.value)
+
+
+class DiskFullJobs(FakeJobBackend):
+    """Sandboxes after InterpretML's overlay filled the instance (A-51)."""
+
+    def __init__(self, reason: str | None) -> None:
+        super().__init__(final_state=JobState.FAILED)
+        self.reason = reason
+
+    async def failure_reason(self, handle: JobHandle) -> str | None:
+        return self.reason
+
+
+@pytest.mark.parametrize(("reason", "disk_full"), [("disk_full", True), (None, False)])
+async def test_a_full_sandbox_disk_is_its_own_error(
+    store: Store, reason: str | None, disk_full: bool
+) -> None:
+    from app.execution.smoke import SmokeDiskFull
+
+    storage = FakeRunStorage()
+    smoke, _ = await _executor(store, DiskFullJobs(reason), storage)
+    env = await smoke.prepare(RUN, {"train.py": b"x"})
+    with pytest.raises(SmokeUnavailable) as err:
+        await smoke.run(env, ARGV, {}, 60)
+    assert isinstance(err.value, SmokeDiskFull) is disk_full

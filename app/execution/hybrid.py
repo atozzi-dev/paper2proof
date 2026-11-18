@@ -27,6 +27,7 @@ from app.execution.backend import (
     JobSpec,
     JobState,
     JobStatusUnavailable,
+    ReportsFailures,
 )
 from app.execution.naming import bucket_name
 from app.execution.run_storage import MAX_READ_BYTES, RunStorage
@@ -253,6 +254,7 @@ class SandboxJobs(Protocol):
     async def forget(self, run_id: str) -> None: ...
     def bind_cpu_pool(self, pool: Executor | None) -> None: ...
     async def knows(self, name: str) -> bool: ...
+    async def failure_reason(self, handle: JobHandle) -> str | None: ...
 
 
 def _kind(name: str) -> JobKind:
@@ -380,6 +382,13 @@ class HybridJobBackend:
 
     async def cancel(self, handle: JobHandle) -> None:
         await (await self._created_on(handle.name)).cancel(handle)
+
+    async def failure_reason(self, handle: JobHandle) -> str | None:
+        """Why the job failed, from the backend that ran it, when that one can say (A-51)."""
+        backend = await self._created_on(handle.name)
+        if not isinstance(backend, ReportsFailures):
+            return None
+        return await backend.failure_reason(handle)
 
     async def ensure_gateway_up(self) -> None:
         return None  # no gateway VM: the exec subnet's route has no next hop (fail-closed)

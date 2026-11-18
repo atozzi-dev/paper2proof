@@ -40,6 +40,7 @@ from app.domain.paper import IngestedPaper
 from app.execution.run_storage import RunStorage
 from app.execution.smoke import (
     SmokeContractError,
+    SmokeDiskFull,
     SmokeExecutor,
     SmokeResult,
     SmokeUnavailable,
@@ -98,6 +99,7 @@ TURNS_PER_RUN = 5  # model turns allowed per smoke run in the budget
 # read_file calls in a row without a write, patch or smoke run. Past KEEP_FULL_MESSAGES the
 # older reads are trimmed, and Ultra and Super VL re-read them until the turns ran out.
 READS_PER_CHANGE = 8
+DISK_FULL_STOP = 2  # A-51: a full sandbox disk this many times in a row stops the step
 TOOL_RESULT_CHARS = 8_000
 
 ERROR_CHARS = 32_000  # ~8k tokens (architecture §6.4)
@@ -148,6 +150,8 @@ class _State:
         self.smoke_runs = int(data.get("smoke_runs", 0))
         self.fallback = data.get("fallback") is True  # the CPU plan's fresh start was given (A-47)
         self.searches = int(data.get("searches", 0))
+        full = data.get("disk_full")  # A-51: full sandbox disks in a row, across restarts
+        self.disk_full = full if isinstance(full, int) and not isinstance(full, bool) else 0
         last = data.get("last_smoke")
         self.last_smoke: dict[str, Any] | None = last if isinstance(last, dict) else None
         self.difference_warned: set[str] = set()  # this attempt only: a hint, not a rule
@@ -173,6 +177,7 @@ class _State:
             "files": workspace.snapshot(),
             "smoke_runs": self.smoke_runs,
             "searches": self.searches,
+            "disk_full": self.disk_full,
             "last_smoke": self.last_smoke,
             "stand_in_flags": self.stand_in_flags,
             "swap_hints": self.swap_hints,
@@ -637,10 +642,28 @@ class SmokeTestingStep:
         state.smoke_runs += 1
         try:
             outcome = await executor.run(env, argv, ws.files, self._timeout)
+        except SmokeDiskFull:  # A-51: InterpretML spent its 8 smoke runs on this
+            state.smoke_runs -= 1  # the platform's, not the Coder's
+            state.disk_full += 1
+            if state.disk_full >= DISK_FULL_STOP:
+                raise P2PError(
+                    ErrorCode.PROVISION_FAILED,
+                    "the sandbox ran out of disk twice in a row before the script finished: "
+                    "the installed packages, the official repository and the data do not fit "
+                    "in a Token Factory Sandbox",
+                ) from None
+            raise ToolError(
+                "the sandbox ran out of disk before the script finished (no smoke run was "
+                "spent). If the script writes large files (checkpoints, caches, copies of the "
+                "data), write less, and nothing outside --out and /tmp; otherwise the installed "
+                "packages, the repository and the data do not fit, and the next time the run "
+                "stops"
+            ) from None
         except SmokeUnavailable as err:
             raise ToolError(f"the smoke executor is unavailable ({err}); try again") from None
         except SmokeContractError as err:
             raise ToolError(str(err)) from None
+        state.disk_full = 0  # the platform ran it: a full disk counts again from zero
         broadcast = None
         with contextlib.suppress(TimeoutError):  # a hint, never a reason to fail the run
             broadcast = await ctx.run_cpu(loss_broadcast, outcome.stderr, timeout_s=10)

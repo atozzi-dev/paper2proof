@@ -6,7 +6,7 @@ Implementations: NebiusJobBackend (nebius_backend.py, A-20) and FakeJobBackend (
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -178,3 +178,11 @@ class JobBackend(Protocol):
     async def gateway_idle_check(self, idle_minutes: int = 30) -> bool: ...  # True: stopped it
     async def list_jobs(self, prefix: str) -> list[tuple[JobHandle, JobState, datetime]]: ...
     async def list_run_buckets(self) -> list[tuple[str, datetime]]: ...  # (name, created_at)
+
+
+@runtime_checkable
+class ReportsFailures(Protocol):
+    """A backend that can say why a FAILED job failed, when the platform said so (A-51): a
+    reason from a fixed vocabulary ("disk_full"), never the platform's own text."""
+
+    async def failure_reason(self, handle: JobHandle) -> str | None: ...

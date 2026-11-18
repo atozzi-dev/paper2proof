@@ -54,6 +54,7 @@ from app.execution.backend import (
     JobSpec,
     JobState,
     QuotaExceeded,
+    ReportsFailures,
     VolumeMount,
 )
 from app.execution.config import ExecutionConfig
@@ -777,6 +778,19 @@ class ExecutingStep:
                     image=spec.image_digest_ref,
                 )
             reason, wall = await self._exit_info(ctx, attempt)
+            jobs = ctx.jobs
+            if (  # A-51: the same inputs would fill a retry's sandbox the same way
+                outcome.state is JobState.FAILED
+                and reason is None
+                and isinstance(jobs, ReportsFailures)
+                and await jobs.failure_reason(outcome.handle) == "disk_full"
+            ):
+                raise P2PError(
+                    ErrorCode.PROVISION_FAILED,
+                    "the sandbox ran out of disk before the experiment finished: the installed "
+                    "packages, the official repository and the data do not fit in a Token "
+                    "Factory Sandbox",
+                )
             if (
                 deadline is not None
                 and outcome.state in (JobState.FAILED, JobState.CANCELLED)

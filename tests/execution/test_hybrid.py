@@ -14,7 +14,7 @@ from moto import mock_aws
 from pydantic import SecretStr
 
 from app.execution import hybrid
-from app.execution.backend import JobKind, JobState, JobStatusUnavailable
+from app.execution.backend import JobHandle, JobKind, JobState, JobStatusUnavailable
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
 from app.execution.hybrid import (
@@ -483,12 +483,16 @@ class FakeSandbox(FakeJobBackend):
     def __init__(self) -> None:
         super().__init__()
         self.forgotten: list[str] = []
+        self.reasons: dict[str, str] = {}
 
     async def forget(self, run_id: str) -> None:
         self.forgotten.append(run_id)
 
     async def knows(self, name: str) -> bool:
         return name in self.jobs
+
+    async def failure_reason(self, handle: JobHandle) -> str | None:
+        return self.reasons.get(handle.name)
 
 
 def _sandboxed(
@@ -600,3 +604,16 @@ async def test_with_auto_an_exec_job_on_an_unknown_platform_is_refused(tmp_path:
     with pytest.raises(ValueError, match="cpu-d3"):
         await backend.submit(_spec(JobKind.EXEC, name=f"p2p-exec-{SLUG}-1", platform="cpu-d3"))
     assert not remote.jobs and not sandbox.jobs
+
+
+async def test_a_failure_reason_comes_from_where_the_job_ran(tmp_path: Path) -> None:
+    """A-51: a smoke job that filled a sandbox's disk; Nebius jobs say nothing more."""
+    backend, _, _, sandbox = _sandboxed(tmp_path)
+    handle = await backend.submit(_job(JobKind.SMOKE))
+    assert await backend.failure_reason(handle) is None
+    sandbox.reasons = {handle.name: "disk_full"}
+    assert await backend.failure_reason(handle) == "disk_full"
+    plain, _, remote, _ = _hybrid(tmp_path / "plain")
+    on_nebius = await plain.submit(_job(JobKind.SMOKE))
+    assert on_nebius.name in remote.jobs
+    assert await plain.failure_reason(on_nebius) is None

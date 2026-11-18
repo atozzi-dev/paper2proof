@@ -34,6 +34,11 @@ class SmokeUnavailable(Exception):
     """The executor itself failed (API down, quota, not configured): not the Coder's fault."""
 
 
+class SmokeDiskFull(SmokeUnavailable):
+    """The sandbox ran out of disk before the script ended, with no exit code (A-51): the
+    installed packages, the repository and the data may not fit, or the script wrote too much."""
+
+
 class SmokeContractError(Exception):
     """Workspace, argv or result outside the contract."""
 

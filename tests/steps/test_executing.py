@@ -1479,3 +1479,25 @@ async def test_a_manifest_whose_job_may_exist_keeps_its_digest(
     artifacts.put_json(key, stale.model_dump(mode="json", by_alias=True))
     kept = await step._manifest(_with(ctx, KnowsAnIntent({})), plan, 1, step._where(ExecTarget.CPU))
     assert kept is not None and kept.image_digest == "sha256:" + "9" * 64
+
+
+class DiskFullBackend(ScriptedBackend):
+    """Sandboxes after the inputs filled an instance's disk before the runner ended (A-51)."""
+
+    async def failure_reason(self, handle: JobHandle) -> str | None:
+        return "disk_full"
+
+
+@pytest.mark.parametrize("preemptible", [True, False])
+async def test_a_full_sandbox_disk_stops_the_run_plainly(
+    store: Store, tmp_path: Path, preemptible: bool
+) -> None:
+    ctx, artifacts, storage = await _setup(store, tmp_path)
+    backend = DiskFullBackend({1: [JobState.FAILED]})
+    with pytest.raises(P2PError) as err:
+        await _step(artifacts, storage, FakeClock(), preemptible=preemptible).run(
+            _with(ctx, backend)
+        )
+    assert err.value.code is ErrorCode.PROVISION_FAILED
+    assert "ran out of disk" in str(err.value)
+    assert len(backend.specs) == 1  # never retried: the same inputs fill it the same way

@@ -100,6 +100,22 @@ _STATES = {
     "EXECUTING": JobState.RUNNING,
 }
 _DONE = frozenset({"SUCCESS", "SUCCEEDED", "FAILED"})
+# A-51: InterpretML (2026-10-30) failed while its instance was set up, with no exit code,
+# and only the operation's `error` said why: RemoteCallError('OSError', '28', 'No space left
+# on device (os error 28)'). Bounded and anchored on literals: linear on any text.
+_DISK_FULL = re.compile(r"No space left on device|\bos error 28\b|\bENOSPC\b")
+FAILURE_REASONS = frozenset({"disk_full"})
+
+
+def _failure(op: dict[str, Any]) -> str | None:
+    """`disk_full` for an instance the platform failed for lack of disk before its program
+    ended (no exit code); a program that exits by itself tells its own story on stderr."""
+    result = (op.get("metadata") or {}).get("result") or {}
+    state = result.get("state") if isinstance(result, dict) else None
+    code = state.get("exit_code") if isinstance(state, dict) else None
+    if op.get("status") != "FAILED" or code is not None:
+        return None
+    return "disk_full" if _DISK_FULL.search(str(op.get("error"))[:4000]) else None
 
 
 def job_command(*, kind: JobKind, out_dir: str, watchdog_s: int, marker: str) -> str:
@@ -661,10 +677,20 @@ class SandboxesJobBackend:
             else:
                 return JobState.UNKNOWN
             if entry:
+                failure = _failure(op) if state is JobState.FAILED else None
                 await asyncio.to_thread(
-                    self._index.put, handle.name, {**entry, "state": state.value}
+                    self._index.put,
+                    handle.name,
+                    {**entry, "state": state.value, **({"failure": failure} if failure else {})},
                 )
             return state
+
+    async def failure_reason(self, handle: JobHandle) -> str | None:
+        """Why a FAILED job failed, when the platform said so: one of FAILURE_REASONS, never
+        the operation's own text (A-51)."""
+        entry = await asyncio.to_thread(self._index.get, handle.name)
+        reason = entry.get("failure") if entry else None
+        return reason if reason in FAILURE_REASONS else None
 
     async def _harvest(
         self, handle: JobHandle, entry: dict[str, Any] | None, op: dict[str, Any]

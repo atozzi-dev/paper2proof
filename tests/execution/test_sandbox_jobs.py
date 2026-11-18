@@ -1034,3 +1034,52 @@ async def test_the_index_knows_which_jobs_are_in_sandboxes(
     assert await backend.knows(handle.name)
     assert not await backend.knows(f"p2p-exec-{SLUG}-3")
     assert not await backend.knows("not a job name")
+
+
+def _fail_before_start(api: Api, uuid: str, error: str) -> None:
+    """Sandboxes, 2026-10-30: the instance failed while it was being set up, no exit code."""
+    api.ops[uuid]["status"] = "FAILED"
+    api.ops[uuid]["error"] = error
+    api.ops[uuid]["metadata"] = {**api.ops[uuid]["metadata"], "result": {}}
+
+
+DISK_FULL = "RemoteCallError('OSError', '28', 'No space left on device (os error 28)')"
+
+
+async def test_a_full_disk_before_the_program_ran_is_reported(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    """A-51: InterpretML's overlay filled the instance's disk before the script started."""
+    backend = _backend(tmp_path, local, storage)
+    handle = await backend.submit(_spec())
+    assert await backend.failure_reason(handle) is None  # not finished yet
+    _fail_before_start(api, handle.nebius_id, DISK_FULL)
+    assert await backend.status(handle) is JobState.FAILED
+    assert await backend.failure_reason(handle) == "disk_full"
+    again = _backend(tmp_path, local, storage)  # a restarted control plane reads the index
+    assert await again.failure_reason(handle) == "disk_full"
+
+
+@pytest.mark.parametrize(
+    "error", ["RemoteCallError('RuntimeError', 'image pull failed')", "", "ENOSPCX"]
+)
+async def test_other_failures_have_no_reason(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api, error: str
+) -> None:
+    backend = _backend(tmp_path, local, storage)
+    handle = await backend.submit(_spec())
+    _fail_before_start(api, handle.nebius_id, error)
+    assert await backend.status(handle) is JobState.FAILED
+    assert await backend.failure_reason(handle) is None
+
+
+async def test_a_program_that_filled_the_disk_itself_has_no_reason(
+    tmp_path: Path, local: Path, storage: FakeRunStorage, api: Api
+) -> None:
+    """It exited with a code: its stderr tells the Coder, as for any failing script."""
+    backend = _backend(tmp_path, local, storage)
+    handle = await backend.submit(_spec())
+    api.finish(handle.nebius_id, status="FAILED", exit_code=1, outputs={"results.json": b"{}"})
+    api.ops[handle.nebius_id]["error"] = DISK_FULL
+    assert await backend.status(handle) is JobState.FAILED
+    assert await backend.failure_reason(handle) is None

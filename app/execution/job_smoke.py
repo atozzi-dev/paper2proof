@@ -22,13 +22,14 @@ from typing import Any
 from app.domain.contracts import ARCHIVE_NAME_PATTERN, ArchiveDigests
 from app.domain.errors import P2PError
 from app.domain.models import ErrorCode
-from app.execution.backend import JobKind, JobSpec, JobState, VolumeMount
+from app.execution.backend import JobKind, JobSpec, JobState, ReportsFailures, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
 from app.execution.nebius_backend import InputUploadError
 from app.execution.run_storage import RunStorage
 from app.execution.smoke import (
     SmokeContractError,
+    SmokeDiskFull,
     SmokeResult,
     SmokeUnavailable,
     pack_with_digest,
@@ -194,6 +195,13 @@ class JobSmokeExecutor:
                 f"the smoke job did not finish within {timeout_s + SMOKE_SETUP_S} s"
             )
         if outcome.state is not JobState.SUCCEEDED:
+            jobs = ctx.jobs
+            if (
+                outcome.state is JobState.FAILED
+                and isinstance(jobs, ReportsFailures)
+                and await jobs.failure_reason(outcome.handle) == "disk_full"
+            ):
+                raise SmokeDiskFull("the sandbox ran out of disk")
             raise SmokeUnavailable(f"the smoke job ended {outcome.state.value}")
         try:
             raw = await self._storage.get_bytes(
