@@ -262,3 +262,32 @@ def test_deeply_nested_repo_files_contribute_nothing() -> None:
     deep_toml = "x = " + "[" * 5000 + "]" * 5000 + "\n"
     assert parse_repo_requirements({"environment.yml": deep_yaml}) == set()
     assert parse_repo_requirements({"pyproject.toml": deep_toml}) == set()
+
+
+# --- A-51: CPU builds of heavy packages -------------------------------------------------------
+
+
+def test_the_cpu_substitutes_are_configured() -> None:
+    assert load_policy_config(ROOT / "config").cpu_substitutes == {
+        "xgboost": "xgboost-cpu",
+        "interpret": "interpret-core",
+    }
+
+
+def test_a_heavy_package_without_a_version_gets_its_cpu_build() -> None:
+    from app.execution.package_policy import cpu_substitutes
+
+    table = {"xgboost": "xgboost-cpu", "interpret": "interpret-core"}
+    requested = [
+        PackageReq(name="XGBoost"),  # PEP 503 names: the same package
+        PackageReq(name="interpret", specifier="==0.6.1"),  # its own versions: kept
+        PackageReq(name="lightgbm"),
+    ]
+    packages, swapped = cpu_substitutes(requested, table)
+    assert packages == [
+        PackageReq(name="xgboost-cpu"),
+        PackageReq(name="interpret", specifier="==0.6.1"),
+        PackageReq(name="lightgbm"),
+    ]
+    assert swapped == [("XGBoost", "xgboost-cpu")]
+    assert cpu_substitutes(requested, {}) == (requested, [])

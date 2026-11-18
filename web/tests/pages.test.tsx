@@ -498,6 +498,10 @@ describe('warningTitle', () => {
     expect(warningTitle('REPO_TOO_LARGE')).toBe('Repository too large to fetch')
   })
 
+  it('names a package installed as its CPU build', () => {
+    expect(warningTitle('PACKAGE_SUBSTITUTED')).toBe('CPU build installed')
+  })
+
   it('shows a code it does not know as it came', () => {
     expect(warningTitle('SOMETHING_NEW')).toBe('SOMETHING_NEW')
     expect(warningTitle('toString')).toBe('toString')

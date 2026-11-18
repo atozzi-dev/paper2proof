@@ -24,6 +24,7 @@ from app.domain.errors import P2PError
 from app.domain.events import EventType
 from app.domain.models import (
     ErrorCode,
+    ExecTarget,
     PackageReq,
     Plan,
     PlanArtifact,
@@ -34,7 +35,12 @@ from app.domain.models import (
 from app.execution.backend import CACHE_BUCKET, JobKind, JobSpec, JobState, VolumeMount
 from app.execution.config import ExecutionConfig
 from app.execution.naming import job_name, run_slug
-from app.execution.package_policy import PackagePolicy, PolicyContext, parse_repo_requirements
+from app.execution.package_policy import (
+    PackagePolicy,
+    PolicyContext,
+    cpu_substitutes,
+    parse_repo_requirements,
+)
 from app.execution.run_storage import RunStorage
 from app.models.pricing import CloudPrices
 from app.orchestrator.context import RunContext
@@ -186,12 +192,38 @@ class ProvisioningStep:
         files = {str(k): v for k, v in raw.items() if isinstance(v, str)}
         return await ctx.run_cpu(parse_repo_requirements, files)
 
+    async def _cpu_builds(
+        self, ctx: RunContext, requested: list[PackageReq], target: ExecTarget
+    ) -> list[PackageReq]:
+        """On CPU, heavy packages as their CPU builds (A-51), each one said in a warning."""
+        if target is not ExecTarget.CPU:
+            return requested
+        packages, swapped = cpu_substitutes(requested, self._policy.config.cpu_substitutes)
+        for asked, installed in swapped:
+            await ctx.emit(
+                EventType.WARNING,
+                {
+                    "code": "PACKAGE_SUBSTITUTED",
+                    "message": f"{asked} is installed as {installed}: the same library under "
+                    "the same import name, without what a CPU run cannot use (a Token Factory "
+                    "Sandbox has a small disk)",
+                },
+            )
+        return packages
+
     async def _packages(
-        self, ctx: RunContext, plan: Plan, discovery: Discovery, *, package_request: bool
+        self,
+        ctx: RunContext,
+        plan: Plan,
+        discovery: Discovery,
+        *,
+        package_request: bool,
+        target: ExecTarget = ExecTarget.CPU,
     ) -> list[PackageReq]:
         repo_requirements = await self._repo_requirements(ctx, discovery)
         planned = await self._policy.validate(
-            plan.packages, PolicyContext(repo_requirements=repo_requirements)
+            await self._cpu_builds(ctx, plan.packages, target),
+            PolicyContext(repo_requirements=repo_requirements),
         )
         for rejected in planned.rejected:
             why = f"{rejected.package.name}: {rejected.reason.value} {rejected.detail}"
@@ -202,7 +234,7 @@ class ProvisioningStep:
             raw = request.get("requested_packages")
             requested = [PackageReq.model_validate(p) for p in raw] if isinstance(raw, list) else []
             decision = await self._policy.validate(
-                requested,
+                await self._cpu_builds(ctx, requested, target),
                 PolicyContext(
                     repo_requirements=repo_requirements,
                     requests_so_far=package_requests(
@@ -221,7 +253,8 @@ class ProvisioningStep:
         return packages
 
     async def run(self, ctx: RunContext) -> StepResult:
-        plan = (await active_plan(ctx, self._json)).plan  # A-47: CPU after a fallback
+        active = await active_plan(ctx, self._json)  # A-47: CPU after a fallback
+        plan = active.plan
         discovery = Discovery.model_validate(
             await self._json(await output_of(ctx, StepName.DISCOVERING))
         )
@@ -233,7 +266,11 @@ class ProvisioningStep:
         steps = await ctx.store.get_steps(ctx.run_id)
         fallback = await self._fallback_entry(ctx, steps)  # A-47: not a package request
         packages = await self._packages(
-            ctx, plan, discovery, package_request=ctx.attempt > 1 and not fallback
+            ctx,
+            plan,
+            discovery,
+            package_request=ctx.attempt > 1 and not fallback,
+            target=active.target,
         )
         bucket = await ctx.jobs.ensure_run_bucket(ctx.run_id)
         await ctx.jobs.ensure_gateway_up()  # may cold-start the VM: anchor the deadline after it

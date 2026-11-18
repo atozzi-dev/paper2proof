@@ -40,6 +40,7 @@ const WARNING_TITLE: Readonly<Record<string, string>> = {
   DISCOVERY_DEGRADED: 'Search partly unavailable',
   ABSOLUTE_AT_REDUCED_SCALE: 'Absolute value at reduced scale',
   PACKAGE_REJECTED: 'Package rejected',
+  PACKAGE_SUBSTITUTED: 'CPU build installed',
   DATASET_UNAVAILABLE: 'Dataset unavailable',
   CLAIM_NOT_MEASURED: 'Claim not measured',
   PACKAGES_REQUESTED: 'Packages requested',

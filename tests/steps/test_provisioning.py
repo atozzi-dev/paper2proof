@@ -1279,3 +1279,53 @@ async def test_the_fallback_fetches_the_data_its_cpu_plan_needs(
     assert f"p2p-fetch-{RUN[2:]}-2" in ctx.jobs.jobs  # type: ignore[attr-defined]
     assert _manifest(ctx, JobKind.FETCH)["datasets"][0]["id"] == "ylecun/mnist"
     assert artifacts.get_json(f"runs/{RUN}/fetch_report_cpu.json")["run_id"] == RUN
+
+
+# --- A-51: CPU builds of heavy packages -------------------------------------------------------
+
+
+def _heavy(*names: str) -> None:
+    for name in names:
+        respx.get(f"https://pypi.org/pypi/{name}/json").mock(return_value=_pypi())
+
+
+@respx.mock
+async def test_on_cpu_heavy_packages_are_installed_as_their_cpu_builds(
+    store: Store, tmp_path: Path
+) -> None:
+    """InterpretML (2026-10-30): interpret's extras and xgboost's GPU build filled a sandbox."""
+    _heavy("xgboost-cpu", "interpret-core", "lightgbm")
+    ctx, artifacts = await _setup(store, tmp_path, packages=["interpret", "lightgbm", "xgboost"])
+    storage, clock = FakeRunStorage(), FakeClock()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, clock).run(ctx)
+    assert _manifest(ctx)["packages"] == ["interpret-core", "lightgbm", "xgboost-cpu"]
+    swapped = [w for w in await _warnings(store) if w.code == "PACKAGE_SUBSTITUTED"]
+    assert [w.message.split(" ")[0] for w in swapped] == ["interpret", "xgboost"]
+    assert "xgboost-cpu" in swapped[1].message and "import" in swapped[1].message
+
+
+@respx.mock
+async def test_a_coder_request_on_cpu_gets_the_cpu_build_too(store: Store, tmp_path: Path) -> None:
+    _heavy("xgboost-cpu")
+    ctx, artifacts = await _setup(store, tmp_path, packages=[], smoke_request=["xgboost"])
+    storage, clock = FakeRunStorage(), FakeClock()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, clock).run(ctx)
+    assert _manifest(ctx)["packages"] == ["xgboost-cpu"]
+
+
+@respx.mock
+async def test_on_gpu_the_packages_stay_as_asked(store: Store, tmp_path: Path) -> None:
+    _heavy("xgboost")
+    ctx, artifacts = await _setup(store, tmp_path, packages=["xgboost"])
+    stored = artifacts.get_json(PLAN_KEY)
+    gpu = PlanArtifact.model_validate(
+        {**stored, "target": "gpu", "cpu_plan": stored["plan"], "est_cost_max_usd": 1.0}
+    )
+    artifacts.put_json(PLAN_KEY, gpu.model_dump(mode="json"))
+    storage, clock = FakeRunStorage(), FakeClock()
+    ctx = RunContext(**{**ctx.__dict__, "jobs": FakeJobBackend(on_submit=_writes_report(storage))})
+    await _step(store, artifacts, storage, clock).run(ctx)
+    assert _manifest(ctx)["packages"] == ["xgboost"]
+    assert not [w for w in await _warnings(store) if w.code == "PACKAGE_SUBSTITUTED"]

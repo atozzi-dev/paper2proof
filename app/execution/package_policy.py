@@ -77,11 +77,30 @@ class PolicyConfig(BaseModel):
     min_age_days: int
     denylist: frozenset[str]
     popular: frozenset[str]
+    cpu_substitutes: dict[str, str] = Field(default_factory=dict)  # normalized name -> CPU build
 
 
 def normalize(name: str) -> str:
     """PEP 503 normalization."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def cpu_substitutes(
+    requested: list[PackageReq], table: Mapping[str, str]
+) -> tuple[list[PackageReq], list[tuple[str, str]]]:
+    """The requests with each heavy package replaced by its CPU build (A-51), and the
+    (requested, installed) pairs. Only a request without a specifier: the substitute's versions
+    are not the original's. The substitute goes through the policy like any request."""
+    packages: list[PackageReq] = []
+    swapped: list[tuple[str, str]] = []
+    for req in requested:
+        target = table.get(normalize(req.name)) if req.specifier is None else None
+        if target is None:
+            packages.append(req)
+            continue
+        packages.append(PackageReq(name=target))
+        swapped.append((req.name, target))
+    return packages, swapped
 
 
 def load_policy_config(config_dir: Path) -> PolicyConfig:
@@ -100,6 +119,9 @@ def load_policy_config(config_dir: Path) -> PolicyConfig:
         min_age_days=int(allow["min_age_days"]),
         denylist=frozenset(normalize(n) for n in allow["denylist"]),
         popular=frozenset(normalize(n) for n in popular),
+        cpu_substitutes={
+            normalize(str(k)): str(v) for k, v in (allow.get("cpu_substitutes") or {}).items()
+        },
     )
 
 
