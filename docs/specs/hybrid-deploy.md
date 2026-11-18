@@ -137,7 +137,13 @@ work unchanged. For one spec it:
    `FAILED`, `CANCELLED` → `CANCELLED` (its partial results harvested if it got that far). An
    instance is reported terminal only after its outputs were written; a bucket that cannot
    be written is `JobStatusUnavailable`, asked again at the next poll, like HTTP errors. A 429
-   at spawn is `CapacityError`.
+   at spawn is `CapacityError`. An instance that fails with no exit code and an operation
+   `error` saying the disk is full (`No space left on device`, `os error 28`, `ENOSPC`) is
+   recorded as `failure: disk_full` in its index entry and reported by `failure_reason`
+   (A-51); the error text itself never leaves the backend. A smoke run that ends this way
+   costs the Coder no smoke run the first time, and stops SMOKE_TESTING with
+   `PROVISION_FAILED` the second time in a row; an exec job that ends this way stops the run
+   with the same message.
 6. **Names are deterministic (invariant 9).** Sandboxes has no names, so the backend keeps an
    index on the host, one file per job name (`P2P_LOCAL_JOBS_DIR/sandbox-jobs/<name>.json`),
    written before the spawn (intent) and after it (operation id). `submit` is get-by-name

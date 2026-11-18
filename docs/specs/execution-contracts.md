@@ -94,6 +94,16 @@ Rules, in order:
 5. Accept if the package appears in the official repo's requirements (`requirements*.txt`, `pyproject.toml`, `setup.cfg`, `environment.yml`), **or** has ≥ `packages.min_releases` releases **and** its first release is older than `packages.min_age_days` (`REJECT_UNPOPULAR` otherwise).
 6. At most `packages.max_per_request` (`config/allowlist.yaml`) per request and `per_run.package_requests` (`config/budgets.yaml`) requests per run (`REJECT_QUOTA`).
 
+**CPU substitutes (A-51).** When the active plan runs on CPU, a request without a version
+specifier for a name in `config/allowlist.yaml: packages.cpu_substitutes` is replaced, before the
+rules above, by its CPU build: the same library under the same import name, without what a CPU
+run cannot use (`xgboost` → `xgboost-cpu`, without the GPU build and its NCCL dependency;
+`interpret` → `interpret-core`, without the dashboards and notebook extras). The substitute
+passes every rule itself. A request with a specifier is kept as asked (the substitute's versions
+are not the original's). Each substitution emits a `PACKAGE_SUBSTITUTED` warning; it is not a
+deviation from the paper's setup. A Token Factory Sandbox has a small disk: InterpretML's
+overlay filled it before the script started (2026-10-30).
+
 The provisioner installs with: `uv pip install --only-binary=:all: --require-hashes -r lock.txt --target <overlay>`. **No sdists, ever.**
 
 ## 5. Manifests
