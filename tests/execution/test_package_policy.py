@@ -327,3 +327,41 @@ async def test_an_unusable_pypi_answer_is_no_package_and_not_cached(
     assert await client.info("torch") is None
     assert await client.info("torch") is None
     assert route.call_count == 2  # not cached: PyPI is asked again next time
+
+
+@respx.mock
+async def test_a_malformed_package_answer_is_not_cached(store: Store) -> None:
+    bad = {"releases": {"1.0": [{"upload_time_iso_8601": 7, "packagetype": "bdist_wheel"}]}}
+    route = respx.get("https://pypi.org/pypi/torch/json").mock(
+        return_value=httpx.Response(200, json=bad)
+    )
+    client = PyPIClient(store)
+    assert await client.info("torch") is None and await client.info("torch") is None
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_a_missing_package_is_still_cached(store: Store) -> None:
+    route = respx.get("https://pypi.org/pypi/nope/json").mock(return_value=httpx.Response(404))
+    client = PyPIClient(store)
+    assert await client.info("nope") is None and await client.info("nope") is None
+    assert route.call_count == 1
+
+
+async def test_an_answer_that_never_ends_is_no_package(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review of A-52: the client's timeout bounds each read, not the whole answer."""
+    import asyncio
+
+    from app.execution import package_policy
+
+    async def drip() -> Any:
+        while True:
+            yield b" "
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(package_policy, "PYPI_DEADLINE_S", 0.2)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=drip()))
+    async with httpx.AsyncClient(transport=transport) as http:
+        assert await PyPIClient(store, http).info("torch") is None

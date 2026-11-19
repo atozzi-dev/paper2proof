@@ -1,6 +1,7 @@
 """Package policy (docs/specs/execution-contracts.md §4). The Coder and the Planner only *request*
 packages (invariant 3); this deterministic code decides, before anything is installed."""
 
+import asyncio
 import configparser
 import hashlib
 import json
@@ -25,6 +26,7 @@ CACHE_TTL = timedelta(hours=24)
 # A package's JSON lists every file of every release: a few MB for the largest (torch). More
 # than this is not a package's metadata, and is never read whole (A-52).
 MAX_PYPI_BYTES = 16 * 1024 * 1024
+PYPI_DEADLINE_S = 60.0  # the whole answer: a drip of a byte per read timeout never ends
 log = logging.getLogger(__name__)
 _NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")  # PEP 508 name
 PACKAGE_NAME = _NAME  # what a plan note may quote
@@ -177,8 +179,11 @@ class PyPIClient:
             return cached
         client = self._http or httpx.AsyncClient(timeout=30)
         body = bytearray()
-        try:
-            async with client.stream("GET", f"{PYPI}/{name}/json") as response:
+        try:  # the client's timeout bounds each read, this one the whole answer (A-52)
+            async with (
+                asyncio.timeout(PYPI_DEADLINE_S),
+                client.stream("GET", f"{PYPI}/{name}/json") as response,
+            ):
                 status = response.status_code
                 if status == 200:
                     async for chunk in response.aiter_bytes():
@@ -186,6 +191,9 @@ class PyPIClient:
                         if len(body) > MAX_PYPI_BYTES:  # never cached: asked again next time
                             log.warning("PyPI answer over %d bytes", MAX_PYPI_BYTES)
                             return None
+        except TimeoutError:
+            log.warning("PyPI answer not complete within %s s", PYPI_DEADLINE_S)
+            return None  # never cached, like an outage
         finally:
             if self._http is None:
                 await client.aclose()
