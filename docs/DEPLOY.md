@@ -404,6 +404,14 @@ Sandboxes, `P2P_RUNNER_IMAGE` with GPU jobs, both with `auto`) is listed in
 other direction, a new runner under an older control plane works: it writes `results.json` as
 before when the manifest has no time target.
 
+`images/runner/smoke.py` runs every smoke job, on `p2p-runner-cpu`. Since A-50 the smoke manifest
+names the smoke subset's dataset folder (`smoke_folder`), and a runner-cpu from before A-50 ignores
+it and puts the subset in `data/smoke`, where no script looks. The control plane stops such a run
+after its first smoke run (the runner echoes the folder), and `P2P_ENV=prod` refuses to start
+unless `P2P_RUNNER_CPU_IMAGE` is also listed under `smoke_folder` in `config/runner_images.yaml`.
+Let the runs in SMOKE_TESTING finish before the switch: a resumed run whose script reads
+`data/smoke` is refused by the new checks.
+
 Do these steps in order. Each one that changes the cloud or spends money is the human's.
 
 1. Rebuild `p2p-runner-cpu` from the commit to deploy, plus `p2p-runner` if
@@ -415,7 +423,8 @@ Do these steps in order. Each one that changes the cloud or spends money is the 
    manifest carries the time target, so a stale import fails it.
 4. On the branch to deploy, commit the new `config/sandbox_images.yaml` entry and the new
    digests in `config/runner_images.yaml`. Never list a digest built before A-47 (an A-46
-   runner takes the time target but refuses a GPU budget over 1800 s).
+   runner takes the time target but refuses a GPU budget over 1800 s), and list a runner-cpu
+   digest under `smoke_folder` only when it was built from A-50 or later.
 5. In `/etc/p2p/p2p.env`, update `P2P_RUNNER_CPU_IMAGE` (and `P2P_RUNNER_IMAGE`). Deploy the
    code in the same restart (host step 4).
 6. Run one canary paper end to end.

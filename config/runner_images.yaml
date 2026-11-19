@@ -6,3 +6,10 @@
 # changes"); never list one built before: an A-46 runner also refuses budget_seconds over
 # 1800, the hour a GPU target may get (A-47).
 time_target: []
+
+# p2p-runner-cpu digests built from A-50 or later: their smoke runner extracts the smoke
+# subset into its dataset's folder (the smoke manifest's smoke_folder). An older one puts it in
+# data/smoke, where no script looks: the run-time echo check would stop every run after one
+# smoke run, so P2P_ENV=prod refuses to start with a P2P_RUNNER_CPU_IMAGE not listed here.
+# A digest listed here is listed in time_target too.
+smoke_folder: []
