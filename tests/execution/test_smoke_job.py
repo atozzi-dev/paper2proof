@@ -503,3 +503,42 @@ async def test_a_full_sandbox_disk_is_its_own_error(
     with pytest.raises(SmokeUnavailable) as err:
         await smoke.run(env, ARGV, {}, 60)
     assert isinstance(err.value, SmokeDiskFull) is disk_full
+
+
+def _runner_smoke() -> Any:
+    """images/runner/smoke.py, as tests/runner/test_smoke_entry.py loads it (stdlib only)."""
+    import importlib.util
+    import sys
+
+    sys.path.insert(0, str(ROOT / "images/runner"))
+    path = ROOT / "images/runner/smoke.py"
+    spec = importlib.util.spec_from_file_location("p2p_smoke_contract", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["p2p_smoke_contract"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("folder", ["ylecun__mnist", None])
+async def test_the_runner_accepts_the_manifest_the_control_plane_writes(
+    store: Store, folder: str | None
+) -> None:
+    """Infra review of A-50: the two sides of the smoke manifest, checked against each other."""
+    storage = FakeRunStorage()
+    jobs = FakeJobBackend(on_submit=_writes_result(storage))
+    ctx = await ctx_at(store, StepName.SMOKE_TESTING, previous=[(StepName.PROVISIONING, "p")])
+    ctx = RunContext(**{**ctx.__dict__, "jobs": jobs})
+    smoke = JobSmokeExecutor(
+        ctx,
+        archives=ARCHIVES,
+        storage=storage,
+        config=CFG,
+        cloud=load_cloud_prices(ROOT / "config" / "pricing.yaml"),
+        smoke_folder=folder,
+    )
+    env = await smoke.prepare(RUN, {"train.py": b"x"})
+    await smoke.run(env, ARGV, {}, 60)
+    ((_, _, _, spec),) = jobs.jobs.values()
+    manifest = json.loads(spec.inject_files["/etc/p2p/smoke.json"])
+    assert _runner_smoke().validate(manifest) == manifest
