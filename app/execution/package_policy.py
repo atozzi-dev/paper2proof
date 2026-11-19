@@ -3,6 +3,8 @@ packages (invariant 3); this deterministic code decides, before anything is inst
 
 import configparser
 import hashlib
+import json
+import logging
 import re
 import tomllib
 from collections.abc import Callable, Mapping
@@ -20,6 +22,10 @@ from app.storage.store import Store
 
 PYPI = "https://pypi.org/pypi"
 CACHE_TTL = timedelta(hours=24)
+# A package's JSON lists every file of every release: a few MB for the largest (torch). More
+# than this is not a package's metadata, and is never read whole (A-52).
+MAX_PYPI_BYTES = 16 * 1024 * 1024
+log = logging.getLogger(__name__)
 _NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")  # PEP 508 name
 PACKAGE_NAME = _NAME  # what a plan note may quote
 _VERSION = r"[A-Za-z0-9.*+!_-]{1,40}"
@@ -170,12 +176,29 @@ class PyPIClient:
         if hit is not None and (cached is None or cached.has_wheel is not None):
             return cached
         client = self._http or httpx.AsyncClient(timeout=30)
+        body = bytearray()
         try:
-            response = await client.get(f"{PYPI}/{name}/json")
+            async with client.stream("GET", f"{PYPI}/{name}/json") as response:
+                status = response.status_code
+                if status == 200:
+                    async for chunk in response.aiter_bytes():
+                        body += chunk
+                        if len(body) > MAX_PYPI_BYTES:  # never cached: asked again next time
+                            log.warning("PyPI answer over %d bytes", MAX_PYPI_BYTES)
+                            return None
         finally:
             if self._http is None:
                 await client.aclose()
-        info = _parse_pypi(response.json()) if response.status_code == 200 else None
+        info = None
+        if status == 200:
+            try:
+                data = json.loads(body)
+                if not isinstance(data, dict):
+                    raise TypeError("not an object")
+                info = _parse_pypi(data)
+            except (ValueError, TypeError, AttributeError, KeyError, RecursionError):
+                log.warning("PyPI answer unusable")  # an outage page: never cached
+                return None
         await self._store.cache_put(
             "pypi", key, {"info": info.model_dump(mode="json") if info else None}
         )

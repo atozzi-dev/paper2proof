@@ -300,3 +300,30 @@ def test_a_name_the_policy_would_refuse_is_never_substituted(name: str) -> None:
 
     requested = [PackageReq.model_construct(name=name, specifier=None)]
     assert cpu_substitutes(requested, {"xgboost": "xgboost-cpu"}) == (requested, [])
+
+
+# --- the PyPI answer is bounded (A-52) --------------------------------------------------------
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, content=b"{" + b" " * (32 * 1024 * 1024) + b"}"),  # over the cap
+        httpx.Response(200, content=b"<html>maintenance</html>"),  # not JSON
+        httpx.Response(200, json=["not", "an", "object"]),
+    ],
+    ids=["huge", "html", "list"],
+)
+async def test_an_unusable_pypi_answer_is_no_package_and_not_cached(
+    store: Store, response: httpx.Response
+) -> None:
+    """A security review Low (pre-existing): the answer was read whole, without a cap."""
+    from app.execution.package_policy import MAX_PYPI_BYTES
+
+    assert MAX_PYPI_BYTES < 32 * 1024 * 1024
+    route = respx.get("https://pypi.org/pypi/torch/json").mock(return_value=response)
+    client = PyPIClient(store)
+    assert await client.info("torch") is None
+    assert await client.info("torch") is None
+    assert route.call_count == 2  # not cached: PyPI is asked again next time
