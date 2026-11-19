@@ -40,7 +40,7 @@ from app.discovery.tavily import TavilyClient
 from app.domain.errors import P2PError
 from app.domain.models import ErrorCode, PackageReq, StepName
 from app.execution.backend import JobBackend
-from app.execution.config import ExecutionConfig, has_time_target
+from app.execution.config import ExecutionConfig, has_smoke_folder, has_time_target
 from app.execution.dev_docker import DevDockerBackend, LocalRunStorage
 from app.execution.fake_backend import FakeJobBackend
 from app.execution.hybrid import HybridJobBackend, HybridRunStorage, upload_run_dir
@@ -291,6 +291,13 @@ def _check_runner(settings: Settings) -> None:
                 "(A-46, A-47): rebuild the runner from this commit and list its digest in "
                 "config/runner_images.yaml (docs/DEPLOY.md)"
             )
+    if not has_smoke_folder(settings.config_dir / "runner_images.yaml", execution.runner_cpu_image):
+        digest = execution.runner_cpu_image.rsplit("@", 1)[-1]
+        raise ConfigError(  # every smoke job runs on runner-cpu
+            f"the smoke runner P2P_RUNNER_CPU_IMAGE {digest} predates the smoke data folder "
+            "(A-50): rebuild runner-cpu from this commit and list its digest under smoke_folder "
+            "in config/runner_images.yaml (docs/DEPLOY.md)"
+        )
 
 
 def _check_hybrid(settings: Settings) -> None:

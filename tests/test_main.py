@@ -204,7 +204,9 @@ def _config(tmp_path: Path) -> Path:
     if not config.exists():
         shutil.copytree(ROOT / "config", config)
         listed = "".join(f"  - {d}\n" for d in RUNNER_DIGESTS)
-        (config / "runner_images.yaml").write_text(f"time_target:\n{listed}", encoding="utf-8")
+        (config / "runner_images.yaml").write_text(
+            f"time_target:\n{listed}smoke_folder:\n  - {RUNNER_DIGESTS[1]}\n", encoding="utf-8"
+        )
     return config
 
 
@@ -271,12 +273,28 @@ def test_the_guard_checks_the_runner_the_manifests_name(
         main.prod_adapters(settings)
 
 
+def test_prod_refuses_a_runner_cpu_from_before_the_smoke_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-50: such a runner-cpu puts the smoke subset where no script looks; the run-time echo
+    check would stop every run after one smoke run, so the start stops instead."""
+    monkeypatch.setattr(main, "build_nebius_execution", _nebius({}))
+    settings = _prod(tmp_path, monkeypatch, **PROD_STORAGE)
+    path = settings.config_dir / "runner_images.yaml"
+    listed = "".join(f"  - {d}\n" for d in RUNNER_DIGESTS)
+    path.write_text(f"time_target:\n{listed}smoke_folder: []\n", encoding="utf-8")
+    with pytest.raises(main.ConfigError, match=r"P2P_RUNNER_CPU_IMAGE sha256:c{64} .*smoke"):
+        main.prod_adapters(settings)
+
+
 def test_no_runner_from_before_the_time_target_is_listed() -> None:
     import yaml
 
     data = yaml.safe_load((ROOT / "config" / "runner_images.yaml").read_text(encoding="utf-8"))
     assert isinstance(data["time_target"], list)
     assert not set(data["time_target"]) & PRE_A46
+    assert isinstance(data["smoke_folder"], list)  # A-50: built from A-50 or later only
+    assert set(data["smoke_folder"]) <= set(data["time_target"])
 
 
 def test_prod_refuses_unsigned_bundles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

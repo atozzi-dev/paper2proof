@@ -11,15 +11,27 @@ EXEC_PLATFORM, EXEC_PRESET = "gpu-l40s-a", "1gpu-8vcpu-32gb"  # execution-contra
 EXEC_FALLBACK = ("gpu-l40s-d", "1gpu-16vcpu-96gb")
 
 
-def has_time_target(path: Path, image: str) -> bool:
-    """Whether this runner image's digest is listed as built with the exec manifest's time
-    target (config/runner_images.yaml, A-46). A missing file lists nothing."""
+def _listed(path: Path, key: str, image: str) -> bool:
+    """Whether this runner image's digest is in config/runner_images.yaml's `key` list. A
+    missing file lists nothing."""
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except FileNotFoundError:
         return False
-    listed = data.get("time_target") if isinstance(data, dict) else None
+    listed = data.get(key) if isinstance(data, dict) else None
     return isinstance(listed, list) and image.rsplit("@", 1)[-1] in listed
+
+
+def has_time_target(path: Path, image: str) -> bool:
+    """Whether this runner image's digest is listed as built with the exec manifest's time
+    target (config/runner_images.yaml, A-46)."""
+    return _listed(path, "time_target", image)
+
+
+def has_smoke_folder(path: Path, image: str) -> bool:
+    """Whether this runner-cpu image's digest is listed as built from A-50 or later: its smoke
+    runner extracts the subset into its dataset's folder (config/runner_images.yaml)."""
+    return _listed(path, "smoke_folder", image)
 
 
 class ExecutionConfig(BaseModel):
