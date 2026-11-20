@@ -49,7 +49,7 @@ which worked on the first call.
 
 ## Token Factory Sandboxes
 
-### 2026-11-20 — The program can write 48 GiB, yet inputs ran out of disk; a CPU-second costs about 0.01 USD, undocumented
+### 2026-11-20 — The program can write 48 GiB, yet inputs ran out of disk; `resources.cost` is not what is billed
 - **Context:** spike S15 (`spikes/s15_sandbox_disk.py`, A-52): measuring the disk of an
   instance on the imported runner-cpu image, networking disabled, to size an input check
   after the 2026-10-30 ENOSPC above.
@@ -61,17 +61,19 @@ which worked on the first call.
   `instance_max_layer_bytes` limit (12 GiB). Neither is described. The operation reported
   `resources.cost` 0.107 USD for about 93 s of instance time (10.7 s of CPU, 48 GiB written).
   Two control runs showed that the cost follows CPU time: 90 s idle cost 0.0003 USD, 5 s of
-  one busy CPU cost 0.0503 USD, so about 0.01 USD per CPU-second (36 USD per CPU-hour).
+  one busy CPU cost 0.0503 USD, so about 0.01 USD per CPU-second (36 USD per CPU-hour). Yet the
+  bill does not follow it: our operations report 125.90 USD since October, while the whole
+  Token Factory bill for October, model tokens included, was 13.04 USD.
 - **Expected:** a documented limit for each place a job's bytes go (mounted files, the image
   layer, the root filesystem, `/dev/shm`), and a price list that says what `cost` is made of
   (instance time, CPU, bytes written).
 - **Impact:** a client cannot check its inputs against a limit before it starts, and cannot
   estimate a run's cost: our budget prices a sandbox like a cpu-d3 VM (about 0.078 USD per
-  hour for 4 vCPU). At the reported rate a CPU-bound 30-minute experiment on 4 vCPU would cost
-  about 72 USD, so the budget check cannot be trusted until the price is known.
+  hour for 4 vCPU), and a field named `cost` that is not the bill sent us to the invoice to
+  find out which one to trust.
 - **Suggestion:** publish the per-instance limits (`df` reporting the host's shared filesystem
-  misleads), name the limit an ENOSPC hit in the operation's error, and document the billing
-  formula behind `resources.cost`.
+  misleads), name the limit an ENOSPC hit in the operation's error, and document what
+  `resources.cost` measures, or report the billed amount in it.
 - **Severity:** major
 
 ### 2026-10-30 — An instance runs out of disk with no limit documented, and only the operation says so
