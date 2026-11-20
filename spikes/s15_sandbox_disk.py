@@ -1,6 +1,7 @@
 """Spike S15: how much disk does a Token Factory Sandbox instance give a job?
 
 Run:   uv run python spikes/s15_sandbox_disk.py [--image <runner-cpu UUID>] [--cap-gib 48]
+       control runs: --cap-gib 0 --sleep 90 (idle), --cap-gib 0 --burn 5 (CPU, no writes)
        (default image: the last one in config/sandbox_images.yaml)
 Needs: NEBIUS_API_KEY and TF_PROJECT_ID (the `Project` header), Sandboxes beta access.
 Cost:  one disposable instance, networking disabled, for at most --timeout seconds (default
@@ -33,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DISK_FULL = re.compile(r"No space left on device|\bos error 28\b|\bENOSPC\b")  # as sandbox_jobs
 
 
-def probe(cap_gib: int) -> str:
+def probe(cap_gib: int, sleep_s: int, burn_s: int) -> str:
     blocks = cap_gib * 16  # 64 MiB blocks
     return f"""
 set -u
@@ -51,6 +52,8 @@ echo "DD_ERROR: $(grep -v records /tmp/s15/dd.err | head -n 2 | tr '\\n' ' ')"
 echo "DF_TMP_FULL: $(df -Pk /tmp | tail -n 1 | awk '{{print $4}}')"
 rm -f /tmp/s15/fill
 echo "DF_TMP_AFTER: $(df -Pk /tmp | tail -n 1 | awk '{{print $4}}')"
+sleep {sleep_s}
+timeout {burn_s} sh -c 'while :; do :; done'
 exit 0
 """
 
@@ -67,6 +70,8 @@ def main() -> int:
     parser.add_argument("--image", help="the imported runner-cpu UUID (default: the last one)")
     parser.add_argument("--cap-gib", type=int, default=48)
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--sleep", type=int, default=0, help="seconds to idle before exiting")
+    parser.add_argument("--burn", type=int, default=0, help="seconds of one busy CPU")
     args = parser.parse_args()
 
     env = require_env("NEBIUS_API_KEY", "TF_PROJECT_ID")
@@ -84,7 +89,7 @@ def main() -> int:
     op_id, err = sbx.spawn(
         {
             "image": image,
-            "command": probe(args.cap_gib),
+            "command": probe(args.cap_gib, args.sleep, args.burn),
             "shell": True,
             "uid": 0,
             "gid": 0,

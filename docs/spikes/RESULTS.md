@@ -18,7 +18,7 @@
 | S12 | PASS | pytorch 2.5.1 CUDA image: create → start 3 min 38 s (under 240 s); CUDA available |
 | S13 | pending | — |
 | S14 | **PASS** (2026-10-29, on the imported runner-cpu) | Sandboxes can run an exec job: files API, root-owned read-only mounts, `setpriv` to uid 10001, 8 MiB of stdout, cancel, env echoed. Instances are **4 vCPU, ~3.8 GiB RAM** (`SANDBOX_PRESET = 4vcpu-4gb`). Phase 5 (the job command on the imported runner-cpu) runs after the import |
-| S15 | PASS (2026-11-20) | A sandbox's `/tmp` took 48 GiB (the spike's cap) with no error: the root is a virtiofs reporting ~46 TiB free, so no input-size check against a disk size (A-51's C) is needed; the platform charged 0.107 USD for this ~2-minute instance |
+| S15 | PASS (2026-11-20) | A sandbox's `/tmp` took 48 GiB (the spike's cap) with no error: the root is a virtiofs reporting ~46 TiB free, so no input-size check against a disk size (A-51's C) is needed; `resources.cost` follows CPU time at about **0.01 USD per CPU-second** (two control runs), far above the sandbox price in `config/pricing.yaml` |
 
 ## S1 — Token Factory account and credits can be activated from Italy
 
@@ -301,7 +301,7 @@
 ## S15 — How much disk does a Sandboxes instance give a job?
 
 - **Question:** the 2026-10-30 eval lost InterpretML to "No space left on device" in a sandbox (A-51). How much can a job write, and does A-51's follow-up C (compare the inputs' size with the disk before starting) need a number?
-- **Command:** `uv run python spikes/s15_sandbox_disk.py` (Windows, 2026-11-20, image `de30e883-94c8-380f-b9d7-b39c2c64a361`, the last one in `config/sandbox_images.yaml`).
+- **Command:** `uv run python spikes/s15_sandbox_disk.py`, then `--cap-gib 0 --sleep 90` and `--cap-gib 0 --burn 5` (Windows, 2026-11-20, image `de30e883-94c8-380f-b9d7-b39c2c64a361`, the last one in `config/sandbox_images.yaml`).
 - **Output (key facts):**
   ```
   status SUCCESS in 128.2 s
@@ -315,5 +315,13 @@
 - **Facts:**
   - Every path a job writes sits on a shared virtiofs root that reports about 46 TiB free; 48 GiB went in without an error. The only small filesystems are `/dev/shm` (about 1.9 GiB, tmpfs, so counted against the ~3.8 GiB of RAM) and `/dev`.
   - The run printed `exit_code None` because the spike read `result.exit_code`; the exit code lives in `result.state.exit_code` (where `SandboxesJobBackend` reads it). The spike is fixed; the measurement does not depend on it.
-  - The per-operation `cost` was **0.107 USD** for about 93 s of instance time (11 s of CPU) and 48 GiB written. `config/pricing.yaml` prices a sandbox like cpu-d3 (about 0.078 USD per hour). One data point cannot say whether the charge follows time or bytes written.
-- **Decision:** A-51's C (an input-size check before starting) is dropped: there is no small disk to compare with. The October ENOSPC was not `/tmp` running out. It may have been `/dev/shm` or the platform's own staging; A-51 classifies it either way. Open: reconcile the sandbox price (one control run of `sleep 90` with no writes would separate time from bytes) before trusting the ledger's sandbox estimates.
+  - The per-operation `cost` was **0.107 USD** for about 93 s of instance time, 10.7 s of CPU (`resources.elapsed_time`, which is CPU time) and 48 GiB written. Two control runs on the same day separate the causes:
+
+    | Run | Wall time | CPU time | Written | `cost` (USD) |
+    |---|---|---|---|---|
+    | `--cap-gib 48` (fill /tmp) | 93 s | 10.7 s | 48 GiB | 0.1073 |
+    | `--cap-gib 0 --sleep 90` (idle) | 90 s | 0.03 s | 0 | 0.0003 |
+    | `--cap-gib 0 --burn 5` (one busy CPU) | 5 s | 5.03 s | 0 | 0.0503 |
+
+    The cost follows CPU time, at about **0.01 USD per CPU-second** (about 36 USD per CPU-hour). Wall time and bytes written cost next to nothing. `config/pricing.yaml` prices a sandbox like cpu-d3 (`vcpu: 0.015` per hour, about 0.078 USD per hour for the instance), so a CPU-bound 30-minute exec on 4 vCPU would be estimated at about 0.04 USD and reported at about 72 USD. Whether `cost` is what the invoice bills (Sandboxes is in beta) is not known: check it against the billing page.
+- **Decision:** A-51's C (an input-size check before starting) is dropped: there is no small disk to compare with. The October ENOSPC was not `/tmp` running out. It may have been `/dev/shm` or the platform's own staging; A-51 classifies it either way. Open, and blocking for a December deploy that runs experiments in Sandboxes: compare `cost` with the invoice, then price sandboxes per CPU-second in `config/pricing.yaml` (or read the reported `cost` into the ledger) so the budget check holds (invariant 7).
