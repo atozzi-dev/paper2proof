@@ -18,6 +18,7 @@
 | S12 | PASS | pytorch 2.5.1 CUDA image: create → start 3 min 38 s (under 240 s); CUDA available |
 | S13 | pending | — |
 | S14 | **PASS** (2026-10-29, on the imported runner-cpu) | Sandboxes can run an exec job: files API, root-owned read-only mounts, `setpriv` to uid 10001, 8 MiB of stdout, cancel, env echoed. Instances are **4 vCPU, ~3.8 GiB RAM** (`SANDBOX_PRESET = 4vcpu-4gb`). Phase 5 (the job command on the imported runner-cpu) runs after the import |
+| S15 | PASS (2026-11-20) | A sandbox's `/tmp` took 48 GiB (the spike's cap) with no error: the root is a virtiofs reporting ~46 TiB free, so no input-size check against a disk size (A-51's C) is needed; the platform charged 0.107 USD for this ~2-minute instance |
 
 ## S1 — Token Factory account and credits can be activated from Italy
 
@@ -296,3 +297,23 @@
   - The Sandboxes importer fails on the image referenced by digest: `HTTP 404 NAME_UNKNOWN ... Entity Folder not found for registry`. It imports the same image by tag (about 1-2 minutes). Before recording, `docker buildx imagetools inspect <registry>/p2p-runner-cpu:cf50c98` showed `Digest: sha256:4f4c1deb...`, so the UUID is the digest's image (invariant 8). `scripts/sandbox_import.py --pull-tag` does this.
   - Registry credentials for the import: a CONTAINER_REGISTRY static key (7 days) of `sa-registry-pull`, in a group with `viewer` on the p2p-sandbox registry only. That is enough to pull (`docker manifest inspect` works with it).
 - **Decision:** the gate passes: `P2P_EXEC_BACKEND=sandboxes` may run. The mapping is in `config/sandbox_images.yaml`.
+
+## S15 — How much disk does a Sandboxes instance give a job?
+
+- **Question:** the 2026-10-30 eval lost InterpretML to "No space left on device" in a sandbox (A-51). How much can a job write, and does A-51's follow-up C (compare the inputs' size with the disk before starting) need a number?
+- **Command:** `uv run python spikes/s15_sandbox_disk.py` (Windows, 2026-11-20, image `de30e883-94c8-380f-b9d7-b39c2c64a361`, the last one in `config/sandbox_images.yaml`).
+- **Output (key facts):**
+  ```
+  status SUCCESS in 128.2 s
+  df -PkT: rootfs virtiofs 50000000000 KiB, 48782395272 KiB available, mounted on /
+           /dev devtmpfs 2014808 KiB, /dev/shm tmpfs 2017372 KiB
+  /tmp, /work, /mnt/run, /root: all on / (48782395272 KiB available)
+  dd 64 MiB blocks into /tmp, conv=fsync: exit 0, 51539607552 bytes (48 GiB, the --cap-gib) in 85 s, 610 MB/s
+  resources.cost 0.10733749
+  VERDICT: PASS
+  ```
+- **Facts:**
+  - Every path a job writes sits on a shared virtiofs root that reports about 46 TiB free; 48 GiB went in without an error. The only small filesystems are `/dev/shm` (about 1.9 GiB, tmpfs, so counted against the ~3.8 GiB of RAM) and `/dev`.
+  - The run printed `exit_code None` because the spike read `result.exit_code`; the exit code lives in `result.state.exit_code` (where `SandboxesJobBackend` reads it). The spike is fixed; the measurement does not depend on it.
+  - The per-operation `cost` was **0.107 USD** for about 93 s of instance time (11 s of CPU) and 48 GiB written. `config/pricing.yaml` prices a sandbox like cpu-d3 (about 0.078 USD per hour). One data point cannot say whether the charge follows time or bytes written.
+- **Decision:** A-51's C (an input-size check before starting) is dropped: there is no small disk to compare with. The October ENOSPC was not `/tmp` running out. It may have been `/dev/shm` or the platform's own staging; A-51 classifies it either way. Open: reconcile the sandbox price (one control run of `sleep 90` with no writes would separate time from bytes) before trusting the ledger's sandbox estimates.

@@ -49,6 +49,29 @@ which worked on the first call.
 
 ## Token Factory Sandboxes
 
+### 2026-11-20 — The program can write 48 GiB, yet inputs ran out of disk; the cost of a run is not explained
+- **Context:** spike S15 (`spikes/s15_sandbox_disk.py`, A-52): measuring the disk of an
+  instance on the imported runner-cpu image, networking disabled, to size an input check
+  after the 2026-10-30 ENOSPC above.
+- **What happened:** `df` shows the root as a `virtiofs` with 50000000000 KiB (about 46 TiB)
+  and 3% used; `/tmp`, `/work`, `/mnt/run` and `/root` all sit on it. `dd` wrote 48 GiB into
+  `/tmp` (the spike's cap) in 85 s with no error. The October failure, about 5 s after start
+  with no exit code and `No space left on device (os error 28)` in the operation's `error`, so
+  came from something else: most likely the staging of the mounted input files, or the
+  `instance_max_layer_bytes` limit (12 GiB). Neither is described. The operation reported
+  `resources.cost` 0.107 USD for about 93 s of instance time (11 s of CPU, 48 GiB written),
+  while a sub-second instance in S14 cost about 0.001 USD.
+- **Expected:** a documented limit for each place a job's bytes go (mounted files, the image
+  layer, the root filesystem, `/dev/shm`), and a price list that says what `cost` is made of
+  (instance time, CPU, bytes written).
+- **Impact:** a client cannot check its inputs against a limit before it starts, and cannot
+  estimate a run's cost: our budget prices a sandbox like a cpu-d3 VM (about 0.078 USD per
+  hour), which this one run exceeds about 50 times.
+- **Suggestion:** publish the per-instance limits (`df` reporting the host's shared filesystem
+  misleads), name the limit an ENOSPC hit in the operation's error, and document the billing
+  formula behind `resources.cost`.
+- **Severity:** major
+
 ### 2026-10-30 — An instance runs out of disk with no limit documented, and only the operation says so
 - **Context:** eval set B, InterpretML (1909.09223): smoke runs of an experiment with
   `interpret`, `lightgbm` and `xgboost` installed, the authors' repository and a parquet
